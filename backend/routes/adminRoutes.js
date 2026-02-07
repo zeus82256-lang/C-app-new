@@ -1072,11 +1072,13 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     });
 
     // =========================================================
-    // 🔄 TRANSFER ALL OWNERSHIP (ADMIN ONLY)
+    // 🔄 TRANSFER ALL OWNERSHIP (ADMIN ONLY) - 🔥 FIXED PATH CONFLICT
     // =========================================================
-    app.put('/api/admin/novels/transfer-all-ownership', verifyAdmin, async (req, res) => {
-        // Ensure requester is admin (Middleware already checks verifyAdmin, but explicit role check is safer)
-        if (req.user.role !== 'admin') {
+    // Use a unique path to avoid collision with /api/admin/novels/:id
+    app.put('/api/admin/ownership/transfer-all', verifyAdmin, async (req, res) => {
+        // Double check admin role via DB to be safe
+        const requestUser = await User.findById(req.user.id);
+        if (!requestUser || requestUser.role !== 'admin') {
             return res.status(403).json({ message: "Access Denied. Admins only." });
         }
 
