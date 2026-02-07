@@ -665,34 +665,112 @@ module.exports = function(app, verifyToken, upload) {
         }
     });
 
+    // 🔥🔥🔥 LIGHTWEIGHT NOVEL DETAILS (ROCKET SPEED - NO CHAPTERS ARRAY) 🔥🔥🔥
     app.get('/api/novels/:id', async (req, res) => {
         try {
             if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ message: 'Invalid ID' });
             
-            let novelDoc = await Novel.findById(req.params.id).lean();
-            if (!novelDoc) return res.status(404).json({ message: 'Novel not found' });
-            
             const role = getUserRole(req);
+
+            // 🚀 AGGREGATION PIPELINE FOR SPEED & EXCLUDING CHAPTERS 🚀
+            const pipeline = [
+                { $match: { _id: new mongoose.Types.ObjectId(req.params.id) } },
+                {
+                    $project: {
+                        title: 1,
+                        titleEn: 1,
+                        author: 1,
+                        authorEmail: 1,
+                        cover: 1,
+                        description: 1,
+                        category: 1,
+                        tags: 1,
+                        status: 1,
+                        rating: 1,
+                        views: 1,
+                        favorites: 1,
+                        lastChapterUpdate: 1,
+                        createdAt: 1,
+                        sourceUrl: 1,
+                        sourceStatus: 1,
+                        isWatched: 1,
+                        // 🔥 Calculate count in DB, do NOT return array
+                        chaptersCount: { $size: { $ifNull: ["$chapters", []] } }
+                    }
+                }
+            ];
+
+            const result = await Novel.aggregate(pipeline);
+            if (!result || result.length === 0) return res.status(404).json({ message: 'Novel not found' });
+            
+            const novelDoc = result[0];
+
             if (novelDoc.status === 'خاصة' && role !== 'admin') {
                 return res.status(403).json({ message: "Access Denied" });
             }
 
+            // Sync status check (Async, detached from response speed)
             checkNovelStatus(await Novel.findById(req.params.id)); 
-
-            if (role !== 'admin') {
-                if (novelDoc.chapters) {
-                    novelDoc.chapters = novelDoc.chapters.filter(c => !isChapterHidden(c.title));
-                }
-            } else {
-                if (novelDoc.chapters) {
-                    novelDoc.chapters.sort((a, b) => b.number - a.number);
-                }
-            }
-
-            novelDoc.chaptersCount = novelDoc.chapters ? novelDoc.chapters.length : 0;
             
             res.json(novelDoc);
         } catch (error) {
+            res.status(500).json({ message: error.message });
+        }
+    });
+
+    // 🔥🔥🔥 PAGINATED CHAPTER LIST (SERVER-SIDE LAZY LOADING) 🔥🔥🔥
+    app.get('/api/novels/:id/chapters-list', async (req, res) => {
+        try {
+            const { id } = req.params;
+            const page = parseInt(req.query.page) || 1;
+            const limit = parseInt(req.query.limit) || 25;
+            const sortOrder = req.query.sort === 'desc' ? -1 : 1; // Default Ascending (1, 2, 3...)
+            const skip = (page - 1) * limit;
+            
+            const role = getUserRole(req);
+
+            // Using aggregation to efficiently unwrap, sort, and slice the array
+            const pipeline = [
+                { $match: { _id: new mongoose.Types.ObjectId(id) } },
+                
+                // 1. Unwind the chapters array to documents
+                { $unwind: "$chapters" },
+
+                // 2. Filter hidden chapters (if not admin)
+                ...(role !== 'admin' ? [{
+                    $match: {
+                        $and: [
+                            { "chapters.title": { $not: { $regex: /chapter|ago|month|week|day|year/i } } }
+                            // Add more filters here if needed based on isChapterHidden logic
+                        ]
+                    }
+                }] : []),
+
+                // 3. Sort by number
+                { $sort: { "chapters.number": sortOrder } },
+
+                // 4. Project only needed fields (Metadata only, NO content)
+                {
+                    $project: {
+                        _id: "$chapters._id",
+                        number: "$chapters.number",
+                        title: "$chapters.title",
+                        createdAt: "$chapters.createdAt",
+                        views: "$chapters.views"
+                    }
+                },
+
+                // 5. Pagination
+                { $skip: skip },
+                { $limit: limit }
+            ];
+
+            const chapters = await Novel.aggregate(pipeline);
+
+            res.json(chapters);
+
+        } catch (error) {
+            console.error("Chapters List Error:", error);
             res.status(500).json({ message: error.message });
         }
     });
