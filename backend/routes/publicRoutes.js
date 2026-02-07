@@ -345,6 +345,32 @@ module.exports = function(app, verifyToken, upload) {
     // 👤 USER PROFILE API
     // =========================================================
 
+    // 🔥🔥🔥 LIGHTWEIGHT PUBLIC PROFILE (ROCKET SPEED FOR AUTHOR WIDGET) 🔥🔥🔥
+    app.get('/api/user/public-profile', async (req, res) => {
+        try {
+            const { email, userId } = req.query;
+            let query = {};
+            
+            if (userId) {
+                if (!mongoose.Types.ObjectId.isValid(userId)) return res.status(400).json({ message: "Invalid ID" });
+                query._id = userId;
+            } else if (email) {
+                query.email = email.toLowerCase(); // Ensure case insensitivity
+            } else {
+                return res.status(400).json({ message: "Identifier required" });
+            }
+
+            // Fetch ONLY basic info, NO calculations
+            const user = await User.findOne(query).select('name email picture banner bio role createdAt isHistoryPublic');
+            
+            if (!user) return res.status(404).json({ message: "User not found" });
+
+            res.json({ user }); 
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
     app.put('/api/user/profile', verifyToken, async (req, res) => {
         try {
             const { name, bio, banner, picture, isHistoryPublic, email } = req.body;
