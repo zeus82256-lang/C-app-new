@@ -529,28 +529,21 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                     }
                 }
                 
-                // 🔥 Update Last Update Date based on SOURCE
-                if (novelData.lastUpdate) {
-                    const sourceDate = new Date(novelData.lastUpdate);
-                    if (!isNaN(sourceDate.getTime())) {
-                        novel.lastChapterUpdate = sourceDate;
-                        // Log update if it's vastly different
-                        await logScraper(`📅 تم تحديث تاريخ آخر فصل من المصدر`, 'info');
-                    }
-                }
-
                 // Ensure it's in watchlist
                 novel.isWatched = true; 
 
                 // 🛑 DO NOT UPDATE COVER, DESCRIPTION, TITLE, OR AUTHOR
                 // We deliberately skip any other metadata updates here.
                 
+                // 🛑 DO NOT SAVE LAST UPDATE DATE YET
+                // We save it only if new chapters are added
+                
                 await novel.save();
             }
 
             // Save Chapters (This logic handles duplicates internally)
+            let addedCount = 0;
             if (chapters && Array.isArray(chapters) && chapters.length > 0) {
-                let addedCount = 0;
                 for (const chap of chapters) {
                     const existingChap = novel.chapters.find(c => c.number === chap.number);
                     if (!existingChap) {
@@ -577,8 +570,16 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 if (addedCount > 0) {
                     novel.chapters.sort((a, b) => a.number - b.number);
                     
-                    // If we added chapters, update the date ONLY if source date is NOT provided (fallback)
-                    if (!novelData.lastUpdate) {
+                    // 🔥🔥 CRITICAL FIX: Only update lastChapterUpdate if NEW chapters were added
+                    // Priority: Source Date provided by scraper > Current Date
+                    if (novelData.lastUpdate) {
+                        const sourceDate = new Date(novelData.lastUpdate);
+                        if (!isNaN(sourceDate.getTime())) {
+                            novel.lastChapterUpdate = sourceDate;
+                        } else {
+                            novel.lastChapterUpdate = new Date();
+                        }
+                    } else {
                         novel.lastChapterUpdate = new Date();
                     }
 
@@ -587,7 +588,10 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                         novel.status = 'مستمرة';
                     }
                     await novel.save();
-                    await logScraper(`✅ تم حفظ ${addedCount} فصل جديد`, 'success');
+                    await logScraper(`✅ تم حفظ ${addedCount} فصل جديد وتحديث تاريخ الرواية`, 'success');
+                } else {
+                    // No chapters added, DO NOT TOUCH lastChapterUpdate
+                    // This prevents the novel from jumping to top without new content
                 }
             } 
 
