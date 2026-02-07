@@ -692,10 +692,6 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         }
     });
 
-    // ... (Keep existing User/Novel/Chapter management routes as they are) ...
-    // Note: I am not deleting the rest of the file, just showing the modified part and assuming the rest is appended in the real file or maintained. 
-    // To satisfy "Write Full Code", I will include the rest of standard CRUD routes below.
-
     // Users Management
     app.get('/api/admin/users', verifyAdmin, async (req, res) => {
         if (req.user.role !== 'admin') return res.status(403).json({ message: "Access Denied" });
@@ -957,6 +953,95 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
             res.json({ message: `Deleted ${chapterNumbers.length} chapters` });
         } catch (error) {
             res.status(500).json({ error: error.message });
+        }
+    });
+
+    // =========================================================
+    // 📦 EXPORT CHAPTERS TO ZIP (ADMIN ONLY)
+    // =========================================================
+    app.get('/api/admin/novels/:id/export', verifyToken, verifyAdmin, async (req, res) => {
+        try {
+            const novelId = req.params.id;
+            const novel = await Novel.findById(novelId);
+            if (!novel) return res.status(404).json({ message: "Novel not found" });
+
+            const settings = await Settings.findOne({ user: req.user.id }) || {};
+            const zip = new AdmZip();
+
+            // Sort chapters by number
+            novel.chapters.sort((a, b) => a.number - b.number);
+
+            for (const chap of novel.chapters) {
+                let content = "";
+                // Fetch content from Firestore
+                if (firestore) {
+                    const doc = await firestore.collection('novels').doc(novelId).collection('chapters').doc(chap.number.toString()).get();
+                    if (doc.exists) content = doc.data().content || "";
+                }
+
+                // --- Apply Formatting Rules ---
+
+                // 1. Blocklist Cleaning
+                if (settings.globalBlocklist && settings.globalBlocklist.length > 0) {
+                     settings.globalBlocklist.forEach(word => {
+                        if (!word) return;
+                        if (word.includes('\n') || word.includes('\r')) {
+                            content = content.split(word).join('');
+                        } else {
+                            const escapedKeyword = escapeRegExp(word);
+                            const regex = new RegExp(`^.*${escapedKeyword}.*$`, 'gm');
+                            content = content.replace(regex, '');
+                        }
+                     });
+                }
+                
+                // 2. Separator Line under "Chapter" or "الفصل"
+                const separatorLine = "\n______________________\n";
+                const internalTitleRegex = /(^|\n)(.*(?:الفصل|Chapter).*?)(\n|$)/gi;
+                if (internalTitleRegex.test(content)) {
+                     content = content.replace(internalTitleRegex, '$1$2' + separatorLine + '$3');
+                }
+
+                // 3. Copyright Logic
+                let showCopyright = true;
+                const freq = settings.copyrightFrequency || 'always';
+                const everyX = settings.copyrightEveryX || 5;
+                if (freq === 'random' && Math.random() > 0.5) showCopyright = false;
+                if (freq === 'every_x' && chap.number % everyX !== 0) showCopyright = false;
+
+                let finalContent = "";
+                
+                // Add Start Copyright
+                if (showCopyright && settings.globalChapterStartText) {
+                    finalContent += settings.globalChapterStartText + "\n\n";
+                }
+                
+                // Add Title if not present in content, or just standard header
+                // Usually content already has title, but let's be safe and ensure the structure
+                // We add the Chapter Title from metadata as a header for the file
+                finalContent += (chap.title || `Chapter ${chap.number}`) + "\n\n";
+                
+                finalContent += content;
+
+                // Add End Copyright
+                if (showCopyright && settings.globalChapterEndText) {
+                    finalContent += "\n\n" + settings.globalChapterEndText;
+                }
+
+                // Add to ZIP (FileName: 1.txt, 2.txt...)
+                zip.addFile(`${chap.number}.txt`, Buffer.from(finalContent, "utf8"));
+            }
+
+            const zipBuffer = zip.toBuffer();
+            
+            res.set('Content-Type', 'application/zip');
+            res.set('Content-Disposition', `attachment; filename=${novelId}_chapters.zip`);
+            res.set('Content-Length', zipBuffer.length);
+            res.send(zipBuffer);
+
+        } catch (e) {
+            console.error("Export Error:", e);
+            res.status(500).json({ error: e.message });
         }
     });
 };
