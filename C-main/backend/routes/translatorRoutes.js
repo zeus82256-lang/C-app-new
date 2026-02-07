@@ -1,0 +1,524 @@
+
+const mongoose = require('mongoose');
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+const Novel = require('../models/novel.model.js');
+const Glossary = require('../models/glossary.model.js');
+const TranslationJob = require('../models/translationJob.model.js');
+const Settings = require('../models/settings.model.js');
+
+// --- Firestore Setup (MANDATORY) ---
+let firestore;
+try {
+    const firebaseAdmin = require('../config/firebaseAdmin');
+    firestore = firebaseAdmin.db;
+} catch (e) {
+    console.error("❌ CRITICAL: Firestore not loaded. Translator cannot work without it.");
+}
+
+// --- Helper: Delay ---
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// --- THE TRANSLATION WORKER (STRICT FIRESTORE MODE) ---
+async function processTranslationJob(jobId) {
+    try {
+        const job = await TranslationJob.findById(jobId);
+        if (!job || job.status !== 'active') return;
+
+        if (!firestore) {
+            job.status = 'failed';
+            job.logs.push({ message: 'خطأ خادم: قاعدة بيانات النصوص (Firestore) غير متصلة', type: 'error' });
+            await job.save();
+            return;
+        }
+
+        const novel = await Novel.findById(job.novelId);
+        if (!novel) {
+            job.status = 'failed';
+            job.logs.push({ message: 'الرواية لم تعد موجودة', type: 'error' });
+            await job.save();
+            return;
+        }
+
+        const settings = await Settings.findOne({}); 
+        let keys = (job.apiKeys && job.apiKeys.length > 0) ? job.apiKeys : (settings?.translatorApiKeys || []);
+        
+        if (!keys || keys.length === 0) {
+            job.status = 'failed';
+            job.logs.push({ message: 'لا توجد مفاتيح API محفوظة.', type: 'error' });
+            await job.save();
+            return;
+        }
+
+        let keyIndex = 0;
+        const transPrompt = settings?.customPrompt || "You are a professional translator. Translate the novel chapter from English to Arabic. Output ONLY the Arabic translation. Use the glossary provided.";
+        const extractPrompt = settings?.translatorExtractPrompt || "Analyze the English source and Arabic translation. Extract important proper nouns, cultivation terms, and skills. Output JSON: { \"newTerms\": [{\"term\": \"English\", \"translation\": \"Arabic\", \"category\": \"other\", \"description\": \"\"}] }";
+        let selectedModel = settings?.translatorModel || 'gemini-1.5-flash'; 
+
+        const chaptersToProcess = job.targetChapters.sort((a, b) => a - b);
+
+        for (const chapterNum of chaptersToProcess) {
+            const freshJob = await TranslationJob.findById(jobId);
+            // 🔥 Check for pause or stop
+            if (!freshJob || freshJob.status !== 'active') {
+                if (freshJob && freshJob.status === 'paused') {
+                    await pushLog(jobId, `⏸️ تم إيقاف المهمة مؤقتاً عند الفصل ${chapterNum}`, 'warning');
+                }
+                break;
+            }
+
+            const freshNovel = await Novel.findById(job.novelId);
+            const chapterIndex = freshNovel.chapters.findIndex(c => c.number === chapterNum);
+            
+            if (chapterIndex === -1) {
+                await pushLog(jobId, `فصل ${chapterNum} غير موجود في الفهرس`, 'warning');
+                continue;
+            }
+
+            let sourceContent = ""; 
+            try {
+                const docRef = firestore.collection('novels').doc(freshNovel._id.toString()).collection('chapters').doc(chapterNum.toString());
+                const docSnap = await docRef.get();
+                if (docSnap.exists) {
+                    const data = docSnap.data();
+                    sourceContent = data.content || "";
+                }
+            } catch (fsErr) {
+                console.log(`Firestore fetch error for Ch ${chapterNum}:`, fsErr.message);
+            }
+
+            if (!sourceContent || sourceContent.trim().length === 0) {
+                 await pushLog(jobId, `تخطي الفصل ${chapterNum}: المحتوى غير موجود في السيرفر (Firestore)`, 'warning');
+                 continue;
+            }
+
+            const glossaryItems = await Glossary.find({ novelId: freshNovel._id });
+            const glossaryText = glossaryItems.map(g => `"${g.term}": "${g.translation}"`).join(',\n');
+
+            const getModel = () => {
+                const currentKey = keys[keyIndex % keys.length];
+                const genAI = new GoogleGenerativeAI(currentKey);
+                return genAI.getGenerativeModel({ model: selectedModel });
+            };
+
+            let translatedText = "";
+
+            try {
+                await pushLog(jobId, `1️⃣ جاري ترجمة الفصل ${chapterNum}...`, 'info');
+                
+                const model = getModel();
+                const translationInput = `
+${transPrompt}
+
+--- GLOSSARY (Use these strictly) ---
+${glossaryText}
+-------------------------------------
+
+--- ENGLISH TEXT TO TRANSLATE ---
+${sourceContent}
+---------------------------------
+`;
+                const result = await model.generateContent(translationInput);
+                const response = await result.response;
+                translatedText = response.text();
+
+            } catch (err) {
+                console.error(err);
+                if (err.message.includes('429') || err.message.includes('quota')) {
+                    keyIndex++;
+                    await pushLog(jobId, `⚠️ ضغط على المفتاح، تبديل وإعادة المحاولة...`, 'warning');
+                    await delay(5000);
+                    chaptersToProcess.unshift(chapterNum);
+                    continue;
+                }
+                await pushLog(jobId, `❌ فشل الترجمة للفصل ${chapterNum}: ${err.message}`, 'error');
+                continue; 
+            }
+
+            try {
+                await pushLog(jobId, `2️⃣ جاري استخراج المصطلحات...`, 'info');
+                
+                keyIndex++; 
+                const modelJSON = getModel();
+                modelJSON.generationConfig = { responseMimeType: "application/json" };
+
+                const extractionInput = `
+${extractPrompt}
+
+--- ENGLISH SOURCE ---
+${sourceContent.substring(0, 8000)} 
+--- ARABIC TRANSLATION ---
+${translatedText.substring(0, 8000)}
+--------------------------
+`; 
+                const resultExt = await modelJSON.generateContent(extractionInput);
+                const responseExt = await resultExt.response;
+                const jsonExt = JSON.parse(responseExt.text());
+
+                if (jsonExt.newTerms && Array.isArray(jsonExt.newTerms)) {
+                    let newTermsCount = 0;
+                    for (const termObj of jsonExt.newTerms) {
+                        if (termObj.term && termObj.translation) {
+                            await Glossary.updateOne(
+                                { novelId: freshNovel._id, term: termObj.term }, 
+                                { 
+                                    $set: { 
+                                        translation: termObj.translation,
+                                        category: termObj.category || 'other',
+                                        description: termObj.description || ''
+                                    },
+                                    $setOnInsert: { autoGenerated: true }
+                                },
+                                { upsert: true }
+                            );
+                            newTermsCount++;
+                        }
+                    }
+                    if (newTermsCount > 0) await pushLog(jobId, `✅ تم إضافة/تحديث ${newTermsCount} مصطلح للمسرد`, 'success');
+                }
+
+                try {
+                    await firestore.collection('novels').doc(freshNovel._id.toString())
+                        .collection('chapters').doc(chapterNum.toString())
+                        .set({
+                            title: `الفصل ${chapterNum}`,
+                            content: translatedText,
+                            lastUpdated: new Date()
+                        }, { merge: true });
+                    
+                } catch (fsSaveErr) {
+                    throw new Error(`فشل الحفظ في Firestore: ${fsSaveErr.message}`);
+                }
+
+                const updates = { 
+                    $set: { 
+                        "chapters.$.title": `الفصل ${chapterNum}`,
+                        "lastChapterUpdate": new Date() // 🔥 TRIGGER UPDATE VISIBILITY
+                    } 
+                };
+
+                if (freshNovel.status === 'خاصة') {
+                    updates.$set.status = 'مستمرة';
+                    await pushLog(jobId, `🔓 تم تغيير حالة الرواية إلى 'عامه' لأن فصل تم ترجمته`, 'success');
+                }
+
+                await Novel.findOneAndUpdate(
+                    { _id: freshNovel._id, "chapters.number": chapterNum },
+                    updates
+                );
+
+                await TranslationJob.findByIdAndUpdate(jobId, {
+                    $inc: { translatedCount: 1 },
+                    $set: { currentChapter: chapterNum, lastUpdate: new Date() },
+                    $pull: { targetChapters: chapterNum } 
+                });
+
+                await pushLog(jobId, `🎉 تم إنجاز الفصل ${chapterNum} وحفظه في السيرفر`, 'success');
+
+            } catch (err) {
+                console.error("Extraction/Save Error:", err);
+                
+                if (translatedText) {
+                    try {
+                        await firestore.collection('novels').doc(freshNovel._id.toString())
+                            .collection('chapters').doc(chapterNum.toString())
+                            .set({ content: translatedText }, { merge: true });
+                        
+                        const updates = { 
+                            $set: { 
+                                "chapters.$.title": `الفصل ${chapterNum}`,
+                                "lastChapterUpdate": new Date() // 🔥 TRIGGER UPDATE VISIBILITY
+                            } 
+                        };
+                        
+                        if (freshNovel.status === 'خاصة') updates.$set.status = 'مستمرة';
+
+                        await Novel.findOneAndUpdate(
+                            { _id: freshNovel._id, "chapters.number": chapterNum },
+                            updates
+                        );
+
+                        await TranslationJob.findByIdAndUpdate(jobId, {
+                            $pull: { targetChapters: chapterNum }
+                        });
+
+                        await pushLog(jobId, `⚠️ تم حفظ الترجمة (فشل الاستخراج): ${err.message}`, 'warning');
+                    } catch (saveErr) {
+                        await pushLog(jobId, `❌ فشل الحفظ النهائي: ${saveErr.message}`, 'error');
+                    }
+                } else {
+                    await pushLog(jobId, `❌ فشل العملية: ${err.message}`, 'error');
+                }
+            }
+
+            await delay(2000); 
+        }
+
+        const finalJob = await TranslationJob.findById(jobId);
+        if (finalJob.status === 'active') {
+            await TranslationJob.findByIdAndUpdate(jobId, { status: 'completed' });
+            await pushLog(jobId, `🏁 اكتملت جميع الفصول!`, 'success');
+        }
+
+    } catch (e) {
+        console.error("Worker Critical Error:", e);
+        await TranslationJob.findByIdAndUpdate(jobId, { status: 'failed' });
+    }
+}
+
+async function pushLog(jobId, message, type) {
+    await TranslationJob.findByIdAndUpdate(jobId, {
+        $push: { logs: { message, type, timestamp: new Date() } }
+    });
+}
+
+// ... (Rest of routes unchanged) ...
+module.exports = function(app, verifyToken, verifyAdmin) {
+
+    mongoose.connection.once('open', async () => {
+        try {
+            const collection = mongoose.connection.db.collection('glossaries');
+            const indexes = await collection.indexes();
+            if (indexes.some(idx => idx.name === 'user_1_key_1')) {
+                await collection.dropIndex('user_1_key_1');
+                console.log('✅ Deleted old conflicting index: user_1_key_1');
+            }
+        } catch (err) {
+            console.log('ℹ️ No old indexes to delete or already cleaned.');
+        }
+    });
+
+    // 1. Get Novels
+    app.get('/api/translator/novels', verifyToken, async (req, res) => {
+        try {
+            const { search } = req.query;
+            let query = {};
+            if (search) {
+                query.title = { $regex: search, $options: 'i' };
+            }
+            
+            const novels = await Novel.find(query)
+                .select('title cover chapters author status createdAt')
+                .sort({ createdAt: -1 }) 
+                .limit(15);
+            
+            res.json(novels);
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // 2. Start Job
+    app.post('/api/translator/start', verifyToken, verifyAdmin, async (req, res) => {
+        try {
+            const { novelId, chapters, apiKeys, resumeFrom, jobId } = req.body; 
+            
+            // 🔥 Resume existing job
+            if (jobId) {
+                const existingJob = await TranslationJob.findById(jobId);
+                if (!existingJob) return res.status(404).json({ message: "Job not found" });
+                
+                existingJob.status = 'active';
+                existingJob.logs.push({ message: '▶️ تم استئناف المهمة', type: 'info' });
+                await existingJob.save();
+                
+                processTranslationJob(existingJob._id);
+                return res.json({ message: "Job resumed", jobId: existingJob._id });
+            }
+
+            const novel = await Novel.findById(novelId);
+            if (!novel) return res.status(404).json({ message: "Novel not found" });
+
+            const userSettings = await Settings.findOne({ user: req.user.id });
+            const savedKeys = userSettings?.translatorApiKeys || [];
+            
+            const effectiveKeys = (apiKeys && apiKeys.length > 0) ? apiKeys : savedKeys;
+
+            if (effectiveKeys.length === 0) {
+                return res.status(400).json({ message: "No API keys found. Please add keys in Settings first." });
+            }
+
+            let targetChapters = [];
+            
+            if (resumeFrom) {
+                targetChapters = novel.chapters
+                    .filter(c => c.number >= resumeFrom)
+                    .map(c => c.number);
+            } else if (chapters === 'all') {
+                targetChapters = novel.chapters.map(c => c.number);
+            } else if (Array.isArray(chapters)) {
+                targetChapters = chapters;
+            }
+
+            const job = new TranslationJob({
+                novelId,
+                novelTitle: novel.title,
+                cover: novel.cover,
+                targetChapters,
+                totalToTranslate: targetChapters.length,
+                apiKeys: effectiveKeys,
+                logs: [{ message: `تم بدء المهمة (استهداف ${targetChapters.length} فصل) باستخدام ${effectiveKeys.length} مفتاح`, type: 'info' }]
+            });
+
+            await job.save();
+
+            processTranslationJob(job._id);
+
+            res.json({ message: "Job started", jobId: job._id });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // 🔥 Pause Job
+    app.post('/api/translator/jobs/:id/pause', verifyToken, verifyAdmin, async (req, res) => {
+        try {
+            const job = await TranslationJob.findById(req.params.id);
+            if (!job) return res.status(404).json({ message: "Job not found" });
+            
+            job.status = 'paused';
+            job.logs.push({ message: '⏸️ طلب إيقاف مؤقت من المستخدم...', type: 'warning' });
+            await job.save();
+            
+            res.json({ message: "Job paused" });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // 🔥 Delete Job
+    app.delete('/api/translator/jobs/:id', verifyToken, verifyAdmin, async (req, res) => {
+        try {
+            await TranslationJob.findByIdAndDelete(req.params.id);
+            res.json({ message: "Job deleted" });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // 3. Get Jobs List
+    app.get('/api/translator/jobs', verifyToken, verifyAdmin, async (req, res) => {
+        try {
+            const jobs = await TranslationJob.find()
+                .select('novelTitle cover status translatedCount totalToTranslate startTime') 
+                .sort({ updatedAt: -1 })
+                .limit(20);
+            
+            const uiJobs = jobs.map(j => ({
+                id: j._id,
+                novelTitle: j.novelTitle,
+                cover: j.cover,
+                status: j.status,
+                translated: j.translatedCount,
+                total: j.totalToTranslate,
+                startTime: j.startTime
+            }));
+            res.json(uiJobs);
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // 4. Get Job Details
+    app.get('/api/translator/jobs/:id', verifyToken, verifyAdmin, async (req, res) => {
+        try {
+            const job = await TranslationJob.findById(req.params.id);
+            if (!job) return res.status(404).json({message: "Job not found"});
+
+            const novel = await Novel.findById(job.novelId).select('chapters');
+            const maxChapter = novel ? (novel.chapters.length > 0 ? Math.max(...novel.chapters.map(c => c.number)) : 0) : 0;
+
+            const response = job.toObject();
+            response.novelMaxChapter = maxChapter;
+            
+            res.json(response);
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // 5. Manage Glossary
+    app.get('/api/translator/glossary/:novelId', verifyToken, async (req, res) => {
+        try {
+            const terms = await Glossary.find({ novelId: req.params.novelId });
+            res.json(terms);
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    app.post('/api/translator/glossary', verifyToken, verifyAdmin, async (req, res) => {
+        try {
+            const { novelId, term, translation, category, description } = req.body; 
+            const finalCategory = category && ['characters', 'locations', 'items', 'ranks', 'other'].includes(category) ? category : 'other';
+
+            const newTerm = await Glossary.findOneAndUpdate(
+                { novelId, term },
+                { 
+                    translation, 
+                    category: finalCategory,
+                    description: description || '',
+                    autoGenerated: false 
+                },
+                { new: true, upsert: true }
+            );
+            res.json(newTerm);
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    app.delete('/api/translator/glossary/:id', verifyToken, verifyAdmin, async (req, res) => {
+        try {
+            await Glossary.findByIdAndDelete(req.params.id);
+            res.json({ success: true });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+    
+    app.post('/api/translator/glossary/bulk-delete', verifyToken, verifyAdmin, async (req, res) => {
+        try {
+            const { ids } = req.body;
+            await Glossary.deleteMany({ _id: { $in: ids } });
+            res.json({ success: true });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // 6. Translator Settings API
+    app.get('/api/translator/settings', verifyToken, verifyAdmin, async (req, res) => {
+        try {
+            let settings = await Settings.findOne({ user: req.user.id });
+            if (!settings) settings = {};
+            res.json({
+                customPrompt: settings.customPrompt || '',
+                translatorExtractPrompt: settings.translatorExtractPrompt || '',
+                translatorModel: settings.translatorModel || 'gemini-1.5-flash',
+                translatorApiKeys: settings.translatorApiKeys || []
+            });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    app.post('/api/translator/settings', verifyToken, verifyAdmin, async (req, res) => {
+        try {
+            const { customPrompt, translatorExtractPrompt, translatorModel, translatorApiKeys } = req.body;
+            let settings = await Settings.findOne({ user: req.user.id });
+            if (!settings) {
+                settings = new Settings({ user: req.user.id });
+            }
+
+            if (customPrompt !== undefined) settings.customPrompt = customPrompt;
+            if (translatorExtractPrompt !== undefined) settings.translatorExtractPrompt = translatorExtractPrompt;
+            if (translatorModel !== undefined) settings.translatorModel = translatorModel;
+            if (translatorApiKeys !== undefined) settings.translatorApiKeys = translatorApiKeys;
+
+            await settings.save();
+            res.json({ success: true });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+};
