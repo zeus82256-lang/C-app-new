@@ -1,5 +1,6 @@
 
 
+
 // =================================================================
 // 1. التحميل اليدوي لمتغيرات البيئة
 // =================================================================
@@ -105,6 +106,9 @@ require('./routes/adminRoutes')(app, verifyToken, verifyAdmin, upload);
 
 // 🔥 تحميل مسارات المترجم الذكي
 require('./routes/translatorRoutes')(app, verifyToken, verifyAdmin);
+
+// 🔥 تحميل مسارات مولد العناوين
+require('./routes/titleGenRoutes')(app, verifyToken, verifyAdmin);
 
 // تحميل المسارات العامة
 require('./routes/publicRoutes')(app, verifyToken, upload);
