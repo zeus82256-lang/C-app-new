@@ -193,9 +193,11 @@ ${translatedText.substring(0, 8000)}
                     throw new Error(`فشل الحفظ في Firestore: ${fsSaveErr.message}`);
                 }
 
+                // 🔥🔥 FIX: Update createdAt to NOW so it triggers "New Chapter" logic
                 const updates = { 
                     $set: { 
                         "chapters.$.title": `الفصل ${chapterNum}`,
+                        "chapters.$.createdAt": new Date(), // Resetting date to make it appear as NEW
                         "lastChapterUpdate": new Date() 
                     } 
                 };
@@ -227,7 +229,15 @@ ${translatedText.substring(0, 8000)}
                             .collection('chapters').doc(chapterNum.toString())
                             .set({ content: translatedText }, { merge: true });
                         
-                        const updates = { $set: { "chapters.$.title": `الفصل ${chapterNum}` } };
+                        // 🔥 Also update createdAt on fallback save
+                        const updates = { 
+                            $set: { 
+                                "chapters.$.title": `الفصل ${chapterNum}`,
+                                "chapters.$.createdAt": new Date(),
+                                "lastChapterUpdate": new Date()
+                            } 
+                        };
+                        
                         if (freshNovel.status === 'خاصة') updates.$set.status = 'مستمرة';
 
                         await Novel.findOneAndUpdate(
