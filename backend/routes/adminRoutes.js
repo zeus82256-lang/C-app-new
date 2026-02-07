@@ -2,6 +2,7 @@
 const mongoose = require('mongoose');
 const path = require('path');
 const AdmZip = require('adm-zip');
+const jwt = require('jsonwebtoken'); // Required for manual token verification in export
 
 // --- Config Imports ---
 let firestore, cloudinary;
@@ -957,15 +958,38 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     });
 
     // =========================================================
-    // 📦 EXPORT CHAPTERS TO ZIP (ADMIN ONLY)
+    // 📦 EXPORT CHAPTERS TO ZIP (ADMIN ONLY) - 🔥 SERVER SIDE DOWNLOAD
     // =========================================================
-    app.get('/api/admin/novels/:id/export', verifyToken, verifyAdmin, async (req, res) => {
+    // Note: We bypass `verifyToken` middleware in main `app.use` by handling token check manually here
+    // This allows browser/native Linking to trigger download via URL with query param
+    app.get('/api/admin/novels/:id/export', async (req, res) => {
         try {
+            // 1. Manually verify token from Query Param (because Linking.openURL can't set Authorization Header)
+            const token = req.query.token;
+            if (!token) return res.status(401).json({ message: "Authentication required" });
+
+            try {
+                const decoded = jwt.verify(token, process.env.JWT_SECRET);
+                const user = await User.findById(decoded.id);
+                if (!user || (user.role !== 'admin' && user.role !== 'contributor')) {
+                    return res.status(403).json({ message: "Access Denied" });
+                }
+                // Also check if contributor owns the novel? For now assume admin/contributor can export.
+                req.user = user; 
+            } catch (authErr) {
+                return res.status(403).json({ message: "Invalid token" });
+            }
+
             const novelId = req.params.id;
             const novel = await Novel.findById(novelId);
             if (!novel) return res.status(404).json({ message: "Novel not found" });
 
-            const settings = await Settings.findOne({ user: req.user.id }) || {};
+            // Ensure ownership for contributors
+            if (req.user.role !== 'admin' && novel.authorEmail !== req.user.email) {
+                return res.status(403).json({ message: "Access Denied to this novel" });
+            }
+
+            const settings = await Settings.findOne({ user: req.user._id }) || {};
             const zip = new AdmZip();
 
             // Sort chapters by number
@@ -1017,7 +1041,6 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 }
                 
                 // Add Title if not present in content, or just standard header
-                // Usually content already has title, but let's be safe and ensure the structure
                 // We add the Chapter Title from metadata as a header for the file
                 finalContent += (chap.title || `Chapter ${chap.number}`) + "\n\n";
                 
@@ -1034,8 +1057,9 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
 
             const zipBuffer = zip.toBuffer();
             
+            // Set Headers for Download
             res.set('Content-Type', 'application/zip');
-            res.set('Content-Disposition', `attachment; filename=${novelId}_chapters.zip`);
+            res.set('Content-Disposition', `attachment; filename="${encodeURIComponent(novel.title)}_chapters.zip"`);
             res.set('Content-Length', zipBuffer.length);
             res.send(zipBuffer);
 
