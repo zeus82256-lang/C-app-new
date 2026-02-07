@@ -6,7 +6,7 @@ const User = require('../models/user.model.js');
 const Settings = require('../models/settings.model.js');
 
 // 🔥 قائمة الأدمن المسموح بهم حصراً
-const ADMIN_EMAILS = ["flaf.aboode@gmail.com", "zeus", "zeuss@gmail.com"];
+const ADMIN_EMAILS = ["flaf.aboode@gmail.com", "zeus", "zeus@gmail.com"];
 
 // Helper: Hash Password
 const hashPassword = (password) => {
@@ -177,7 +177,7 @@ module.exports = function(app, verifyToken) {
     const oauth2Client = new OAuth2Client(
         process.env.GOOGLE_CLIENT_ID,
         process.env.GOOGLE_CLIENT_SECRET,
-        "https://c-production-3db6.up.railway.app/auth/google/callback" 
+        "https://c-production-a9ce.up.railway.app/auth/google/callback" 
     );
 
     app.get('/auth/google', (req, res) => {
@@ -239,11 +239,11 @@ module.exports = function(app, verifyToken) {
                 const deepLink = state === 'mobile' ? `aplcionszeus://auth?token=${token}` : `${state}?token=${token}`;
                 res.redirect(deepLink);
             } else {
-                res.redirect(`https://c-production-3db6.up.railway.app/?token=${token}`);
+                res.redirect(`https://c-production-a9ce.up.railway.app/?token=${token}`);
             }
         } catch (error) {
             console.error('Auth error:', error);
-            res.redirect('https://c-production-3db6.up.railway.app/?auth_error=true');
+            res.redirect('https://c-production-a9ce.up.railway.app/?auth_error=true');
         }
     });
 
