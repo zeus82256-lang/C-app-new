@@ -117,7 +117,7 @@ ${transPrompt}
 ${glossaryText}
 -------------------------------------
 
---- ENGLISH TEXT TO TRANSLATE ---
+--- ENGLISH Text TO TRANSLATE ---
 ${sourceContent}
 ---------------------------------
 `;
@@ -296,22 +296,45 @@ module.exports = function(app, verifyToken, verifyAdmin) {
         }
     });
 
-    // 1. Get Novels
+    // 1. Get Novels (🔥 OPTIMIZED FOR LAZY LOADING & PERFORMANCE 🔥)
     app.get('/api/translator/novels', verifyToken, async (req, res) => {
         try {
-            const { search } = req.query;
+            const { search, page = 1, limit = 20 } = req.query;
+            const pageNum = parseInt(page);
+            const limitNum = parseInt(limit);
+            const skip = (pageNum - 1) * limitNum;
+
             let query = {};
             if (search) {
                 query.title = { $regex: search, $options: 'i' };
             }
             
-            const novels = await Novel.find(query)
-                .select('title cover chapters author status createdAt')
-                .sort({ createdAt: -1 }) 
-                .limit(15);
+            // 🔥🔥 AGGREGATION PIPELINE: 
+            // 1. Filter
+            // 2. Count chapters database-side ($size) without loading them
+            // 3. Exclude heavy fields like 'chapters', 'description' if not needed
+            const novels = await Novel.aggregate([
+                { $match: query },
+                {
+                    $project: {
+                        _id: 1,
+                        title: 1,
+                        cover: 1,
+                        author: 1,
+                        status: 1,
+                        createdAt: 1,
+                        // ⚡⚡ ROCKET SPEED: Get array size directly in DB engine
+                        chaptersCount: { $size: { $ifNull: ["$chapters", []] } } 
+                    }
+                },
+                { $sort: { createdAt: -1 } },
+                { $skip: skip },
+                { $limit: limitNum }
+            ]);
             
             res.json(novels);
         } catch (e) {
+            console.error("Translator Novels Error:", e);
             res.status(500).json({ error: e.message });
         }
     });
@@ -435,8 +458,14 @@ module.exports = function(app, verifyToken, verifyAdmin) {
             const job = await TranslationJob.findById(req.params.id);
             if (!job) return res.status(404).json({message: "Job not found"});
 
-            const novel = await Novel.findById(job.novelId).select('chapters');
-            const maxChapter = novel ? (novel.chapters.length > 0 ? Math.max(...novel.chapters.map(c => c.number)) : 0) : 0;
+            // Optimize fetching max chapter (don't load whole object if possible, but mongoose is okay here for single item)
+            // Use aggregation to just get the max number
+            const novelStats = await Novel.aggregate([
+                { $match: { _id: job.novelId } },
+                { $project: { maxChapter: { $max: "$chapters.number" } } }
+            ]);
+            
+            const maxChapter = (novelStats[0] && novelStats[0].maxChapter) ? novelStats[0].maxChapter : 0;
 
             const response = job.toObject();
             response.novelMaxChapter = maxChapter;
