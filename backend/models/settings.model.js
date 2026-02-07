@@ -22,6 +22,9 @@ const settingsSchema = new mongoose.Schema({
     translatorExtractPrompt: { type: String, default: '' },
     translatorApiKeys: [{ type: String }], // Global Keys for Translator
     
+    // 🔥 Title Generator Specific Settings
+    titleGenPrompt: { type: String, default: 'Read the following chapter content and suggest a short, engaging, and professional Arabic title for it (Maximum 6 words). Output ONLY the Arabic title string without any quotes, prefixes, or chapter numbers.' },
+
     // 🔥 Categories Management (Master List)
     managedCategories: [{ type: String }],
     
