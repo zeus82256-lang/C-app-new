@@ -1070,4 +1070,47 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
             res.status(500).json({ error: e.message });
         }
     });
+
+    // =========================================================
+    // 🔄 TRANSFER ALL OWNERSHIP (ADMIN ONLY)
+    // =========================================================
+    app.put('/api/admin/novels/transfer-all-ownership', verifyAdmin, async (req, res) => {
+        // Ensure requester is admin (Middleware already checks verifyAdmin, but explicit role check is safer)
+        if (req.user.role !== 'admin') {
+            return res.status(403).json({ message: "Access Denied. Admins only." });
+        }
+
+        const { targetUserId } = req.body;
+        
+        if (!targetUserId) {
+            return res.status(400).json({ message: "Target User ID is required" });
+        }
+
+        try {
+            // 1. Fetch Target User to get details
+            const targetUser = await User.findById(targetUserId);
+            if (!targetUser) {
+                return res.status(404).json({ message: "Target User not found" });
+            }
+
+            // 2. Update ALL novels in the database
+            // We update 'author' (name) and 'authorEmail' to match the target user
+            const result = await Novel.updateMany({}, {
+                $set: {
+                    author: targetUser.name,
+                    authorEmail: targetUser.email
+                }
+            });
+
+            res.json({ 
+                message: "Ownership transferred successfully", 
+                modifiedCount: result.modifiedCount,
+                newOwner: targetUser.name
+            });
+
+        } catch (error) {
+            console.error("Transfer Ownership Error:", error);
+            res.status(500).json({ error: error.message });
+        }
+    });
 };
