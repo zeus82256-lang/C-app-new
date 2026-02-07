@@ -966,6 +966,8 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         try {
             // 1. Manually verify token from Query Param (because Linking.openURL can't set Authorization Header)
             const token = req.query.token;
+            const includeTitle = req.query.includeTitle === 'true'; // Check if title should be included in content
+
             if (!token) return res.status(401).json({ message: "Authentication required" });
 
             try {
@@ -974,7 +976,6 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 if (!user || (user.role !== 'admin' && user.role !== 'contributor')) {
                     return res.status(403).json({ message: "Access Denied" });
                 }
-                // Also check if contributor owns the novel? For now assume admin/contributor can export.
                 req.user = user; 
             } catch (authErr) {
                 return res.status(403).json({ message: "Invalid token" });
@@ -1035,20 +1036,21 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
 
                 let finalContent = "";
                 
-                // Add Start Copyright
+                // Add Start Copyright + Separator UNDER it
                 if (showCopyright && settings.globalChapterStartText) {
-                    finalContent += settings.globalChapterStartText + "\n\n";
+                    finalContent += settings.globalChapterStartText + separatorLine + "\n";
                 }
                 
-                // Add Title if not present in content, or just standard header
-                // We add the Chapter Title from metadata as a header for the file
-                finalContent += (chap.title || `Chapter ${chap.number}`) + "\n\n";
+                // Add Title (Optional)
+                if (includeTitle) {
+                     finalContent += (chap.title || `Chapter ${chap.number}`) + "\n\n";
+                }
                 
                 finalContent += content;
 
-                // Add End Copyright
+                // Add End Copyright + Separator ABOVE it
                 if (showCopyright && settings.globalChapterEndText) {
-                    finalContent += "\n\n" + settings.globalChapterEndText;
+                    finalContent += "\n" + separatorLine + settings.globalChapterEndText;
                 }
 
                 // Add to ZIP (FileName: 1.txt, 2.txt...)
