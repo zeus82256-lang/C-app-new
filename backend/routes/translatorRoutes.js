@@ -18,12 +18,18 @@ try {
 // --- Helper: Delay ---
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+// 🔥 Helper to get GLOBAL Settings (Singleton)
+async function getGlobalSettings() {
+    let settings = await Settings.findOne();
+    if (!settings) {
+        settings = new Settings({});
+        await settings.save();
+    }
+    return settings;
+}
+
 // --- THE TRANSLATION WORKER (STRICT FIRESTORE MODE) ---
 async function processTranslationJob(jobId) {
-    // ... (This function remains unchanged to protect core logic)
-    // Abbreviated for this response as the user only asked for endpoint optimization
-    // Assuming full worker logic exists here as in previous files.
-    // ...
     try {
         const job = await TranslationJob.findById(jobId);
         if (!job || job.status !== 'active') return;
@@ -43,7 +49,7 @@ async function processTranslationJob(jobId) {
             return;
         }
 
-        const settings = await Settings.findOne({}); 
+        const settings = await getGlobalSettings(); 
         let keys = (job.apiKeys && job.apiKeys.length > 0) ? job.apiKeys : (settings?.translatorApiKeys || []);
         
         if (!keys || keys.length === 0) {
@@ -360,7 +366,7 @@ module.exports = function(app, verifyToken, verifyAdmin) {
             const novel = await Novel.findById(novelId);
             if (!novel) return res.status(404).json({ message: "Novel not found" });
 
-            const userSettings = await Settings.findOne({ user: req.user.id });
+            const userSettings = await getGlobalSettings();
             const savedKeys = userSettings?.translatorApiKeys || [];
             
             const effectiveKeys = (apiKeys && apiKeys.length > 0) ? apiKeys : savedKeys;
@@ -530,11 +536,10 @@ module.exports = function(app, verifyToken, verifyAdmin) {
         }
     });
 
-    // 6. Translator Settings API
+    // 6. Translator Settings API (GLOBAL)
     app.get('/api/translator/settings', verifyToken, verifyAdmin, async (req, res) => {
         try {
-            let settings = await Settings.findOne({ user: req.user.id });
-            if (!settings) settings = {};
+            let settings = await getGlobalSettings();
             res.json({
                 customPrompt: settings.customPrompt || '',
                 translatorExtractPrompt: settings.translatorExtractPrompt || '',
@@ -550,10 +555,7 @@ module.exports = function(app, verifyToken, verifyAdmin) {
         try {
             const { customPrompt, translatorExtractPrompt, translatorModel, translatorApiKeys } = req.body;
             
-            let settings = await Settings.findOne({ user: req.user.id });
-            if (!settings) {
-                settings = new Settings({ user: req.user.id });
-            }
+            let settings = await getGlobalSettings();
 
             if (customPrompt !== undefined) settings.customPrompt = customPrompt;
             if (translatorExtractPrompt !== undefined) settings.translatorExtractPrompt = translatorExtractPrompt;
