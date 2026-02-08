@@ -49,10 +49,20 @@ function escapeRegExp(string) {
   return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// 🔥 Helper to get GLOBAL Settings (Singleton)
+async function getGlobalSettings() {
+    let settings = await Settings.findOne();
+    if (!settings) {
+        settings = new Settings({});
+        await settings.save();
+    }
+    return settings;
+}
+
 module.exports = function(app, verifyToken, verifyAdmin, upload) {
 
     // =========================================================
-    // 📂 CATEGORY MANAGEMENT API
+    // 📂 CATEGORY MANAGEMENT API (GLOBAL)
     // =========================================================
     
     // Add New Category to Master List
@@ -61,8 +71,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
             const { category } = req.body;
             if (!category) return res.status(400).json({ message: "Category name required" });
 
-            let settings = await Settings.findOne({ user: req.user.id });
-            if (!settings) settings = new Settings({ user: req.user.id });
+            let settings = await getGlobalSettings();
 
             if (!settings.managedCategories) settings.managedCategories = [];
             
@@ -82,8 +91,8 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         try {
             const categoryName = decodeURIComponent(req.params.name);
             
-            // 1. Remove from Admin Settings
-            let settings = await Settings.findOne({ user: req.user.id });
+            // 1. Remove from Admin Settings (GLOBAL)
+            let settings = await getGlobalSettings();
             if (settings && settings.managedCategories) {
                 settings.managedCategories = settings.managedCategories.filter(c => c !== categoryName);
                 await settings.save();
@@ -114,12 +123,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     // Get Blacklist
     app.get('/api/admin/cleaner', verifyAdmin, async (req, res) => {
         try {
-            // We use the admin's settings to store the global blacklist for now
-            let settings = await Settings.findOne({ user: req.user.id });
-            if (!settings) {
-                settings = new Settings({ user: req.user.id });
-                await settings.save();
-            }
+            let settings = await getGlobalSettings();
             res.json(settings.globalBlocklist || []);
         } catch (e) {
             res.status(500).json({ error: e.message });
@@ -132,9 +136,8 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
             const { word } = req.body; 
             if (!word) return res.status(400).json({ message: "Word required" });
 
-            // 1. Save to Blacklist
-            let settings = await Settings.findOne({ user: req.user.id });
-            if (!settings) settings = new Settings({ user: req.user.id });
+            // 1. Save to Blacklist (GLOBAL)
+            let settings = await getGlobalSettings();
             
             if (!settings.globalBlocklist.includes(word)) {
                 settings.globalBlocklist.push(word);
@@ -197,7 +200,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
             const index = parseInt(req.params.index);
             const { word } = req.body;
             
-            let settings = await Settings.findOne({ user: req.user.id });
+            let settings = await getGlobalSettings();
             if (settings && settings.globalBlocklist[index]) {
                 settings.globalBlocklist[index] = word;
                 await settings.save();
@@ -247,7 +250,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     app.delete('/api/admin/cleaner/:word', verifyAdmin, async (req, res) => {
         try {
             const word = decodeURIComponent(req.params.word);
-            let settings = await Settings.findOne({ user: req.user.id });
+            let settings = await getGlobalSettings();
             if (settings) {
                 settings.globalBlocklist = settings.globalBlocklist.filter(w => w !== word);
                 await settings.save();
@@ -265,11 +268,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     // Get Copyrights
     app.get('/api/admin/copyright', verifyAdmin, async (req, res) => {
         try {
-            let settings = await Settings.findOne({ user: req.user.id });
-            if (!settings) {
-                settings = new Settings({ user: req.user.id });
-                await settings.save();
-            }
+            let settings = await getGlobalSettings();
             res.json({
                 startText: settings.globalChapterStartText || '',
                 endText: settings.globalChapterEndText || '',
@@ -286,10 +285,8 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     app.post('/api/admin/copyright', verifyAdmin, async (req, res) => {
         try {
             const { startText, endText, styles, frequency, everyX } = req.body;
-            let settings = await Settings.findOne({ user: req.user.id });
-            if (!settings) {
-                settings = new Settings({ user: req.user.id });
-            }
+            let settings = await getGlobalSettings();
+            
             settings.globalChapterStartText = startText;
             settings.globalChapterEndText = endText;
             
@@ -990,7 +987,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 return res.status(403).json({ message: "Access Denied to this novel" });
             }
 
-            const settings = await Settings.findOne({ user: req.user._id }) || {};
+            const settings = await getGlobalSettings();
             const zip = new AdmZip();
 
             // Sort chapters by number
