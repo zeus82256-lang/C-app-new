@@ -20,6 +20,7 @@ const Novel = require('../models/novel.model.js');
 const NovelLibrary = require('../models/novelLibrary.model.js'); 
 const Settings = require('../models/settings.model.js');
 const Comment = require('../models/comment.model.js');
+const ChapterScraperJob = require('../models/chapterScraperJob.model.js'); // 🔥 NEW MODEL
 
 // 🔥 MODEL FOR SCRAPER LOGS
 const ScraperLogSchema = new mongoose.Schema({
@@ -59,12 +60,130 @@ async function getGlobalSettings() {
     return settings;
 }
 
+// 🔥🔥 WORKER FUNCTION FOR TITLE EXTRACTION (BACKGROUND) 🔥🔥
+async function processTitleExtractionJob(jobId) {
+    try {
+        const job = await ChapterScraperJob.findById(jobId);
+        if (!job || job.status !== 'active') return;
+
+        if (!firestore) {
+            job.status = 'failed';
+            job.logs.push({ message: "Firestore not connected", type: 'error' });
+            await job.save();
+            return;
+        }
+
+        const novel = await Novel.findById(job.novelId);
+        if (!novel) {
+            job.status = 'failed';
+            job.logs.push({ message: "الرواية غير موجودة", type: 'error' });
+            await job.save();
+            return;
+        }
+
+        // Sort chapters
+        const chapters = novel.chapters.sort((a, b) => a.number - b.number);
+        let updatedCount = 0;
+
+        for (let i = 0; i < chapters.length; i++) {
+            const chapter = chapters[i];
+            
+            // Check if job was cancelled externally
+            const freshJob = await ChapterScraperJob.findById(jobId);
+            if (!freshJob) break; 
+
+            try {
+                // Fetch content from Firestore
+                const docRef = firestore.collection('novels').doc(novel._id.toString()).collection('chapters').doc(chapter.number.toString());
+                const docSnap = await docRef.get();
+
+                if (docSnap.exists) {
+                    const content = docSnap.data().content || "";
+                    
+                    const lines = content.split('\n');
+                    let firstLine = "";
+                    for (const line of lines) {
+                        if (line.trim().length > 0) {
+                            firstLine = line.trim();
+                            break;
+                        }
+                    }
+
+                    // Check regex: Contains "Chapter" or "الفصل" AND has a colon ":"
+                    if (firstLine && (firstLine.includes('الفصل') || firstLine.includes('Chapter')) && firstLine.includes(':')) {
+                        const parts = firstLine.split(':');
+                        if (parts.length > 1) {
+                            const newTitle = parts.slice(1).join(':').trim();
+                            
+                            if (newTitle && newTitle !== chapter.title) {
+                                // Update Mongo
+                                await Novel.updateOne(
+                                    { _id: novel._id, "chapters.number": chapter.number },
+                                    { $set: { "chapters.$.title": newTitle } }
+                                );
+                                
+                                // Update Firestore
+                                await docRef.update({ title: newTitle });
+
+                                updatedCount++;
+                                
+                                // Log update to Job
+                                await ChapterScraperJob.findByIdAndUpdate(jobId, {
+                                    $push: { logs: { message: `✅ فصل ${chapter.number}: تم التحديث إلى "${newTitle}"`, type: 'success' } }
+                                });
+                            }
+                        }
+                    }
+                }
+            } catch (err) {
+                // Log error but continue
+                 await ChapterScraperJob.findByIdAndUpdate(jobId, {
+                    $push: { logs: { message: `❌ خطأ في فصل ${chapter.number}: ${err.message}`, type: 'error' } }
+                });
+            }
+
+            // Update Progress
+            await ChapterScraperJob.findByIdAndUpdate(jobId, {
+                processedCount: i + 1,
+                lastUpdate: new Date()
+            });
+            
+            // Artificial delay to not choke DB
+            await new Promise(r => setTimeout(r, 100));
+        }
+
+        await ChapterScraperJob.findByIdAndUpdate(jobId, {
+            status: 'completed',
+            $push: { logs: { message: `🏁 اكتملت المهمة. تم تحديث ${updatedCount} عنوان.`, type: 'success' } }
+        });
+
+    } catch (e) {
+        console.error(e);
+        await ChapterScraperJob.findByIdAndUpdate(jobId, {
+            status: 'failed',
+            $push: { logs: { message: `❌ خطأ فادح: ${e.message}`, type: 'error' } }
+        });
+    }
+}
+
 module.exports = function(app, verifyToken, verifyAdmin, upload) {
 
     // =========================================================
-    // 🛠️ TOOLS API (NEW: Extract Titles from Content)
+    // 🛠️ TOOLS API (JOB BASED TITLE EXTRACTOR)
     // =========================================================
-    app.post('/api/admin/tools/extract-titles', verifyAdmin, async (req, res) => {
+    
+    // 1. Get Jobs
+    app.get('/api/admin/tools/extract-titles/jobs', verifyAdmin, async (req, res) => {
+        try {
+            const jobs = await ChapterScraperJob.find().sort({ createdAt: -1 }).limit(20);
+            res.json(jobs);
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // 2. Start Job
+    app.post('/api/admin/tools/extract-titles/start', verifyAdmin, async (req, res) => {
         try {
             const { novelId } = req.body;
             if (!novelId) return res.status(400).json({ message: "Novel ID required" });
@@ -72,81 +191,42 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
             const novel = await Novel.findById(novelId);
             if (!novel) return res.status(404).json({ message: "Novel not found" });
 
-            if (!firestore) return res.status(500).json({ message: "Firestore not connected" });
-
-            const logs = [];
-            let updatedCount = 0;
-
-            // Sort chapters to process in order
-            const chapters = novel.chapters.sort((a, b) => a.number - b.number);
-
-            for (let i = 0; i < chapters.length; i++) {
-                const chapter = chapters[i];
-                try {
-                    // Fetch content from Firestore
-                    const docRef = firestore.collection('novels').doc(novelId).collection('chapters').doc(chapter.number.toString());
-                    const docSnap = await docRef.get();
-
-                    if (docSnap.exists) {
-                        const content = docSnap.data().content || "";
-                        
-                        // 🔥 Logic: Find first non-empty line
-                        const lines = content.split('\n');
-                        let firstLine = "";
-                        for (const line of lines) {
-                            if (line.trim().length > 0) {
-                                firstLine = line.trim();
-                                break;
-                            }
-                        }
-
-                        // Check regex: Contains "Chapter" or "الفصل" AND has a colon ":"
-                        if (firstLine && (firstLine.includes('الفصل') || firstLine.includes('Chapter')) && firstLine.includes(':')) {
-                            const parts = firstLine.split(':');
-                            if (parts.length > 1) {
-                                // Extract everything after the first colon
-                                const newTitle = parts.slice(1).join(':').trim();
-                                
-                                if (newTitle && newTitle !== chapter.title) {
-                                    const oldTitle = chapter.title;
-                                    
-                                    // Update MongoDB Object
-                                    chapter.title = newTitle;
-                                    
-                                    // Update Firestore (Optional but good for consistency)
-                                    await docRef.update({ title: newTitle });
-
-                                    updatedCount++;
-                                    logs.push(`✅ فصل ${chapter.number}: تم التحديث من "${oldTitle}" إلى "${newTitle}"`);
-                                } else {
-                                    // logs.push(`ℹ️ فصل ${chapter.number}: العنوان مطابق أو لم يتغير`);
-                                }
-                            }
-                        } else {
-                            logs.push(`⚠️ فصل ${chapter.number}: لم يتم العثور على تنسيق (الفصل X : عنوان) في السطر الأول.`);
-                        }
-                    } else {
-                        logs.push(`❌ فصل ${chapter.number}: لا يوجد محتوى في السيرفر.`);
-                    }
-                } catch (chapErr) {
-                    logs.push(`❌ فصل ${chapter.number}: خطأ - ${chapErr.message}`);
-                }
-            }
-
-            if (updatedCount > 0) {
-                // Mark modified only if we actually changed something
-                novel.markModified('chapters');
-                await novel.save();
-            }
-
-            res.json({ 
-                success: true, 
-                message: `تم تحديث ${updatedCount} فصل بنجاح.`,
-                logs: logs 
+            const job = new ChapterScraperJob({
+                novelId: novel._id,
+                novelTitle: novel.title,
+                cover: novel.cover,
+                totalChapters: novel.chapters.length,
+                logs: [{ message: '🚀 تم بدء مهمة استخراج العناوين...', type: 'info' }]
             });
 
+            await job.save();
+
+            // 🔥 Start Worker in Background (No await)
+            processTitleExtractionJob(job._id);
+
+            res.json({ success: true, message: "تم بدء المهمة في الخلفية", jobId: job._id });
+
         } catch (e) {
-            console.error(e);
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // 3. Get Job Detail
+    app.get('/api/admin/tools/extract-titles/jobs/:id', verifyAdmin, async (req, res) => {
+        try {
+            const job = await ChapterScraperJob.findById(req.params.id);
+            res.json(job);
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // 4. Delete Job
+    app.delete('/api/admin/tools/extract-titles/jobs/:id', verifyAdmin, async (req, res) => {
+        try {
+            await ChapterScraperJob.findByIdAndDelete(req.params.id);
+            res.json({ success: true });
+        } catch (e) {
             res.status(500).json({ error: e.message });
         }
     });
