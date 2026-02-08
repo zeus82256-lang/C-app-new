@@ -262,7 +262,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     });
 
     // =========================================================
-    // 📝 GLOBAL COPYRIGHTS API
+    // 📝 GLOBAL COPYRIGHTS API (UPDATED FOR SEPARATOR)
     // =========================================================
     
     // Get Copyrights
@@ -274,7 +274,10 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 endText: settings.globalChapterEndText || '',
                 styles: settings.globalCopyrightStyles || {},
                 frequency: settings.copyrightFrequency || 'always',
-                everyX: settings.copyrightEveryX || 5
+                everyX: settings.copyrightEveryX || 5,
+                // 🔥 NEW FIELDS
+                chapterSeparatorText: settings.chapterSeparatorText || '________________________________________',
+                enableChapterSeparator: settings.enableChapterSeparator ?? true
             });
         } catch (e) {
             res.status(500).json({ error: e.message });
@@ -284,7 +287,11 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     // Save Copyrights
     app.post('/api/admin/copyright', verifyAdmin, async (req, res) => {
         try {
-            const { startText, endText, styles, frequency, everyX } = req.body;
+            const { 
+                startText, endText, styles, frequency, everyX,
+                chapterSeparatorText, enableChapterSeparator // 🔥 New fields
+            } = req.body;
+            
             let settings = await getGlobalSettings();
             
             settings.globalChapterStartText = startText;
@@ -293,6 +300,10 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
             if (styles) settings.globalCopyrightStyles = styles;
             if (frequency) settings.copyrightFrequency = frequency;
             if (everyX) settings.copyrightEveryX = everyX;
+            
+            // Save Separator Settings
+            if (chapterSeparatorText !== undefined) settings.chapterSeparatorText = chapterSeparatorText;
+            if (enableChapterSeparator !== undefined) settings.enableChapterSeparator = enableChapterSeparator;
 
             await settings.save();
             res.json({ message: "Copyrights updated" });
@@ -666,7 +677,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
 
                     const existingIndex = novel.chapters.findIndex(c => c.number === chapterNumber);
                     if (existingIndex > -1) {
-                        novel.chapters[existingIndex].title = chapterTitle;
+                        novel.chapters[existingIndex] = { ...novel.chapters[existingIndex].toObject(), ...chapterMeta };
                     } else {
                         novel.chapters.push(chapterMeta);
                     }
@@ -1017,11 +1028,25 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                      });
                 }
                 
-                // 2. Separator Line under "Chapter" or "الفصل"
-                const separatorLine = "\n______________________\n";
-                const internalTitleRegex = /(^|\n)(.*(?:الفصل|Chapter).*?)(\n|$)/gi;
-                if (internalTitleRegex.test(content)) {
-                     content = content.replace(internalTitleRegex, '$1$2' + separatorLine + '$3');
+                // 2. 🔥🔥 INTERNAL CHAPTER SEPARATOR (SMART FIRST LINE ONLY) 🔥🔥
+                // Note: Export logic needs to match Reader logic for consistency.
+                if (settings.enableChapterSeparator) {
+                    const separatorLine = `\n\n${settings.chapterSeparatorText || '________________________________________'}\n\n`;
+                    
+                    const lines = content.split('\n');
+                    let replaced = false;
+                    for (let i = 0; i < lines.length; i++) {
+                        const lineTrimmed = lines[i].trim();
+                        if (lineTrimmed.length > 0) {
+                            // Check header pattern
+                            if (/^(?:الفصل|Chapter)\s/i.test(lineTrimmed)) {
+                                lines[i] = lines[i] + separatorLine;
+                                replaced = true;
+                            }
+                            break; // Stop after first non-empty
+                        }
+                    }
+                    if (replaced) content = lines.join('\n');
                 }
 
                 // 3. Copyright Logic
@@ -1035,7 +1060,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 
                 // Add Start Copyright + Separator UNDER it
                 if (showCopyright && settings.globalChapterStartText) {
-                    finalContent += settings.globalChapterStartText + separatorLine + "\n";
+                    finalContent += settings.globalChapterStartText + "\n\n_________________________________\n\n";
                 }
                 
                 // Add Title (Optional)
@@ -1047,7 +1072,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
 
                 // Add End Copyright + Separator ABOVE it
                 if (showCopyright && settings.globalChapterEndText) {
-                    finalContent += "\n" + separatorLine + settings.globalChapterEndText;
+                    finalContent += "\n\n_________________________________\n\n" + settings.globalChapterEndText;
                 }
 
                 // Add to ZIP (FileName: 1.txt, 2.txt...)
