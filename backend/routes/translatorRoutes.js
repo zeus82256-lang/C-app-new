@@ -189,6 +189,39 @@ ${sourceContent}
                 continue; 
             }
 
+            // 🔥🔥🔥 NEW: EXTRACT TITLE FROM TRANSLATED CONTENT 🔥🔥🔥
+            // البحث عن أول فقرة، إذا احتوت على "الفصل" و ":" نأخذ ما بعد النقطتين كعنوان
+            let extractedTitle = `الفصل ${chapterNum}`;
+            try {
+                // تقسيم النص إلى أسطر
+                const lines = translatedText.split('\n');
+                let firstParagraph = "";
+                
+                // البحث عن أول سطر غير فارغ
+                for (const line of lines) {
+                    if (line.trim().length > 0) {
+                        firstParagraph = line.trim();
+                        break;
+                    }
+                }
+
+                // التحقق من وجود "الفصل" أو "Chapter" وعلامة النقطتين
+                // Regex: يبدأ بكلمة الفصل (اختياري أرقام) ثم نقطتين
+                if (firstParagraph && (firstParagraph.includes('الفصل') || firstParagraph.includes('Chapter')) && firstParagraph.includes(':')) {
+                    const parts = firstParagraph.split(':');
+                    if (parts.length > 1) {
+                        // أخذ كل شيء بعد النقطتين الأولى كعنوان
+                        const potentialTitle = parts.slice(1).join(':').trim();
+                        if (potentialTitle.length > 0) {
+                            extractedTitle = potentialTitle;
+                        }
+                    }
+                }
+            } catch (titleErr) {
+                console.log("Title extraction error:", titleErr);
+            }
+            // 🔥🔥🔥 END TITLE EXTRACTION 🔥🔥🔥
+
             try {
                 await pushLog(jobId, `2️⃣ جاري استخراج المصطلحات...`, 'info');
                 
@@ -276,7 +309,7 @@ Arabic Text (Excerpt):
                     await firestore.collection('novels').doc(freshNovel._id.toString())
                         .collection('chapters').doc(chapterNum.toString())
                         .set({
-                            title: `الفصل ${chapterNum}`,
+                            title: extractedTitle, // 🔥 Use the extracted title
                             content: translatedText,
                             lastUpdated: new Date()
                         }, { merge: true });
@@ -288,7 +321,7 @@ Arabic Text (Excerpt):
                 // 🔥🔥 FIX: Update createdAt to NOW so it triggers "New Chapter" logic
                 const updates = { 
                     $set: { 
-                        "chapters.$.title": `الفصل ${chapterNum}`,
+                        "chapters.$.title": extractedTitle, // 🔥 Use the extracted title
                         "chapters.$.createdAt": new Date(), // Resetting date to make it appear as NEW
                         "lastChapterUpdate": new Date() 
                     } 
@@ -310,7 +343,7 @@ Arabic Text (Excerpt):
                     $pull: { targetChapters: chapterNum } // 🔥 Remove processed chapter from queue
                 });
 
-                await pushLog(jobId, `🎉 تم إنجاز الفصل ${chapterNum} وحفظه في السيرفر`, 'success');
+                await pushLog(jobId, `🎉 تم إنجاز الفصل ${chapterNum} بعنوان "${extractedTitle}" وحفظه في السيرفر`, 'success');
 
             } catch (err) {
                 console.error("Extraction/Save Error:", err);
@@ -324,7 +357,7 @@ Arabic Text (Excerpt):
                         // 🔥 Also update createdAt on fallback save
                         const updates = { 
                             $set: { 
-                                "chapters.$.title": `الفصل ${chapterNum}`,
+                                "chapters.$.title": extractedTitle, // 🔥 Use extracted title
                                 "chapters.$.createdAt": new Date(),
                                 "lastChapterUpdate": new Date()
                             } 
