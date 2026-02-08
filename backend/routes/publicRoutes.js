@@ -845,7 +845,8 @@ module.exports = function(app, verifyToken, upload) {
                 const adminSettings = await Settings.findOne({ 
                     $or: [
                         { globalBlocklist: { $exists: true, $not: { $size: 0 } } },
-                        { globalChapterStartText: { $exists: true } }
+                        { globalChapterStartText: { $exists: true } },
+                        { enableChapterSeparator: { $exists: true } }
                     ] 
                 }).sort({ updatedAt: -1 }).lean(); 
 
@@ -869,14 +870,31 @@ module.exports = function(app, verifyToken, upload) {
                     content = content.replace(/^\s*[\r\n]/gm, ''); 
                     content = content.replace(/\n\s*\n/g, '\n\n'); 
 
-                    // 3. 🔥🔥 INTERNAL CHAPTER SEPARATOR (TEXT BASED) 🔥🔥
-                    // Inject explicit text underscores instead of HTML divider div
-                    // This allows the line to be copied/downloaded as text.
-                    const separatorLine = "\n\n_________________________________\n\n";
-                    const internalTitleRegex = /(^|\n)(.*(?:الفصل|Chapter).*?)(\n|$)/gi;
-                    
-                    if (internalTitleRegex.test(content)) {
-                        content = content.replace(internalTitleRegex, '$1$2' + separatorLine + '$3');
+                    // 3. 🔥🔥 INTERNAL CHAPTER SEPARATOR (SMART FIRST LINE ONLY) 🔥🔥
+                    // Check if separator enabled in settings
+                    if (adminSettings.enableChapterSeparator) {
+                        const separatorLine = `\n\n${adminSettings.chapterSeparatorText || '________________________________________'}\n\n`;
+                        
+                        // We check the FIRST non-empty paragraph only
+                        // Split by double newlines or single to find first block
+                        const lines = content.split('\n');
+                        let replaced = false;
+                        
+                        for (let i = 0; i < lines.length; i++) {
+                            const lineTrimmed = lines[i].trim();
+                            if (lineTrimmed.length > 0) {
+                                // Check if this line looks like a chapter header (starts with 'Chapter' or 'الفصل')
+                                if (/^(?:الفصل|Chapter)\s/i.test(lineTrimmed)) {
+                                    lines[i] = lines[i] + separatorLine;
+                                    replaced = true;
+                                }
+                                break; // Stop after first non-empty line regardless of match
+                            }
+                        }
+                        
+                        if (replaced) {
+                            content = lines.join('\n');
+                        }
                     }
 
                     // 4. Copyright Logic (Separated)
