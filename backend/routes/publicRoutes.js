@@ -622,15 +622,11 @@ module.exports = function(app, verifyToken, upload) {
                         lastChapterUpdate: 1,
                         createdAt: 1,
                         rating: 1,
+                        // 🔥 CRITICAL FIX: Do NOT project chapters array.
+                        // Calculate count database side
                         chaptersCount: { $size: { $ifNull: ["$chapters", []] } },
-                        // 🔥 CRITICAL: Project full chapters array (lightweight fields only) for filtering in JS
-                        chapters: { 
-                            $map: {
-                                input: "$chapters",
-                                as: "ch",
-                                in: { title: "$$ch.title", number: "$$ch.number" }
-                            }
-                        }
+                        // Get only the LAST chapter for "Latest Updates"
+                        lastChapter: { $arrayElemAt: [ "$chapters", -1 ] } // Assuming chapters are sorted by push
                     }
                 },
                 { $sort: sortStage },
@@ -646,39 +642,12 @@ module.exports = function(app, verifyToken, upload) {
 
             let novelsData = result[0].data;
             
-            // 🔥🔥 SMART VISIBLE CHAPTER LOGIC 🔥🔥
-            novelsData = novelsData.map(n => {
-                let lastVisible = null;
-                
-                // If admin, they see the absolute last chapter
-                if (role === 'admin') {
-                    if (n.chapters && n.chapters.length > 0) {
-                        // Chapters are not sorted in projection necessarily, so sort them by number desc
-                        n.chapters.sort((a, b) => b.number - a.number);
-                        lastVisible = n.chapters[0];
-                    }
-                } else {
-                    // For users, find the *latest* chapter that is NOT hidden
-                    if (n.chapters && n.chapters.length > 0) {
-                        n.chapters.sort((a, b) => b.number - a.number); // Sort desc (High to Low)
-                        
-                        // Find first chapter that is NOT hidden
-                        for (const ch of n.chapters) {
-                            if (!isChapterHidden(ch.title)) {
-                                lastVisible = ch;
-                                break; // Found the latest visible one
-                            }
-                        }
-                    }
-                }
-
-                // Return clean object without the heavy chapters array (unless needed)
-                // We fake the chapters array to only contain the visible one for the UI to render "Latest"
-                return { 
-                    ...n, 
-                    chapters: lastVisible ? [lastVisible] : [] 
-                };
-            });
+            // Format output to match old structure but lightweight
+            novelsData = novelsData.map(n => ({
+                ...n,
+                // Create a fake chapters array with just 1 item if needed by frontend logic
+                chapters: n.lastChapter ? [n.lastChapter] : []
+            }));
 
             const totalCount = result[0].metadata[0] ? result[0].metadata[0].total : 0;
             const totalPages = Math.ceil(totalCount / limitNum);
