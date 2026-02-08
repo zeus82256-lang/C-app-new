@@ -17,6 +17,16 @@ try {
 // --- Helper: Delay ---
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+// 🔥 Helper to get GLOBAL Settings (Singleton)
+async function getGlobalSettings() {
+    let settings = await Settings.findOne();
+    if (!settings) {
+        settings = new Settings({});
+        await settings.save();
+    }
+    return settings;
+}
+
 // --- THE TITLE GENERATOR WORKER ---
 async function processTitleGenJob(jobId) {
     try {
@@ -38,20 +48,24 @@ async function processTitleGenJob(jobId) {
             return;
         }
 
-        const settings = await Settings.findOne({}); 
-        // Reuse Translator Keys
-        let keys = settings?.translatorApiKeys || [];
+        const settings = await getGlobalSettings(); 
+        
+        // 🔥 Use specific Title Gen keys OR fallback to translator keys if empty
+        let keys = settings?.titleGenApiKeys || [];
+        if (!keys || keys.length === 0) {
+            keys = settings?.translatorApiKeys || [];
+        }
         
         if (!keys || keys.length === 0) {
             job.status = 'failed';
-            job.logs.push({ message: 'لا توجد مفاتيح API محفوظة في إعدادات المترجم.', type: 'error' });
+            job.logs.push({ message: 'لا توجد مفاتيح API محفوظة لمولد العناوين أو المترجم.', type: 'error' });
             await job.save();
             return;
         }
 
         let keyIndex = 0;
-        // Reuse Translator Model (usually Flash which is good for this)
-        let selectedModel = settings?.translatorModel || 'gemini-2.5-flash'; 
+        // Use Specific Model for Title Gen (defaulting to flash)
+        let selectedModel = settings?.titleGenModel || 'gemini-2.5-flash'; 
         
         // Use Specific Prompt for Title Gen
         const systemPrompt = settings?.titleGenPrompt || 'Read the following chapter content and suggest a short, engaging, and professional Arabic title for it (Maximum 6 words). Output ONLY the Arabic title string without any quotes, prefixes, or chapter numbers.';
@@ -292,12 +306,13 @@ module.exports = function(app, verifyToken, verifyAdmin) {
         }
     });
 
-    // 6. Settings
+    // 6. Settings (Global)
     app.get('/api/title-gen/settings', verifyToken, verifyAdmin, async (req, res) => {
         try {
-            let settings = await Settings.findOne({ user: req.user.id });
+            let settings = await getGlobalSettings();
             res.json({
-                prompt: settings?.titleGenPrompt || ''
+                prompt: settings?.titleGenPrompt || '',
+                apiKeys: settings?.titleGenApiKeys || []
             });
         } catch (e) {
             res.status(500).json({ error: e.message });
@@ -306,8 +321,13 @@ module.exports = function(app, verifyToken, verifyAdmin) {
 
     app.post('/api/title-gen/settings', verifyToken, verifyAdmin, async (req, res) => {
         try {
-            const { prompt } = req.body;
-            await Settings.findOneAndUpdate({ user: req.user.id }, { titleGenPrompt: prompt });
+            const { prompt, apiKeys } = req.body;
+            let settings = await getGlobalSettings();
+            
+            if (prompt !== undefined) settings.titleGenPrompt = prompt;
+            if (apiKeys !== undefined) settings.titleGenApiKeys = apiKeys;
+            
+            await settings.save();
             res.json({ success: true });
         } catch (e) {
             res.status(500).json({ error: e.message });
