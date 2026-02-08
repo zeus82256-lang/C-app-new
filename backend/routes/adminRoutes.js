@@ -62,6 +62,97 @@ async function getGlobalSettings() {
 module.exports = function(app, verifyToken, verifyAdmin, upload) {
 
     // =========================================================
+    // 🛠️ TOOLS API (NEW: Extract Titles from Content)
+    // =========================================================
+    app.post('/api/admin/tools/extract-titles', verifyAdmin, async (req, res) => {
+        try {
+            const { novelId } = req.body;
+            if (!novelId) return res.status(400).json({ message: "Novel ID required" });
+
+            const novel = await Novel.findById(novelId);
+            if (!novel) return res.status(404).json({ message: "Novel not found" });
+
+            if (!firestore) return res.status(500).json({ message: "Firestore not connected" });
+
+            const logs = [];
+            let updatedCount = 0;
+
+            // Sort chapters to process in order
+            const chapters = novel.chapters.sort((a, b) => a.number - b.number);
+
+            for (let i = 0; i < chapters.length; i++) {
+                const chapter = chapters[i];
+                try {
+                    // Fetch content from Firestore
+                    const docRef = firestore.collection('novels').doc(novelId).collection('chapters').doc(chapter.number.toString());
+                    const docSnap = await docRef.get();
+
+                    if (docSnap.exists) {
+                        const content = docSnap.data().content || "";
+                        
+                        // 🔥 Logic: Find first non-empty line
+                        const lines = content.split('\n');
+                        let firstLine = "";
+                        for (const line of lines) {
+                            if (line.trim().length > 0) {
+                                firstLine = line.trim();
+                                break;
+                            }
+                        }
+
+                        // Check regex: Contains "Chapter" or "الفصل" AND has a colon ":"
+                        if (firstLine && (firstLine.includes('الفصل') || firstLine.includes('Chapter')) && firstLine.includes(':')) {
+                            const parts = firstLine.split(':');
+                            if (parts.length > 1) {
+                                // Extract everything after the first colon
+                                const newTitle = parts.slice(1).join(':').trim();
+                                
+                                if (newTitle && newTitle !== chapter.title) {
+                                    const oldTitle = chapter.title;
+                                    
+                                    // Update MongoDB Object
+                                    chapter.title = newTitle;
+                                    
+                                    // Update Firestore (Optional but good for consistency)
+                                    await docRef.update({ title: newTitle });
+
+                                    updatedCount++;
+                                    logs.push(`✅ فصل ${chapter.number}: تم التحديث من "${oldTitle}" إلى "${newTitle}"`);
+                                } else {
+                                    // logs.push(`ℹ️ فصل ${chapter.number}: العنوان مطابق أو لم يتغير`);
+                                }
+                            }
+                        } else {
+                            logs.push(`⚠️ فصل ${chapter.number}: لم يتم العثور على تنسيق (الفصل X : عنوان) في السطر الأول.`);
+                        }
+                    } else {
+                        logs.push(`❌ فصل ${chapter.number}: لا يوجد محتوى في السيرفر.`);
+                    }
+                } catch (chapErr) {
+                    logs.push(`❌ فصل ${chapter.number}: خطأ - ${chapErr.message}`);
+                }
+            }
+
+            if (updatedCount > 0) {
+                // Mark modified only if we actually changed something
+                novel.markModified('chapters');
+                await novel.save();
+            }
+
+            res.json({ 
+                success: true, 
+                message: `تم تحديث ${updatedCount} فصل بنجاح.`,
+                logs: logs 
+            });
+
+        } catch (e) {
+            console.error(e);
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+
+    // =========================================================
     // 📂 CATEGORY MANAGEMENT API (GLOBAL)
     // =========================================================
     
