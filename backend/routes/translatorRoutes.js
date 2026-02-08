@@ -28,6 +28,51 @@ async function getGlobalSettings() {
     return settings;
 }
 
+// 🔥 New Default Prompt as provided by user
+const DEFAULT_EXTRACT_PROMPT = `ROLE: Expert Web Novel Terminology Extractor.
+TASK: Analyze the "English Text" and "Arabic Translation" below. Extract key proper nouns, unique concepts, and specific terminology for a comprehensive Glossary (Codex).
+
+STRICT RULES:
+1.  Categories: Classify each extracted term into one of: 'character', 'location', 'item', 'rank', 'concept', 'other'.
+    *   character: Names of individuals, specific titles referring to a person.
+    *   location: Cities, villages, geographical regions, buildings, headquarters.
+    *   item: Tools, weapons, materials, unique objects, or specific creatures.
+    *   rank: General military, social, or cultivation ranks (not specific character names).
+    *   concept: Spiritual, philosophical, agricultural terms, general techniques, or abstract ideas.
+    *   other: Any other important term that doesn't fit the above categories.
+2.  Format: Return a clean JSON array of objects.
+3.  Content:
+    *   "name": The exact English name (Capitalized where appropriate).
+    *   "translation": The exact Arabic translation used in the text.
+    *   "description": وصف قصير جداً باللغة العربية (2-4 كلمات)، مثل: "البطل الرئيسي", "مهارة سيف", "طريقة زراعة", "طاقة روحية".
+4.  Filtering & Exclusion (قواعد التصفية والاستبعاد):
+    *   Ignore common words. Only specific names, places, unique cultivation terms, and key concepts should be extracted.
+    *   Blacklist (تجاهل تام - لا تستخرج هذه أبداً):
+        *   الأرقام المنفردة أو أرقام الفصول (مثال: 1, 500, Chapter 10).
+        *   عبارات النظام أو الإشعارات (مثال: Ding, System alert, Level Up).
+        *   جمل التفاعل والإعلانات (مثال: Subscribe, Read at..., Translator notes, ...).
+        *   الأفعال والصفات العادية (مثال: run, fast, big, eat, go).
+        *   الكلمات الشائعة جداً التي لا تعتبر مصطلحات خاصة.
+5.  Accuracy (الدقة):
+    *   Each extracted English term must be unique.
+    *   The Arabic translation must exactly match the word or phrase used in the provided Arabic text.
+    *   Extracted terms must be meaningful within their context.
+
+Focus Areas (مجالات التركيز - لتوجيه الاستخراج):
+*   مصطلحات الزراعة والتقنيات: مثل أنواع النباتات، أساليب الزراعة، أدوات وتقنيات زراعية، أمراض النباتات، حلول هندسية زراعية.
+*   أسماء المواقع والمقرات: أسماء المدن، القرى، المناطق الجغرافية، المباني، المقرات الحكومية أو الخاصة، أي موقع ذي أهمية.
+*   الشخصيات والرتب الخالدة: أسماء الأشخاص، الألقاب، الرتب العسكرية أو الاجتماعية، الشخصيات التاريخية أو الخيالية.
+*   المفاهيم الروحية والزراعية: المصطلحات الدينية، الفلسفية، الروحية، أو المفاهيم المتعلقة بالزراعة العضوية، الاستدامة، التنوع البيولوجي.
+
+OUTPUT JSON STRUCTURE:
+[
+  { "category": "character", "name": "Fang Yuan", "translation": "فانغ يوان", "description": "البطل الرئيسي" },
+  { "category": "concept", "name": "Immortal Gu", "translation": "غو الخالد", "description": "عنصر زراعة" },
+  { "category": "location", "name": "Green Mountain Sect", "translation": "طائفة الجبل الأخضر", "description": "مقر الطائفة" }
+]
+
+RETURN ONLY JSON:`;
+
 // --- THE TRANSLATION WORKER (STRICT FIRESTORE MODE) ---
 async function processTranslationJob(jobId) {
     try {
@@ -61,7 +106,7 @@ async function processTranslationJob(jobId) {
 
         let keyIndex = 0;
         const transPrompt = settings?.customPrompt || "You are a professional translator. Translate the novel chapter from English to Arabic. Output ONLY the Arabic translation. Use the glossary provided.";
-        const extractPrompt = settings?.translatorExtractPrompt || "Analyze the English source and Arabic translation. Extract important proper nouns, cultivation terms, and skills. Output JSON: { \"newTerms\": [{\"term\": \"English\", \"translation\": \"Arabic\", \"category\": \"other\", \"description\": \"\"}] }";
+        const extractPrompt = settings?.translatorExtractPrompt || DEFAULT_EXTRACT_PROMPT;
         let selectedModel = settings?.translatorModel || 'gemini-1.5-flash'; 
 
         const chaptersToProcess = job.targetChapters.sort((a, b) => a - b);
@@ -154,26 +199,65 @@ ${sourceContent}
                 const extractionInput = `
 ${extractPrompt}
 
---- ENGLISH SOURCE ---
-${sourceContent.substring(0, 8000)} 
---- ARABIC TRANSLATION ---
-${translatedText.substring(0, 8000)}
---------------------------
+English Text (Excerpt):
+"""${sourceContent.substring(0, 8000)}"""
+
+Arabic Text (Excerpt):
+"""${translatedText.substring(0, 8000)}"""
 `; 
                 const resultExt = await modelJSON.generateContent(extractionInput);
                 const responseExt = await resultExt.response;
-                const jsonExt = JSON.parse(responseExt.text());
+                let jsonText = responseExt.text().trim();
+                
+                // 🔥 Cleanup JSON string if it contains markdown code blocks
+                if (jsonText.startsWith("```json")) {
+                    jsonText = jsonText.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+                } else if (jsonText.startsWith("```")) {
+                    jsonText = jsonText.replace(/^```\s*/, "").replace(/\s*```$/, "");
+                }
 
-                if (jsonExt.newTerms && Array.isArray(jsonExt.newTerms)) {
+                let parsedTerms = [];
+                try {
+                    const parsed = JSON.parse(jsonText);
+                    // Handle if it's an array OR an object with a key like "newTerms"
+                    if (Array.isArray(parsed)) {
+                        parsedTerms = parsed;
+                    } else if (parsed.newTerms && Array.isArray(parsed.newTerms)) {
+                        parsedTerms = parsed.newTerms;
+                    } else if (parsed.terms && Array.isArray(parsed.terms)) {
+                        parsedTerms = parsed.terms;
+                    }
+                } catch (e) {
+                    console.log("JSON Parse Error", e);
+                }
+
+                if (parsedTerms.length > 0) {
                     let newTermsCount = 0;
-                    for (const termObj of jsonExt.newTerms) {
-                        if (termObj.term && termObj.translation) {
+                    for (const termObj of parsedTerms) {
+                        // Map prompt keys (name) to DB keys (term)
+                        const rawTerm = termObj.name || termObj.term;
+                        const translation = termObj.translation;
+                        
+                        if (rawTerm && translation) {
+                            // Map Prompt Categories (singular) to DB Categories (plural)
+                            let category = termObj.category ? termObj.category.toLowerCase() : 'other';
+                            if (category === 'character') category = 'characters';
+                            else if (category === 'location') category = 'locations';
+                            else if (category === 'item') category = 'items';
+                            else if (category === 'rank') category = 'ranks';
+                            else if (category === 'concept') category = 'other'; // Map concept to other as it's not in enum (or add to enum)
+                            
+                            // Check valid enum, fallback to 'other'
+                            if (!['characters', 'locations', 'items', 'ranks'].includes(category)) {
+                                category = 'other';
+                            }
+
                             await Glossary.updateOne(
-                                { novelId: freshNovel._id, term: termObj.term }, 
+                                { novelId: freshNovel._id, term: rawTerm }, 
                                 { 
                                     $set: { 
-                                        translation: termObj.translation,
-                                        category: termObj.category || 'other',
+                                        translation: translation,
+                                        category: category,
                                         description: termObj.description || ''
                                     },
                                     $setOnInsert: { autoGenerated: true }
@@ -184,6 +268,8 @@ ${translatedText.substring(0, 8000)}
                         }
                     }
                     if (newTermsCount > 0) await pushLog(jobId, `✅ تم إضافة/تحديث ${newTermsCount} مصطلح للمسرد`, 'success');
+                } else {
+                    await pushLog(jobId, `ℹ️ لم يتم استخراج مصطلحات جديدة`, 'info');
                 }
 
                 try {
@@ -542,7 +628,7 @@ module.exports = function(app, verifyToken, verifyAdmin) {
             let settings = await getGlobalSettings();
             res.json({
                 customPrompt: settings.customPrompt || '',
-                translatorExtractPrompt: settings.translatorExtractPrompt || '',
+                translatorExtractPrompt: settings.translatorExtractPrompt || DEFAULT_EXTRACT_PROMPT,
                 translatorModel: settings.translatorModel || 'gemini-1.5-flash',
                 translatorApiKeys: settings.translatorApiKeys || []
             });
