@@ -88,6 +88,10 @@ RETURN ONLY JSON:` },
     globalChapterStartText: { type: String, default: '' },
     globalChapterEndText: { type: String, default: '' },
     
+    // 🔥 New: Chapter Separator Configuration
+    chapterSeparatorText: { type: String, default: '________________________________________' },
+    enableChapterSeparator: { type: Boolean, default: true },
+    
     globalCopyrightStyles: {
         color: { type: String, default: '#888888' },
         opacity: { type: Number, default: 1 },
