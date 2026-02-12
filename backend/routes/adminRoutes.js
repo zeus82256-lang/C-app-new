@@ -551,9 +551,23 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         verifyAdmin(req, res, next);
     }, async (req, res) => {
         try {
-            const novels = await Novel.find({ isWatched: true })
-                .select('title cover chapters lastChapterUpdate sourceUrl sourceStatus status')
-                .sort({ lastChapterUpdate: -1 });
+            // 🔥🔥 ROCKET SPEED UPDATE: Use Aggregation to count chapters without fetching them
+            const novels = await Novel.aggregate([
+                { $match: { isWatched: true } },
+                {
+                    $project: {
+                        title: 1,
+                        cover: 1,
+                        lastChapterUpdate: 1,
+                        sourceUrl: 1,
+                        sourceStatus: 1,
+                        status: 1,
+                        // Calculate size directly in DB
+                        chaptersCount: { $size: { $ifNull: ["$chapters", []] } }
+                    }
+                },
+                { $sort: { lastChapterUpdate: -1 } }
+            ]);
 
             const formatted = novels.map(n => {
                 const now = new Date();
@@ -573,7 +587,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                     _id: n._id,
                     title: n.title,
                     cover: n.cover,
-                    chaptersCount: n.chapters ? n.chapters.length : 0,
+                    chaptersCount: n.chaptersCount, // Directly from aggregation
                     lastUpdate: n.lastChapterUpdate,
                     sourceUrl: n.sourceUrl,
                     status: computedStatus // 'ongoing', 'completed', 'stopped'
