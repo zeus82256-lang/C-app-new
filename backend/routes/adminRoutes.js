@@ -1223,8 +1223,8 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                     for (let i = 0; i < lines.length; i++) {
                         const lineTrimmed = lines[i].trim();
                         if (lineTrimmed.length > 0) {
-                            // Check header pattern
-                            if (/^(?:الفصل|Chapter)\s/i.test(lineTrimmed)) {
+                            // 🔥 Updated Regex: Matches 'Chapter', 'الفصل', 'فصل' OR checks for ':'
+                            if (/^(?:الفصل|Chapter|فصل)|:/i.test(lineTrimmed)) {
                                 lines[i] = lines[i] + separatorLine;
                                 replaced = true;
                             }
@@ -1250,7 +1250,8 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 
                 // Add Title (Optional)
                 if (includeTitle) {
-                     finalContent += (chap.title || `Chapter ${chap.number}`) + "\n\n";
+                     // 🔥 Updated Title Format: الفصل X: العنوان
+                     finalContent += `الفصل ${chap.number}: ${chap.title || ''}\n\n`;
                 }
                 
                 finalContent += content;
