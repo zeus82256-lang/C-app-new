@@ -852,8 +852,8 @@ module.exports = function(app, verifyToken, upload) {
                         for (let i = 0; i < lines.length; i++) {
                             const lineTrimmed = lines[i].trim();
                             if (lineTrimmed.length > 0) {
-                                // Check if this line looks like a chapter header (starts with 'Chapter' or 'الفصل')
-                                if (/^(?:الفصل|Chapter)\s/i.test(lineTrimmed)) {
+                                // 🔥 Updated Regex: Matches 'Chapter', 'الفصل', 'فصل' OR checks for ':'
+                                if (/^(?:الفصل|Chapter|فصل)|:/i.test(lineTrimmed)) {
                                     lines[i] = lines[i] + separatorLine;
                                     replaced = true;
                                 }
