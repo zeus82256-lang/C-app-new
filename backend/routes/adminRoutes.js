@@ -433,6 +433,69 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     });
 
     // =========================================================
+    // 🔄 GLOBAL REPLACEMENTS API (SERVER-SIDE)
+    // =========================================================
+
+    // Get Replacements
+    app.get('/api/admin/global-replacements', verifyAdmin, async (req, res) => {
+        try {
+            let settings = await getGlobalSettings();
+            res.json(settings.globalReplacements || []);
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // Add Replacement
+    app.post('/api/admin/global-replacements', verifyAdmin, async (req, res) => {
+        try {
+            const { original, replacement } = req.body;
+            if (!original) return res.status(400).json({ message: "Original word required" });
+
+            let settings = await getGlobalSettings();
+            if (!settings.globalReplacements) settings.globalReplacements = [];
+
+            settings.globalReplacements.push({ original, replacement: replacement || '' });
+            await settings.save();
+
+            res.json({ message: "Replacement added", list: settings.globalReplacements });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // Update Replacement
+    app.put('/api/admin/global-replacements/:id', verifyAdmin, async (req, res) => {
+        try {
+            const { original, replacement } = req.body;
+            let settings = await getGlobalSettings();
+            
+            const item = settings.globalReplacements.id(req.params.id);
+            if (!item) return res.status(404).json({ message: "Item not found" });
+
+            if (original) item.original = original;
+            if (replacement !== undefined) item.replacement = replacement;
+
+            await settings.save();
+            res.json({ message: "Updated", list: settings.globalReplacements });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // Delete Replacement
+    app.delete('/api/admin/global-replacements/:id', verifyAdmin, async (req, res) => {
+        try {
+            let settings = await getGlobalSettings();
+            settings.globalReplacements.pull(req.params.id);
+            await settings.save();
+            res.json({ message: "Deleted", list: settings.globalReplacements });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // =========================================================
     // 📝 GLOBAL COPYRIGHTS API (UPDATED FOR SEPARATOR)
     // =========================================================
     
