@@ -1214,7 +1214,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     });
 
     // =========================================================
-    // 📦 EXPORT CHAPTERS TO ZIP (ADMIN ONLY) - 🔥 SERVER SIDE DOWNLOAD
+    // 📦 EXPORT CHAPTERS TO ZIP (ADMIN ONLY) - 🔥 STREAMING VERSION
     // =========================================================
     // Note: We bypass `verifyToken` middleware in main `app.use` by handling token check manually here
     // This allows browser/native Linking to trigger download via URL with query param
@@ -1247,11 +1247,25 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
             }
 
             const settings = await getGlobalSettings();
-            const zip = new AdmZip();
+            
+            // 🔥 STREAMING SETUP 🔥
+            const archiver = require('archiver');
+            const archive = archiver('zip', {
+                zlib: { level: 9 } // Sets the compression level.
+            });
+
+            // Set Headers for Download
+            res.set('Content-Type', 'application/zip');
+            res.set('Content-Disposition', `attachment; filename="${encodeURIComponent(novel.title)}_chapters.zip"`);
+
+            // Pipe archive data to the response
+            archive.pipe(res);
 
             // Sort chapters by number
             novel.chapters.sort((a, b) => a.number - b.number);
 
+            // Process chapters in batches to avoid memory overflow
+            // We use a simple loop but process one by one to keep memory low
             for (const chap of novel.chapters) {
                 let content = "";
                 // Fetch content from Firestore
@@ -1274,6 +1288,17 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                             content = content.replace(regex, '');
                         }
                      });
+                }
+
+                // 1.5. 🔥 Global Replacements Logic (Server-Side) 🔥
+                if (settings.globalReplacements && settings.globalReplacements.length > 0) {
+                    settings.globalReplacements.forEach(rep => {
+                        if (rep.original) {
+                            const escapedOriginal = escapeRegExp(rep.original);
+                            const regex = new RegExp(escapedOriginal, 'g');
+                            content = content.replace(regex, rep.replacement || '');
+                        }
+                    });
                 }
                 
                 // 2. 🔥🔥 INTERNAL CHAPTER SEPARATOR (SMART FIRST LINE ONLY) 🔥🔥
@@ -1324,21 +1349,25 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                     finalContent += "\n\n_________________________________\n\n" + settings.globalChapterEndText;
                 }
 
-                // Add to ZIP (FileName: 1.txt, 2.txt...)
-                zip.addFile(`${chap.number}.txt`, Buffer.from(finalContent, "utf8"));
+                // Add to ZIP Stream (FileName: 1.txt, 2.txt...)
+                archive.append(finalContent, { name: `${chap.number}.txt` });
+                
+                // Small delay to allow GC to work if needed (optional but good for huge lists)
+                // await new Promise(resolve => setImmediate(resolve));
             }
 
-            const zipBuffer = zip.toBuffer();
-            
-            // Set Headers for Download
-            res.set('Content-Type', 'application/zip');
-            res.set('Content-Disposition', `attachment; filename="${encodeURIComponent(novel.title)}_chapters.zip"`);
-            res.set('Content-Length', zipBuffer.length);
-            res.send(zipBuffer);
+            // Finalize the archive (this triggers the end of the stream)
+            await archive.finalize();
 
         } catch (e) {
             console.error("Export Error:", e);
-            res.status(500).json({ error: e.message });
+            // If headers are already sent (streaming started), we can't send JSON error
+            if (!res.headersSent) {
+                res.status(500).json({ error: e.message });
+            } else {
+                // If streaming, just end it (client will get incomplete file)
+                res.end();
+            }
         }
     });
 
