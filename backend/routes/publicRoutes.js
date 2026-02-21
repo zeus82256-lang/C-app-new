@@ -810,17 +810,18 @@ module.exports = function(app, verifyToken, upload) {
             let copyrightStyles = {};
 
             try {
-                // Fetch settings for both Blocklist AND Global Copyrights
+                // Fetch settings for both Blocklist AND Global Copyrights AND Global Replacements
                 const adminSettings = await Settings.findOne({ 
                     $or: [
                         { globalBlocklist: { $exists: true, $not: { $size: 0 } } },
+                        { globalReplacements: { $exists: true, $not: { $size: 0 } } },
                         { globalChapterStartText: { $exists: true } },
                         { enableChapterSeparator: { $exists: true } }
                     ] 
                 }).sort({ updatedAt: -1 }).lean(); 
 
                 if (adminSettings) {
-                    // 1. Cleaner Logic
+                    // 1. Cleaner Logic (Blocklist)
                     if (adminSettings.globalBlocklist && adminSettings.globalBlocklist.length > 0) {
                         const blocklist = adminSettings.globalBlocklist;
                         blocklist.forEach(word => {
@@ -835,7 +836,18 @@ module.exports = function(app, verifyToken, upload) {
                         });
                     }
 
-                    // 2. Formatting cleanup
+                    // 2. 🔥 Global Replacements Logic (Server-Side) 🔥
+                    if (adminSettings.globalReplacements && adminSettings.globalReplacements.length > 0) {
+                        adminSettings.globalReplacements.forEach(rep => {
+                            if (rep.original) {
+                                const escapedOriginal = escapeRegExp(rep.original);
+                                const regex = new RegExp(escapedOriginal, 'g');
+                                content = content.replace(regex, rep.replacement || '');
+                            }
+                        });
+                    }
+
+                    // 3. Formatting cleanup
                     content = content.replace(/^\s*[\r\n]/gm, ''); 
                     content = content.replace(/\n\s*\n/g, '\n\n'); 
 
