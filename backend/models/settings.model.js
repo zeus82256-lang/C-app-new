@@ -84,6 +84,12 @@ RETURN ONLY JSON:` },
     fontSize: { type: Number, default: 18 },
     globalBlocklist: [{ type: String }],
 
+    // 🔥 Global Replacements (Server-Side)
+    globalReplacements: [{ 
+        original: { type: String, required: true }, 
+        replacement: { type: String, default: '' } 
+    }],
+
     // 🔥 Global App Rights (Copyrights) with Styling
     globalChapterStartText: { type: String, default: '' },
     globalChapterEndText: { type: String, default: '' },
