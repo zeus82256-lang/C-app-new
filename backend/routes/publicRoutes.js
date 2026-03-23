@@ -62,6 +62,25 @@ const BASE_CATEGORIES = [
     'مغامرات', 'نظام', 'حريم', 'رعب', 'خيال علمي', 'دراما', 'غموض', 'تاريخي'
 ];
 
+// 🔥 Helper for Content Obfuscation (Genius Level Protection)
+const ZEUS_SECRET = "Z3uS_N0v3l_2026_S3cr3t_K3y";
+function obfuscateText(text) {
+    if (!text) return "";
+    try {
+        // Encode to URI component to handle Arabic characters safely
+        const encoded = encodeURIComponent(text);
+        // Simple XOR with secret key
+        let result = "";
+        for (let i = 0; i < encoded.length; i++) {
+            result += String.fromCharCode(encoded.charCodeAt(i) ^ ZEUS_SECRET.charCodeAt(i % ZEUS_SECRET.length));
+        }
+        // Return as Base64
+        return Buffer.from(result).toString('base64');
+    } catch (e) {
+        return text;
+    }
+}
+
 module.exports = function(app, verifyToken, upload) {
 
     // =========================================================
@@ -556,105 +575,109 @@ module.exports = function(app, verifyToken, upload) {
     });
 
     // 🔥 Rocket Speed Home Screen Aggregation (Updated for Visible Chapter Logic) 🔥
-app.get('/api/novels', async (req, res) => {
-    try {
-        const { filter, search, category, status, sort, page = 1, limit = 20, timeRange } = req.query;
-        const pageNum = parseInt(page);
-        const limitNum = parseInt(limit);
-        const skip = (pageNum - 1) * limitNum;
-        let matchStage = {};
+    app.get('/api/novels', async (req, res) => {
+        try {
+            const { filter, search, category, status, sort, page = 1, limit = 20, timeRange } = req.query;
+            const pageNum = parseInt(page);
+            const limitNum = parseInt(limit);
+            const skip = (pageNum - 1) * limitNum;
+            let matchStage = {};
 
-        const role = getUserRole(req);
-        if (role !== 'admin') {
-            matchStage.status = { $ne: 'خاصة' };
-        }
-
-        if (search) {
-             matchStage.$or = [
-                 { title: { $regex: search, $options: 'i' } },
-                 { author: { $regex: search, $options: 'i' } }
-             ];
-        }
-
-        if (category && category !== 'all') {
-            matchStage.$or = [{ category: category }, { tags: category }];
-        }
-
-        if (status && status !== 'all') {
-            matchStage.status = status; 
-        }
-
-        if (filter === 'latest_updates') {
-            matchStage["chapters.0"] = { $exists: true };
-        }
-
-        let sortStage = {};
-        if (sort === 'chapters_desc') sortStage = { chaptersCount: -1 };
-        else if (sort === 'chapters_asc') sortStage = { chaptersCount: 1 };
-        else if (sort === 'title_asc') sortStage = { title: 1 };
-        else if (sort === 'title_desc') sortStage = { title: -1 };
-        else if (filter === 'latest_updates') sortStage = { lastChapterUpdate: -1 };
-        else if (filter === 'latest_added') sortStage = { createdAt: -1 };
-        else if (filter === 'featured' || filter === 'trending') {
-             if (timeRange === 'day') sortStage = { dailyViews: -1 };
-             else if (timeRange === 'week') sortStage = { weeklyViews: -1 };
-             else if (timeRange === 'month') sortStage = { monthlyViews: -1 };
-             else sortStage = { views: -1 };
-        } else {
-             sortStage = { chaptersCount: -1 };
-        }
-
-        const pipeline = [
-            { $match: matchStage },
-            { 
-                $project: {
-                    title: 1,
-                    cover: 1,
-                    author: 1,
-                    category: 1,
-                    tags: 1,
-                    status: 1,
-                    views: 1,
-                    dailyViews: 1,
-                    weeklyViews: 1,
-                    monthlyViews: 1,
-                    lastChapterUpdate: 1,
-                    createdAt: 1,
-                    rating: 1,
-                    chaptersCount: { $size: { $ifNull: ["$chapters", []] } },
-                    // 🔥 NEW: Get last 5 chapters (instead of just one)
-                    lastFiveChapters: { $slice: [ "$chapters", -5 ] }
-                }
-            },
-            { $sort: sortStage },
-            {
-                $facet: {
-                    metadata: [{ $count: "total" }],
-                    data: [{ $skip: skip }, { $limit: limitNum }]
-                }
+            const role = getUserRole(req);
+            if (role !== 'admin') {
+                matchStage.status = { $ne: 'خاصة' };
             }
-        ];
 
-        const result = await Novel.aggregate(pipeline);
+            if (search) {
+                 matchStage.$or = [
+                     { title: { $regex: search, $options: 'i' } },
+                     { author: { $regex: search, $options: 'i' } }
+                 ];
+            }
 
-        let novelsData = result[0].data;
-        
-        // Format output: map lastFiveChapters to chapters field (for frontend compatibility)
-        novelsData = novelsData.map(n => ({
-            ...n,
-            chapters: n.lastFiveChapters || []
-        }));
+            // 🔥 FIX: Direct match for categories
+            if (category && category !== 'all') {
+                matchStage.$or = [{ category: category }, { tags: category }];
+            }
 
-        const totalCount = result[0].metadata[0] ? result[0].metadata[0].total : 0;
-        const totalPages = Math.ceil(totalCount / limitNum);
+            if (status && status !== 'all') {
+                matchStage.status = status; 
+            }
 
-        res.json({ novels: novelsData, currentPage: pageNum, totalPages: totalPages, totalNovels: totalCount });
+            if (filter === 'latest_updates') {
+                matchStage["chapters.0"] = { $exists: true };
+            }
 
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ message: error.message });
-    }
-});
+            let sortStage = {};
+            if (sort === 'chapters_desc') sortStage = { chaptersCount: -1 };
+            else if (sort === 'chapters_asc') sortStage = { chaptersCount: 1 };
+            else if (sort === 'title_asc') sortStage = { title: 1 };
+            else if (sort === 'title_desc') sortStage = { title: -1 };
+            else if (filter === 'latest_updates') sortStage = { lastChapterUpdate: -1 };
+            else if (filter === 'latest_added') sortStage = { createdAt: -1 };
+            else if (filter === 'featured' || filter === 'trending') {
+                 if (timeRange === 'day') sortStage = { dailyViews: -1 };
+                 else if (timeRange === 'week') sortStage = { weeklyViews: -1 };
+                 else if (timeRange === 'month') sortStage = { monthlyViews: -1 };
+                 else sortStage = { views: -1 };
+            } else {
+                 sortStage = { chaptersCount: -1 };
+            }
+
+            const pipeline = [
+                { $match: matchStage },
+                { 
+                    $project: {
+                        title: 1,
+                        cover: 1,
+                        author: 1,
+                        category: 1,
+                        tags: 1,
+                        status: 1,
+                        views: 1,
+                        dailyViews: 1,
+                        weeklyViews: 1,
+                        monthlyViews: 1,
+                        lastChapterUpdate: 1,
+                        createdAt: 1,
+                        rating: 1,
+                        // 🔥 CRITICAL FIX: Do NOT project chapters array.
+                        // Calculate count database side
+                        chaptersCount: { $size: { $ifNull: ["$chapters", []] } },
+                        // Get only the LAST chapter for "Latest Updates"
+                        lastChapter: { $arrayElemAt: [ "$chapters", -1 ] } // Assuming chapters are sorted by push
+                    }
+                },
+                { $sort: sortStage },
+                {
+                    $facet: {
+                        metadata: [{ $count: "total" }],
+                        data: [{ $skip: skip }, { $limit: limitNum }]
+                    }
+                }
+            ];
+
+            const result = await Novel.aggregate(pipeline);
+
+            let novelsData = result[0].data;
+            
+            // Format output to match old structure but lightweight
+            novelsData = novelsData.map(n => ({
+                ...n,
+                // Create a fake chapters array with just 1 item if needed by frontend logic
+                chapters: n.lastChapter ? [n.lastChapter] : []
+            }));
+
+            const totalCount = result[0].metadata[0] ? result[0].metadata[0].total : 0;
+            const totalPages = Math.ceil(totalCount / limitNum);
+
+            res.json({ novels: novelsData, currentPage: pageNum, totalPages: totalPages, totalNovels: totalCount });
+
+        } catch (error) {
+            console.error(error);
+            res.status(500).json({ message: error.message });
+        }
+    });
 
     // 🔥🔥🔥 LIGHTWEIGHT NOVEL DETAILS (ROCKET SPEED - NO CHAPTERS ARRAY) 🔥🔥🔥
     app.get('/api/novels/:id', async (req, res) => {
@@ -904,7 +927,7 @@ app.get('/api/novels', async (req, res) => {
             // 🔥 SEND SEPARATE FIELDS, DO NOT MERGE INTO CONTENT 🔥
             res.json({ 
                 ...chapterMeta, 
-                content: content, // Pure content
+                content: obfuscateText(content), // 🔥 OBFUSCATED CONTENT (Genius Protection)
                 copyrightStart, // Separate Data
                 copyrightEnd,   // Separate Data
                 copyrightStyles, // Separate Style
