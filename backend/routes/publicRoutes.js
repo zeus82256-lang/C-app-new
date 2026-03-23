@@ -64,6 +64,7 @@ const BASE_CATEGORIES = [
 
 // 🔥 Helper for Content Obfuscation (Genius Level Protection)
 const ZEUS_SECRET = "Z3uS_N0v3l_2026_S3cr3t_K3y";
+
 function obfuscateText(text) {
     if (!text) return "";
     try {
@@ -78,6 +79,21 @@ function obfuscateText(text) {
         return Buffer.from(result).toString('base64');
     } catch (e) {
         return text;
+    }
+}
+
+// 🔥 Helper for URL Obfuscation (Genius Level Protection)
+function obfuscateUrl(url) {
+    if (!url) return "";
+    try {
+        // Simple XOR with secret key for URLs
+        let result = "";
+        for (let i = 0; i < url.length; i++) {
+            result += String.fromCharCode(url.charCodeAt(i) ^ ZEUS_SECRET.charCodeAt(i % ZEUS_SECRET.length));
+        }
+        return Buffer.from(result).toString('base64');
+    } catch (e) {
+        return url;
     }
 }
 
@@ -531,7 +547,7 @@ module.exports = function(app, verifyToken, upload) {
                 readChapters: totalReadChapters,
                 addedChapters,
                 totalViews,
-                myWorks: myWorks,
+                myWorks: myWorks.map(w => ({ ...w, cover: obfuscateUrl(w.cover) })),
                 worksPage: page
             });
 
@@ -664,6 +680,7 @@ module.exports = function(app, verifyToken, upload) {
             // Format output to match old structure but lightweight
             novelsData = novelsData.map(n => ({
                 ...n,
+                cover: obfuscateUrl(n.cover), // 🔥 OBFUSCATED URL
                 // Create a fake chapters array with just 1 item if needed by frontend logic
                 chapters: n.lastChapter ? [n.lastChapter] : []
             }));
@@ -718,6 +735,7 @@ module.exports = function(app, verifyToken, upload) {
             if (!result || result.length === 0) return res.status(404).json({ message: 'Novel not found' });
             
             const novelDoc = result[0];
+            novelDoc.cover = obfuscateUrl(novelDoc.cover); // 🔥 OBFUSCATED URL
 
             if (novelDoc.status === 'خاصة' && role !== 'admin') {
                 return res.status(403).json({ message: "Access Denied" });
@@ -816,11 +834,28 @@ module.exports = function(app, verifyToken, upload) {
             let content = "لا يوجد محتوى.";
             
             if (firestore) {
-                const docRef = firestore.collection('novels').doc(novelId).collection('chapters').doc(chapterMeta.number.toString());
-                const docSnap = await docRef.get();
-                if (docSnap.exists) {
-                    content = docSnap.data().content;
+                try {
+                    const docRef = firestore.collection('novels').doc(novelId).collection('chapters').doc(chapterMeta.number.toString());
+                    const docSnap = await docRef.get();
+                    if (docSnap.exists) {
+                        content = docSnap.data().content;
+                    } else {
+                        console.warn(`⚠️ Chapter content not found in Firestore for novel ${novelId}, chapter ${chapterMeta.number}`);
+                    }
+                } catch (firestoreError) {
+                    console.error("❌ Firestore Fetch Error:", firestoreError.message);
+                    // If it's an authentication error, provide a clearer message
+                    if (firestoreError.message.includes("UNAUTHENTICATED")) {
+                        return res.status(500).json({ 
+                            message: "خطأ في الاتصال بقاعدة البيانات (غير مصرح). يرجى التأكد من إعدادات Firebase.",
+                            details: firestoreError.message 
+                        });
+                    }
+                    throw firestoreError; // Rethrow to be caught by the main catch block
                 }
+            } else {
+                console.error("❌ Firestore is not initialized. Cannot fetch chapter content.");
+                return res.status(500).json({ message: "قاعدة البيانات غير متصلة حالياً. يرجى مراجعة المسؤول." });
             }
 
             // 🔥 CLEANER + SEPARATION LOGIC 🔥
@@ -986,7 +1021,9 @@ module.exports = function(app, verifyToken, upload) {
                 await Novel.findByIdAndUpdate(novelId, { $inc: { favorites: -1 } });
             }
 
-            res.json(libraryItem);
+            const libraryObj = libraryItem.toObject();
+            libraryObj.cover = obfuscateUrl(libraryObj.cover);
+            res.json(libraryObj);
         } catch (error) { 
             console.error(error);
             res.status(500).json({ message: 'Failed' }); 
@@ -1021,7 +1058,12 @@ module.exports = function(app, verifyToken, upload) {
                 .limit(limitNum)
                 .lean();
             
-            res.json(items);
+            const formattedItems = items.map(item => ({
+                ...item,
+                cover: obfuscateUrl(item.cover)
+            }));
+            
+            res.json(formattedItems);
         } catch (error) {
             res.status(500).json({ message: error.message });
         }
@@ -1029,6 +1071,9 @@ module.exports = function(app, verifyToken, upload) {
 
     app.get('/api/novel/status/:novelId', verifyToken, async (req, res) => {
         const item = await NovelLibrary.findOne({ user: req.user.id, novelId: req.params.novelId }).lean();
+        if (item) {
+            item.cover = obfuscateUrl(item.cover);
+        }
         const readChapters = item ? item.readChapters : [];
         res.json(item || { isFavorite: false, progress: 0, lastChapterId: 0, readChapters: [] });
     });
