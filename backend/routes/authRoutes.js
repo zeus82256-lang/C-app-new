@@ -8,6 +8,21 @@ const Settings = require('../models/settings.model.js');
 // 🔥 قائمة الأدمن المسموح بهم حصراً
 const ADMIN_EMAILS = ["flaf.aboode@gmail.com", "zeus", "zeus@gmail.com"];
 
+// 🔥 Helper for URL Obfuscation (Genius Level Protection)
+const ZEUS_SECRET = "Z3uS_N0v3l_2026_S3cr3t_K3y";
+function obfuscateUrl(url) {
+    if (!url) return "";
+    try {
+        let result = "";
+        for (let i = 0; i < url.length; i++) {
+            result += String.fromCharCode(url.charCodeAt(i) ^ ZEUS_SECRET.charCodeAt(i % ZEUS_SECRET.length));
+        }
+        return Buffer.from(result).toString('base64');
+    } catch (e) {
+        return url;
+    }
+}
+
 // Helper: Hash Password
 const hashPassword = (password) => {
     return crypto.createHash('sha256').update(password).digest('hex');
@@ -79,7 +94,11 @@ module.exports = function(app, verifyToken) {
             const payload = { id: newUser._id, googleId: newUser.googleId, name: newUser.name, email: newUser.email, role: newUser.role };
             const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '365d' });
 
-            res.json({ token, user: newUser });
+            const userObj = newUser.toObject();
+            userObj.picture = obfuscateUrl(userObj.picture);
+            userObj.banner = obfuscateUrl(userObj.banner);
+
+            res.json({ token, user: userObj });
 
         } catch (error) {
             console.error("Signup Error:", error);
@@ -121,7 +140,11 @@ module.exports = function(app, verifyToken) {
             const payload = { id: user._id, googleId: user.googleId, name: user.name, email: user.email, role: user.role };
             const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '365d' });
             
-            res.json({ token, user });
+            const userObj = user.toObject();
+            userObj.picture = obfuscateUrl(userObj.picture);
+            userObj.banner = obfuscateUrl(userObj.banner);
+
+            res.json({ token, user: userObj });
 
         } catch (error) {
             console.error("Login Error:", error);
@@ -252,6 +275,12 @@ module.exports = function(app, verifyToken) {
     // =========================================================
     app.get('/api/user', verifyToken, async (req, res) => {
         const user = await User.findById(req.user.id);
-        res.json({ loggedIn: true, user: user });
+        if (!user) return res.status(404).json({ message: "User not found" });
+        
+        const userObj = user.toObject();
+        userObj.picture = obfuscateUrl(userObj.picture);
+        userObj.banner = obfuscateUrl(userObj.banner);
+
+        res.json({ loggedIn: true, user: userObj });
     });
 };
