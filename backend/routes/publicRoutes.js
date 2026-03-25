@@ -36,6 +36,8 @@ const getUserRole = (req) => {
 };
 
 // Helper to check and update status automatically
+const ZEUS_SECRET = "Z3uS_N0v3l_2026_S3cr3t_K3y";
+
 async function checkNovelStatus(novel) {
     if (novel.status === 'مكتملة') return novel; 
 
@@ -92,17 +94,6 @@ function obfuscateText(text) {
         return Buffer.from(result, 'binary').toString('base64');
     } catch (e) {
         return text;
-    }
-}
-
-// 🔥 Helper for URL Obfuscation (Simplified to Base64 for images as requested)
-function obfuscateUrl(url) {
-    if (!url) return "";
-    try {
-        // Just return Base64 to "hide" the URL from casual view without complex encryption
-        return Buffer.from(url).toString('base64');
-    } catch (e) {
-        return url;
     }
 }
 
@@ -415,8 +406,6 @@ module.exports = function(app, verifyToken, upload) {
 
             // Obfuscate URLs for privacy
             const userObj = user.toObject();
-            if (userObj.picture) userObj.picture = obfuscateUrl(userObj.picture);
-            if (userObj.banner) userObj.banner = obfuscateUrl(userObj.banner);
 
             res.json({ user: userObj }); 
         } catch (e) {
@@ -555,8 +544,8 @@ module.exports = function(app, verifyToken, upload) {
                     _id: targetUser._id,
                     name: targetUser.name,
                     email: targetUserId === req.user.id ? targetUser.email : undefined, 
-                    picture: obfuscateUrl(targetUser.picture),
-                    banner: obfuscateUrl(targetUser.banner),
+                    picture: targetUser.picture,
+                    banner: targetUser.banner,
                     bio: targetUser.bio,
                     role: targetUser.role,
                     createdAt: targetUser.createdAt,
@@ -565,7 +554,7 @@ module.exports = function(app, verifyToken, upload) {
                 readChapters: totalReadChapters,
                 addedChapters,
                 totalViews,
-                myWorks: myWorks.map(w => ({ ...w, cover: obfuscateUrl(w.cover) })),
+                myWorks: myWorks,
                 worksPage: page
             });
 
@@ -687,7 +676,6 @@ module.exports = function(app, verifyToken, upload) {
             // Format output to match old structure but lightweight
             novelsData = novelsData.map(n => ({
                 ...n,
-                cover: obfuscateUrl(n.cover), // 🔥 OBFUSCATED URL
                 // Create a fake chapters array with just 1 item if needed by frontend logic
                 chapters: n.lastChapter ? [n.lastChapter] : []
             }));
@@ -741,14 +729,6 @@ module.exports = function(app, verifyToken, upload) {
             
             const novelDoc = result[0];
             
-            // 🔥 OBFUSCATED URLS WITH IMAGE PROXY FOR PROTECTION & CACHING
-            if (novelDoc.cover) {
-                novelDoc.cover = `${process.env.APP_URL}/api/image-proxy?url=${encodeURIComponent(obfuscateUrl(novelDoc.cover))}`;
-            }
-            if (novelDoc.banner) {
-                novelDoc.banner = `${process.env.APP_URL}/api/image-proxy?url=${encodeURIComponent(obfuscateUrl(novelDoc.banner))}`;
-            }
-
             if (novelDoc.status === 'خاصة' && role !== 'admin') {
                 return res.status(403).json({ message: "Access Denied" });
             }
@@ -1038,7 +1018,6 @@ module.exports = function(app, verifyToken, upload) {
             }
 
             const libraryObj = libraryItem.toObject();
-            libraryObj.cover = obfuscateUrl(libraryObj.cover);
             res.json(libraryObj);
         } catch (error) { 
             console.error(error);
@@ -1074,10 +1053,7 @@ module.exports = function(app, verifyToken, upload) {
                 .limit(limitNum)
                 .lean();
             
-            const formattedItems = items.map(item => ({
-                ...item,
-                cover: obfuscateUrl(item.cover)
-            }));
+            const formattedItems = items;
             
             res.json(formattedItems);
         } catch (error) {
@@ -1087,9 +1063,6 @@ module.exports = function(app, verifyToken, upload) {
 
     app.get('/api/novel/status/:novelId', verifyToken, async (req, res) => {
         const item = await NovelLibrary.findOne({ user: req.user.id, novelId: req.params.novelId }).lean();
-        if (item) {
-            item.cover = obfuscateUrl(item.cover);
-        }
         const readChapters = item ? item.readChapters : [];
         res.json(item || { isFavorite: false, progress: 0, lastChapterId: 0, readChapters: [] });
     });
@@ -1279,29 +1252,33 @@ module.exports = function(app, verifyToken, upload) {
             const { url } = req.query;
             if (!url) return res.status(400).send("URL required");
 
-            // 1. 🔥 DEOBFUSCATE URL (Now just Base64 decode for images as requested)
-            let originalUrl = "";
-            try {
-                // Try to decode as plain Base64 first
-                originalUrl = Buffer.from(url, 'base64').toString('utf8');
-                
-                // If it doesn't look like a URL after decoding, it might be the old encrypted format
-                if (!originalUrl.startsWith('http')) {
-                    let decrypted = "";
-                    const buffer = Buffer.from(url, 'base64').toString('binary');
-                    for (let i = 0; i < buffer.length; i++) {
-                        let charCode = buffer.charCodeAt(i);
-                        const offset = (i * 3) % 7;
-                        charCode = (charCode - offset + 256) % 256;
-                        charCode = charCode ^ ZEUS_SECRET.charCodeAt(i % ZEUS_SECRET.length);
-                        decrypted += String.fromCharCode(charCode);
+            let originalUrl = url;
+
+            // Try to decode if it looks like Base64 and doesn't start with http
+            if (!url.startsWith('http')) {
+                try {
+                    // Try to decode as plain Base64 first
+                    const decoded = Buffer.from(url, 'base64').toString('utf8');
+                    if (decoded.startsWith('http')) {
+                        originalUrl = decoded;
+                    } else {
+                        // Try old encrypted format fallback
+                        let decrypted = "";
+                        const buffer = Buffer.from(url, 'base64').toString('binary');
+                        for (let i = 0; i < buffer.length; i++) {
+                            let charCode = buffer.charCodeAt(i);
+                            const offset = (i * 3) % 7;
+                            charCode = (charCode - offset + 256) % 256;
+                            charCode = charCode ^ ZEUS_SECRET.charCodeAt(i % ZEUS_SECRET.length);
+                            decrypted += String.fromCharCode(charCode);
+                        }
+                        if (decrypted.startsWith('http')) {
+                            originalUrl = decrypted;
+                        }
                     }
-                    if (decrypted.startsWith('http')) {
-                        originalUrl = decrypted;
-                    }
+                } catch (e) {
+                    // If decoding fails, assume it was already a plain URL (though it didn't start with http)
                 }
-            } catch (e) {
-                originalUrl = url; // Fallback if not obfuscated
             }
 
             if (!originalUrl.startsWith('http')) {
@@ -1309,7 +1286,6 @@ module.exports = function(app, verifyToken, upload) {
             }
 
             // 2. 🔥 PIPE THE IMAGE (Strong Protection + Bypass Restrictions) 🔥
-            // This hides the original source and works even if Cloudinary fetch is restricted
             const response = await axios({
                 method: 'get',
                 url: originalUrl,
@@ -1317,20 +1293,17 @@ module.exports = function(app, verifyToken, upload) {
                 timeout: 10000,
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Referer': 'https://www.google.com/' // Spoof referer
+                    'Referer': 'https://www.google.com/' 
                 }
             });
 
-            // Set headers
             res.set('Content-Type', response.headers['content-type'] || 'image/jpeg');
-            res.set('Cache-Control', 'public, max-age=604800, immutable'); // 🔥 STRONG CACHE
+            res.set('Cache-Control', 'public, max-age=604800, immutable'); 
             
-            // Pipe the data
             response.data.pipe(res);
 
         } catch (error) {
             console.error("Proxy Error:", error.message);
-            // Fallback to a placeholder if image fails
             res.redirect('https://res.cloudinary.com/djuhxdjj/image/upload/v1716543210/placeholder_novel.png');
         }
     });
