@@ -15,12 +15,26 @@ function obfuscateUrl(url) {
     try {
         let result = "";
         for (let i = 0; i < url.length; i++) {
-            result += String.fromCharCode(url.charCodeAt(i) ^ ZEUS_SECRET.charCodeAt(i % ZEUS_SECRET.length));
+            let charCode = url.charCodeAt(i);
+            charCode = charCode ^ ZEUS_SECRET.charCodeAt(i % ZEUS_SECRET.length);
+            const offset = (i * 3) % 7;
+            charCode = (charCode + offset) % 256;
+            result += String.fromCharCode(charCode);
         }
-        return Buffer.from(result).toString('base64');
+        // Return as Base64 using 'binary' encoding
+        return Buffer.from(result, 'binary').toString('base64');
     } catch (e) {
         return url;
     }
+}
+
+// 🔥 Helper to wrap URL in proxy (Ensures frontend can always see images)
+function getProxyUrl(url) {
+    if (!url) return "";
+    if (url.includes('/api/image-proxy')) return url; // Already proxied
+    const obfuscated = obfuscateUrl(url);
+    const baseUrl = process.env.APP_URL || "";
+    return `${baseUrl}/api/image-proxy?url=${encodeURIComponent(obfuscated)}`;
 }
 
 // Helper: Hash Password
@@ -95,8 +109,8 @@ module.exports = function(app, verifyToken) {
             const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '365d' });
 
             const userObj = newUser.toObject();
-            userObj.picture = obfuscateUrl(userObj.picture);
-            userObj.banner = obfuscateUrl(userObj.banner);
+            userObj.picture = getProxyUrl(userObj.picture);
+            userObj.banner = getProxyUrl(userObj.banner);
 
             res.json({ token, user: userObj });
 
@@ -141,8 +155,8 @@ module.exports = function(app, verifyToken) {
             const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '365d' });
             
             const userObj = user.toObject();
-            userObj.picture = obfuscateUrl(userObj.picture);
-            userObj.banner = obfuscateUrl(userObj.banner);
+            userObj.picture = getProxyUrl(userObj.picture);
+            userObj.banner = getProxyUrl(userObj.banner);
 
             res.json({ token, user: userObj });
 
@@ -278,8 +292,8 @@ module.exports = function(app, verifyToken) {
         if (!user) return res.status(404).json({ message: "User not found" });
         
         const userObj = user.toObject();
-        userObj.picture = obfuscateUrl(userObj.picture);
-        userObj.banner = obfuscateUrl(userObj.banner);
+        userObj.picture = getProxyUrl(userObj.picture);
+        userObj.banner = getProxyUrl(userObj.banner);
 
         res.json({ loggedIn: true, user: userObj });
     });
