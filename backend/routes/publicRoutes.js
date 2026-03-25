@@ -66,8 +66,6 @@ const BASE_CATEGORIES = [
 ];
 
 // 🔥 Helper for Content Obfuscation (Genius Level Protection - Multi-layered)
-const ZEUS_SECRET = "Z3uS_N0v3l_2026_S3cr3t_K3y";
-
 function obfuscateText(text) {
     if (!text) return "";
     try {
