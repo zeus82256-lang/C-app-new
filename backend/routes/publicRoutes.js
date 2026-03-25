@@ -402,23 +402,25 @@ module.exports = function(app, verifyToken, upload) {
             let query = {};
             
             if (userId) {
+                // 🔥 SMART CHECK: If it's a valid ObjectId, use it. Otherwise, assume it's an email (legacy/fallback)
                 if (mongoose.Types.ObjectId.isValid(userId)) {
                     query._id = userId;
                 } else {
                     query.email = userId.toLowerCase();
                 }
             } else if (email) {
-                query.email = email.toLowerCase();
+                query.email = email.toLowerCase(); // Ensure case insensitivity
             } else {
                 return res.status(400).json({ message: "Identifier required" });
             }
 
+            // Fetch ONLY basic info, NO calculations
             const user = await User.findOne(query).select('name picture banner bio role createdAt isHistoryPublic');
             
             if (!user) return res.status(404).json({ message: "User not found" });
 
+            // Obfuscate URLs for privacy
             const userObj = user.toObject();
-            // obfuscate picture and banner URLs for privacy
             if (userObj.picture) userObj.picture = obfuscateUrl(userObj.picture);
             if (userObj.banner) userObj.banner = obfuscateUrl(userObj.banner);
 
@@ -442,6 +444,7 @@ module.exports = function(app, verifyToken, upload) {
                  updates.name = name;
             }
 
+            // 🔥 Validate and Update Email
             if (email && email !== req.user.email) {
                 const lowerEmail = email.toLowerCase();
                 const emailRegex = /^[a-zA-Z]{5,}@gmail\.com$/;
@@ -479,6 +482,7 @@ module.exports = function(app, verifyToken, upload) {
             let targetUserId = req.user.id;
             let targetUser = null;
             
+            // Pagination Params
             const page = parseInt(req.query.page) || 1;
             const limit = parseInt(req.query.limit) || 20;
             const skip = (page - 1) * limit;
@@ -495,6 +499,7 @@ module.exports = function(app, verifyToken, upload) {
 
             if (!targetUser) return res.status(404).json({ message: "User not found" });
 
+            // 1. Library Stats
             const libraryStats = await NovelLibrary.aggregate([
                 { $match: { user: new mongoose.Types.ObjectId(targetUserId) } },
                 { $project: { readCount: { $size: { $ifNull: ["$readChapters", []] } } } },
@@ -502,13 +507,14 @@ module.exports = function(app, verifyToken, upload) {
             ]);
             const totalReadChapters = libraryStats[0] ? libraryStats[0].totalRead : 0;
 
+            // 2. My Works Stats
             const worksStats = await Novel.aggregate([
                 { 
                     $match: { 
                         $or: [
                             { authorEmail: targetUser.email },
                             { author: { $regex: new RegExp(`^${targetUser.name}$`, 'i') } } 
-                        ]
+                        ] 
                     } 
                 },
                 {
@@ -523,13 +529,15 @@ module.exports = function(app, verifyToken, upload) {
             const addedChapters = worksStats[0] ? worksStats[0].totalChapters : 0;
             const totalViews = worksStats[0] ? worksStats[0].totalViews : 0;
 
+            // 3. Lightweight My Works List (PAGINATED)
+            // Sort: Descending (First Added to Last Added -> Newest first) - createdAt: -1
             const myWorks = await Novel.aggregate([
                 { 
                     $match: { 
                         $or: [
                             { authorEmail: targetUser.email },
                             { author: { $regex: new RegExp(`^${targetUser.name}$`, 'i') } } 
-                        ]
+                        ] 
                     } 
                 },
                 {
@@ -543,7 +551,7 @@ module.exports = function(app, verifyToken, upload) {
                         chaptersCount: { $size: { $ifNull: ["$chapters", []] } }
                     }
                 },
-                { $sort: { createdAt: -1 } },
+                { $sort: { createdAt: -1 } }, // Descending (Newest First)
                 { $skip: skip },
                 { $limit: limit }
             ]);
@@ -579,6 +587,7 @@ module.exports = function(app, verifyToken, upload) {
             const { id } = req.params;
             if (!mongoose.Types.ObjectId.isValid(id)) return res.status(404).send('Invalid ID');
             
+            // 🔥 Direct increment for maximum performance
             await Novel.findByIdAndUpdate(id, {
                 $inc: { 
                     views: 1,
@@ -615,6 +624,7 @@ module.exports = function(app, verifyToken, upload) {
                  ];
             }
 
+            // 🔥 FIX: Direct match for categories
             if (category && category !== 'all') {
                 matchStage.$or = [{ category: category }, { tags: category }];
             }
@@ -660,8 +670,11 @@ module.exports = function(app, verifyToken, upload) {
                         lastChapterUpdate: 1,
                         createdAt: 1,
                         rating: 1,
+                        // 🔥 CRITICAL FIX: Do NOT project chapters array.
+                        // Calculate count database side
                         chaptersCount: { $size: { $ifNull: ["$chapters", []] } },
-                        lastChapter: { $arrayElemAt: [ "$chapters", -1 ] }
+                        // Get only the LAST chapter for "Latest Updates"
+                        lastChapter: { $arrayElemAt: [ "$chapters", -1 ] } // Assuming chapters are sorted by push
                     }
                 },
                 { $sort: sortStage },
@@ -677,9 +690,11 @@ module.exports = function(app, verifyToken, upload) {
 
             let novelsData = result[0].data;
             
+            // Format output to match old structure but lightweight
             novelsData = novelsData.map(n => ({
                 ...n,
-                cover: obfuscateUrl(n.cover),
+                cover: obfuscateUrl(n.cover), // 🔥 OBFUSCATED URL
+                // Create a fake chapters array with just 1 item if needed by frontend logic
                 chapters: n.lastChapter ? [n.lastChapter] : []
             }));
 
@@ -701,6 +716,7 @@ module.exports = function(app, verifyToken, upload) {
             
             const role = getUserRole(req);
 
+            // 🚀 AGGREGATION PIPELINE FOR SPEED & EXCLUDING CHAPTERS 🚀
             const pipeline = [
                 { $match: { _id: new mongoose.Types.ObjectId(req.params.id) } },
                 {
@@ -708,7 +724,7 @@ module.exports = function(app, verifyToken, upload) {
                         title: 1,
                         titleEn: 1,
                         author: 1,
-                        authorId: 1,
+                        authorId: 1, // 🔥 NEW: Include authorId
                         cover: 1,
                         banner: 1,
                         description: 1,
@@ -720,6 +736,7 @@ module.exports = function(app, verifyToken, upload) {
                         favorites: 1,
                         lastChapterUpdate: 1,
                         createdAt: 1,
+                        // 🔥 Calculate count in DB, do NOT return array
                         chaptersCount: { $size: { $ifNull: ["$chapters", []] } }
                     }
                 }
@@ -730,7 +747,7 @@ module.exports = function(app, verifyToken, upload) {
             
             const novelDoc = result[0];
             
-            // Build proxy URL for images
+            // 🔥 OBFUSCATED URLS WITH IMAGE PROXY FOR PROTECTION & CACHING
             const baseUrl = `${req.protocol}://${req.get('host')}`;
             if (novelDoc.cover) {
                 novelDoc.cover = `${baseUrl}/api/image-proxy?url=${encodeURIComponent(obfuscateUrl(novelDoc.cover))}`;
@@ -743,6 +760,7 @@ module.exports = function(app, verifyToken, upload) {
                 return res.status(403).json({ message: "Access Denied" });
             }
 
+            // Sync status check (Async, detached from response speed)
             Novel.findById(req.params.id).then(doc => {
                 if (doc) checkNovelStatus(doc);
             }).catch(err => console.error("Status check error:", err));
@@ -759,22 +777,32 @@ module.exports = function(app, verifyToken, upload) {
             const { id } = req.params;
             const page = parseInt(req.query.page) || 1;
             const limit = parseInt(req.query.limit) || 25;
-            const sortOrder = req.query.sort === 'desc' ? -1 : 1;
+            const sortOrder = req.query.sort === 'desc' ? -1 : 1; // Default Ascending (1, 2, 3...)
             const skip = (page - 1) * limit;
             
             const role = getUserRole(req);
 
+            // Using aggregation to efficiently unwrap, sort, and slice the array
             const pipeline = [
                 { $match: { _id: new mongoose.Types.ObjectId(id) } },
+                
+                // 1. Unwind the chapters array to documents
                 { $unwind: "$chapters" },
+
+                // 2. Filter hidden chapters (if not admin)
                 ...(role !== 'admin' ? [{
                     $match: {
                         $and: [
                             { "chapters.title": { $not: { $regex: /chapter|ago|month|week|day|year/i } } }
+                            // Add more filters here if needed based on isChapterHidden logic
                         ]
                     }
                 }] : []),
+
+                // 3. Sort by number
                 { $sort: { "chapters.number": sortOrder } },
+
+                // 4. Project only needed fields (Metadata only, NO content)
                 {
                     $project: {
                         _id: "$chapters._id",
@@ -784,11 +812,14 @@ module.exports = function(app, verifyToken, upload) {
                         views: "$chapters.views"
                     }
                 },
+
+                // 5. Pagination
                 { $skip: skip },
                 { $limit: limit }
             ];
 
             const chapters = await Novel.aggregate(pipeline);
+
             res.json(chapters);
 
         } catch (error) {
@@ -834,24 +865,27 @@ module.exports = function(app, verifyToken, upload) {
                     }
                 } catch (firestoreError) {
                     console.error("❌ Firestore Fetch Error:", firestoreError.message);
+                    // If it's an authentication error, provide a clearer message
                     if (firestoreError.message.includes("UNAUTHENTICATED")) {
                         return res.status(500).json({ 
                             message: "خطأ في الاتصال بقاعدة البيانات (غير مصرح). يرجى التأكد من إعدادات Firebase.",
                             details: firestoreError.message 
                         });
                     }
-                    throw firestoreError;
+                    throw firestoreError; // Rethrow to be caught by the main catch block
                 }
             } else {
                 console.error("❌ Firestore is not initialized. Cannot fetch chapter content.");
                 return res.status(500).json({ message: "قاعدة البيانات غير متصلة حالياً. يرجى مراجعة المسؤول." });
             }
 
+            // 🔥 CLEANER + SEPARATION LOGIC 🔥
             let copyrightStart = "";
             let copyrightEnd = "";
             let copyrightStyles = {};
 
             try {
+                // Fetch settings for both Blocklist AND Global Copyrights AND Global Replacements
                 const adminSettings = await Settings.findOne({ 
                     $or: [
                         { globalBlocklist: { $exists: true, $not: { $size: 0 } } },
@@ -862,6 +896,7 @@ module.exports = function(app, verifyToken, upload) {
                 }).sort({ updatedAt: -1 }).lean(); 
 
                 if (adminSettings) {
+                    // 1. Cleaner Logic (Blocklist)
                     if (adminSettings.globalBlocklist && adminSettings.globalBlocklist.length > 0) {
                         const blocklist = adminSettings.globalBlocklist;
                         blocklist.forEach(word => {
@@ -876,6 +911,7 @@ module.exports = function(app, verifyToken, upload) {
                         });
                     }
 
+                    // 2. 🔥 Global Replacements Logic (Server-Side) 🔥
                     if (adminSettings.globalReplacements && adminSettings.globalReplacements.length > 0) {
                         adminSettings.globalReplacements.forEach(rep => {
                             if (rep.original) {
@@ -886,22 +922,29 @@ module.exports = function(app, verifyToken, upload) {
                         });
                     }
 
+                    // 3. Formatting cleanup
                     content = content.replace(/^\s*[\r\n]/gm, ''); 
                     content = content.replace(/\n\s*\n/g, '\n\n'); 
 
+                    // 3. 🔥🔥 INTERNAL CHAPTER SEPARATOR (SMART FIRST LINE ONLY) 🔥🔥
+                    // Check if separator enabled in settings
                     if (adminSettings.enableChapterSeparator) {
                         const separatorLine = `\n\n${adminSettings.chapterSeparatorText || '________________________________________'}\n\n`;
+                        
+                        // We check the FIRST non-empty paragraph only
+                        // Split by double newlines or single to find first block
                         const lines = content.split('\n');
                         let replaced = false;
                         
                         for (let i = 0; i < lines.length; i++) {
                             const lineTrimmed = lines[i].trim();
                             if (lineTrimmed.length > 0) {
+                                // 🔥 Updated Regex: Matches 'Chapter', 'الفصل', 'فصل' OR checks for ':'
                                 if (/^(?:الفصل|Chapter|فصل)|:/i.test(lineTrimmed)) {
                                     lines[i] = lines[i] + separatorLine;
                                     replaced = true;
                                 }
-                                break;
+                                break; // Stop after first non-empty line regardless of match
                             }
                         }
                         
@@ -910,6 +953,7 @@ module.exports = function(app, verifyToken, upload) {
                         }
                     }
 
+                    // 4. Copyright Logic (Separated)
                     const frequency = adminSettings.copyrightFrequency || 'always';
                     const everyX = adminSettings.copyrightEveryX || 5;
                     const chapNum = parseInt(chapterMeta.number);
@@ -925,6 +969,7 @@ module.exports = function(app, verifyToken, upload) {
                         copyrightStart = adminSettings.globalChapterStartText || "";
                         copyrightEnd = adminSettings.globalChapterEndText || "";
                         copyrightStyles = adminSettings.globalCopyrightStyles || {};
+                        // Ensure font size is sent if missing
                         if (!copyrightStyles.fontSize) copyrightStyles.fontSize = 14; 
                     }
                 }
@@ -935,13 +980,13 @@ module.exports = function(app, verifyToken, upload) {
                 totalAvailable = novel.chapters.filter(c => !isChapterHidden(c.title)).length;
             }
 
-            // 🔥 SEND OBFUSCATED CONTENT
+            // 🔥 SEND SEPARATE FIELDS, DO NOT MERGE INTO CONTENT 🔥
             res.json({ 
                 ...chapterMeta, 
-                content: obfuscateText(content),
-                copyrightStart,
-                copyrightEnd,
-                copyrightStyles,
+                content: content, // 🔥 FIXED: Send plain content (no obfuscation)
+                copyrightStart, // Separate Data
+                copyrightEnd,   // Separate Data
+                copyrightStyles, // Separate Style
                 totalChapters: totalAvailable
             });
         } catch (error) {
@@ -1060,17 +1105,20 @@ module.exports = function(app, verifyToken, upload) {
             const userId = new mongoose.Types.ObjectId(req.user.id);
 
             const pipeline = [
+                // Step 1: Match user's favorite library entries
                 { 
                     $match: { 
                         user: userId, 
                         isFavorite: true 
                     } 
                 },
+                // Step 2: Convert novelId to ObjId
                 {
                     $addFields: {
                         novelIdObj: { $toObjectId: "$novelId" }
                     }
                 },
+                // Step 3: Join with Novels
                 {
                     $lookup: {
                         from: 'novels',
@@ -1080,22 +1128,29 @@ module.exports = function(app, verifyToken, upload) {
                     }
                 },
                 { $unwind: "$novelData" },
+                
+                // Step 4: Filter out hidden/private novels
                 { 
                     $match: { 
                         "novelData.status": { $ne: 'خاصة' } 
                     } 
                 },
+
+                // Step 5: Pre-filter by date (optimization)
                 {
                     $match: {
                         $expr: { $gt: ["$novelData.lastChapterUpdate", "$createdAt"] }
                     }
                 },
+
+                // Step 6: Project only necessary fields including CHAPTERS array
                 {
                     $project: {
                         _id: "$novelData._id",
                         title: "$novelData.title",
                         cover: "$novelData.cover",
                         lastChapterUpdate: "$novelData.lastChapterUpdate",
+                        // Pass chapters to determine visible ones
                         chapters: {
                             $map: {
                                 input: "$novelData.chapters",
@@ -1107,6 +1162,7 @@ module.exports = function(app, verifyToken, upload) {
                                 }
                             }
                         },
+                        // Calculate unread count (raw logic)
                         unreadCountRaw: {
                             $size: {
                                 $filter: {
@@ -1114,8 +1170,8 @@ module.exports = function(app, verifyToken, upload) {
                                     as: "ch",
                                     cond: {
                                         $and: [
-                                            { $gt: ["$$ch.createdAt", "$createdAt"] },
-                                            { $not: { $in: ["$$ch.number", { $ifNull: ["$readChapters", []] }] } }
+                                            { $gt: ["$$ch.createdAt", "$createdAt"] }, // Newer than library bookmark
+                                            { $not: { $in: ["$$ch.number", { $ifNull: ["$readChapters", []] }] } } // Not read
                                         ]
                                     }
                                 }
@@ -1123,16 +1179,23 @@ module.exports = function(app, verifyToken, upload) {
                         }
                     }
                 },
+                
+                // Step 7: Only keep results with potential unread
                 { $match: { unreadCountRaw: { $gt: 0 } } },
+                
+                // Step 8: Sort
                 { $sort: { lastChapterUpdate: -1 } }
             ];
 
             const rawNotifications = await NovelLibrary.aggregate(pipeline);
             
+            // 🔥🔥 POST-PROCESSING: Filter Hidden Chapters for Notifications 🔥🔥
             const formattedNotifications = rawNotifications.map(n => {
                 let lastVisible = null;
+                // Sort chapters desc
                 n.chapters.sort((a, b) => b.number - a.number);
                 
+                // Find latest visible chapter
                 for (const ch of n.chapters) {
                     if (!isChapterHidden(ch.title)) {
                         lastVisible = ch;
@@ -1140,23 +1203,43 @@ module.exports = function(app, verifyToken, upload) {
                     }
                 }
 
+                // If no visible chapters, skip this notification (return null to filter later)
                 if (!lastVisible) return null;
 
+                // Re-calculate Unread Count based ONLY on visible chapters that are new
+                // This ensures "Hidden/Raw" chapters don't count towards the badge
                 const visibleUnreadCount = n.chapters.filter(ch => 
                     !isChapterHidden(ch.title) && 
-                    new Date(ch.createdAt) > new Date(n.createdAt)
+                    new Date(ch.createdAt) > new Date(n.createdAt) && // Check against library update time or bookmark logic
+                    // We assume if it's visible and new, it counts. 
+                    // To be precise: createdAt of chapter > createdAt of Library Entry (when user favored it or last read)
+                    // The aggregation passed 'unreadCountRaw' but that included hidden chapters.
+                    // We can approximate unread count as 1 if we have a new visible chapter.
+                    true
                 ).length;
+
+                // Actually, let's simplify. If there is a lastVisible chapter that is newer than the library interaction, it's an update.
+                // We use the aggregation's unreadCountRaw logic but strictly for visible.
+                
+                // Correct logic:
+                // unreadCount = number of chapters where !isHidden AND createdAt > library.createdAt
+                // We already filtered by createdAt > library.createdAt in aggregation pipeline via `unreadCountRaw`.
+                // So we just need to filter `n.chapters` for !isHidden.
+                
+                // NOTE: `n.chapters` here contains ALL chapters. We need to check against library time again? 
+                // No, the aggregation filtered `n.chapters`? No, it projected ALL chapters.
+                // Okay, let's just use the `lastVisible` one for display.
                 
                 return {
                     _id: n._id,
                     title: n.title,
-                    cover: obfuscateUrl(n.cover),
-                    newChaptersCount: visibleUnreadCount > 0 ? visibleUnreadCount : 1,
+                    cover: n.cover,
+                    newChaptersCount: visibleUnreadCount > 0 ? visibleUnreadCount : 1, // Fallback to 1
                     lastChapterNumber: lastVisible.number,
                     lastChapterTitle: lastVisible.title,
                     updatedAt: n.lastChapterUpdate
                 };
-            }).filter(n => n !== null);
+            }).filter(n => n !== null); // Remove nulls (novels with only hidden chapters)
 
             const totalUnread = formattedNotifications.reduce((sum, n) => sum + n.newChaptersCount, 0);
 
@@ -1171,12 +1254,15 @@ module.exports = function(app, verifyToken, upload) {
     // 🔥🔥🔥 MARK ALL AS READ 🔥🔥🔥
     app.post('/api/notifications/mark-read', verifyToken, async (req, res) => {
         try {
+            // Fetch all favorite library entries for the user
             const libraryItems = await NovelLibrary.find({ user: req.user.id, isFavorite: true });
             
             const updates = libraryItems.map(async (item) => {
                 const novel = await Novel.findById(item.novelId).select('chapters.number');
                 if (novel && novel.chapters) {
                     const allChapters = novel.chapters.map(c => c.number);
+                    // Merge existing read chapters with all available chapters
+                    // converting to Set to remove duplicates, then back to array
                     const newReadSet = new Set([...(item.readChapters || []), ...allChapters]);
                     item.readChapters = Array.from(newReadSet);
                     return item.save();
@@ -1198,7 +1284,7 @@ module.exports = function(app, verifyToken, upload) {
             const { url } = req.query;
             if (!url) return res.status(400).send("URL required");
 
-            // 1. 🔥 DEOBFUSCATE URL (Reverse the strong protection) using binary
+            // 1. 🔥 DEOBFUSCATE URL (Reverse the strong protection)
             let originalUrl = "";
             try {
                 const buffer = Buffer.from(url, 'base64').toString('binary');
@@ -1218,6 +1304,7 @@ module.exports = function(app, verifyToken, upload) {
             }
 
             // 2. 🔥 PIPE THE IMAGE (Strong Protection + Bypass Restrictions) 🔥
+            // This hides the original source and works even if Cloudinary fetch is restricted
             const response = await axios({
                 method: 'get',
                 url: originalUrl,
@@ -1225,19 +1312,21 @@ module.exports = function(app, verifyToken, upload) {
                 timeout: 10000,
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Referer': 'https://www.google.com/'
+                    'Referer': 'https://www.google.com/' // Spoof referer
                 }
             });
 
+            // Set headers
             res.set('Content-Type', response.headers['content-type'] || 'image/jpeg');
-            res.set('Cache-Control', 'public, max-age=604800, immutable');
+            res.set('Cache-Control', 'public, max-age=604800, immutable'); // 🔥 STRONG CACHE
             
+            // Pipe the data
             response.data.pipe(res);
 
         } catch (error) {
             console.error("Proxy Error:", error.message);
-            // Fallback to a placeholder that works
-            res.redirect('https://picsum.photos/seed/novel/400/600');
+            // Fallback to a placeholder if image fails
+            res.redirect('https://res.cloudinary.com/djuhxdjj/image/upload/v1716543210/placeholder_novel.png');
         }
     });
 
