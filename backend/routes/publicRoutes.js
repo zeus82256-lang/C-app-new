@@ -88,8 +88,8 @@ function obfuscateText(text) {
             
             result += String.fromCharCode(charCode);
         }
-        // Return as Base64
-        return Buffer.from(result).toString('base64');
+        // Return as Base64 using 'binary' encoding to preserve char codes 0-255
+        return Buffer.from(result, 'binary').toString('base64');
     } catch (e) {
         return text;
     }
@@ -107,10 +107,20 @@ function obfuscateUrl(url) {
             charCode = (charCode + offset) % 256;
             result += String.fromCharCode(charCode);
         }
-        return Buffer.from(result).toString('base64');
+        // Return as Base64 using 'binary' encoding
+        return Buffer.from(result, 'binary').toString('base64');
     } catch (e) {
         return url;
     }
+}
+
+// 🔥 Helper to wrap URL in proxy (Ensures frontend can always see images)
+function getProxyUrl(url) {
+    if (!url) return "";
+    if (url.includes('/api/image-proxy')) return url; // Already proxied
+    const obfuscated = obfuscateUrl(url);
+    const baseUrl = process.env.APP_URL || "";
+    return `${baseUrl}/api/image-proxy?url=${encodeURIComponent(obfuscated)}`;
 }
 
 module.exports = function(app, verifyToken, upload) {
@@ -422,8 +432,8 @@ module.exports = function(app, verifyToken, upload) {
 
             // Obfuscate URLs for privacy
             const userObj = user.toObject();
-            if (userObj.picture) userObj.picture = obfuscateUrl(userObj.picture);
-            if (userObj.banner) userObj.banner = obfuscateUrl(userObj.banner);
+            if (userObj.picture) userObj.picture = getProxyUrl(userObj.picture);
+            if (userObj.banner) userObj.banner = getProxyUrl(userObj.banner);
 
             res.json({ user: userObj }); 
         } catch (e) {
@@ -562,8 +572,8 @@ module.exports = function(app, verifyToken, upload) {
                     _id: targetUser._id,
                     name: targetUser.name,
                     email: targetUserId === req.user.id ? targetUser.email : undefined, 
-                    picture: obfuscateUrl(targetUser.picture),
-                    banner: obfuscateUrl(targetUser.banner),
+                    picture: getProxyUrl(targetUser.picture),
+                    banner: getProxyUrl(targetUser.banner),
                     bio: targetUser.bio,
                     role: targetUser.role,
                     createdAt: targetUser.createdAt,
@@ -572,7 +582,7 @@ module.exports = function(app, verifyToken, upload) {
                 readChapters: totalReadChapters,
                 addedChapters,
                 totalViews,
-                myWorks: myWorks.map(w => ({ ...w, cover: obfuscateUrl(w.cover) })),
+                myWorks: myWorks.map(w => ({ ...w, cover: getProxyUrl(w.cover) })),
                 worksPage: page
             });
 
@@ -694,7 +704,7 @@ module.exports = function(app, verifyToken, upload) {
             // Format output to match old structure but lightweight
             novelsData = novelsData.map(n => ({
                 ...n,
-                cover: obfuscateUrl(n.cover), // 🔥 OBFUSCATED URL
+                cover: getProxyUrl(n.cover), // 🔥 OBFUSCATED URL
                 // Create a fake chapters array with just 1 item if needed by frontend logic
                 chapters: n.lastChapter ? [n.lastChapter] : []
             }));
@@ -750,10 +760,10 @@ module.exports = function(app, verifyToken, upload) {
             
             // 🔥 OBFUSCATED URLS WITH IMAGE PROXY FOR PROTECTION & CACHING
             if (novelDoc.cover) {
-                novelDoc.cover = `${process.env.APP_URL}/api/image-proxy?url=${encodeURIComponent(obfuscateUrl(novelDoc.cover))}`;
+                novelDoc.cover = getProxyUrl(novelDoc.cover);
             }
             if (novelDoc.banner) {
-                novelDoc.banner = `${process.env.APP_URL}/api/image-proxy?url=${encodeURIComponent(obfuscateUrl(novelDoc.banner))}`;
+                novelDoc.banner = getProxyUrl(novelDoc.banner);
             }
 
             if (novelDoc.status === 'خاصة' && role !== 'admin') {
@@ -1043,7 +1053,7 @@ module.exports = function(app, verifyToken, upload) {
             }
 
             const libraryObj = libraryItem.toObject();
-            libraryObj.cover = obfuscateUrl(libraryObj.cover);
+            libraryObj.cover = getProxyUrl(libraryObj.cover);
             res.json(libraryObj);
         } catch (error) { 
             console.error(error);
@@ -1081,7 +1091,7 @@ module.exports = function(app, verifyToken, upload) {
             
             const formattedItems = items.map(item => ({
                 ...item,
-                cover: obfuscateUrl(item.cover)
+                cover: getProxyUrl(item.cover)
             }));
             
             res.json(formattedItems);
@@ -1093,7 +1103,7 @@ module.exports = function(app, verifyToken, upload) {
     app.get('/api/novel/status/:novelId', verifyToken, async (req, res) => {
         const item = await NovelLibrary.findOne({ user: req.user.id, novelId: req.params.novelId }).lean();
         if (item) {
-            item.cover = obfuscateUrl(item.cover);
+            item.cover = getProxyUrl(item.cover);
         }
         const readChapters = item ? item.readChapters : [];
         res.json(item || { isFavorite: false, progress: 0, lastChapterId: 0, readChapters: [] });
@@ -1233,7 +1243,7 @@ module.exports = function(app, verifyToken, upload) {
                 return {
                     _id: n._id,
                     title: n.title,
-                    cover: n.cover,
+                    cover: getProxyUrl(n.cover),
                     newChaptersCount: visibleUnreadCount > 0 ? visibleUnreadCount : 1, // Fallback to 1
                     lastChapterNumber: lastVisible.number,
                     lastChapterTitle: lastVisible.title,
