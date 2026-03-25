@@ -1,6 +1,7 @@
 
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken'); 
+const axios = require('axios');
 
 // --- Config Imports ---
 let firestore, cloudinary;
@@ -545,9 +546,9 @@ module.exports = function(app, verifyToken, upload) {
                 user: {
                     _id: targetUser._id,
                     name: targetUser.name,
-                    email: targetUser.email, 
-                    picture: targetUser.picture,
-                    banner: targetUser.banner,
+                    email: targetUserId === req.user.id ? targetUser.email : undefined, 
+                    picture: obfuscateUrl(targetUser.picture),
+                    banner: obfuscateUrl(targetUser.banner),
                     bio: targetUser.bio,
                     role: targetUser.role,
                     createdAt: targetUser.createdAt,
@@ -720,9 +721,9 @@ module.exports = function(app, verifyToken, upload) {
                         title: 1,
                         titleEn: 1,
                         author: 1,
-                        authorEmail: 1,
                         authorId: 1, // 🔥 NEW: Include authorId
                         cover: 1,
+                        banner: 1,
                         description: 1,
                         category: 1,
                         tags: 1,
@@ -732,9 +733,6 @@ module.exports = function(app, verifyToken, upload) {
                         favorites: 1,
                         lastChapterUpdate: 1,
                         createdAt: 1,
-                        sourceUrl: 1,
-                        sourceStatus: 1,
-                        isWatched: 1,
                         // 🔥 Calculate count in DB, do NOT return array
                         chaptersCount: { $size: { $ifNull: ["$chapters", []] } }
                     }
@@ -746,13 +744,16 @@ module.exports = function(app, verifyToken, upload) {
             
             const novelDoc = result[0];
             novelDoc.cover = obfuscateUrl(novelDoc.cover); // 🔥 OBFUSCATED URL
+            novelDoc.banner = obfuscateUrl(novelDoc.banner); // 🔥 OBFUSCATED URL
 
             if (novelDoc.status === 'خاصة' && role !== 'admin') {
                 return res.status(403).json({ message: "Access Denied" });
             }
 
             // Sync status check (Async, detached from response speed)
-            checkNovelStatus(await Novel.findById(req.params.id)); 
+            Novel.findById(req.params.id).then(doc => {
+                if (doc) checkNovelStatus(doc);
+            }).catch(err => console.error("Status check error:", err));
             
             res.json(novelDoc);
         } catch (error) {
@@ -1266,7 +1267,7 @@ module.exports = function(app, verifyToken, upload) {
     });
 
     // =========================================================
-    // 🖼️ IMAGE PROXY & RESIZER (Cloudinary Powered)
+    // 🖼️ IMAGE PROXY & RESIZER (Cloudinary Powered + Axios Pipe)
     // =========================================================
     app.get('/api/image-proxy', async (req, res) => {
         try {
@@ -1288,16 +1289,30 @@ module.exports = function(app, verifyToken, upload) {
                 return res.status(400).send("Invalid URL");
             }
 
-            // 2. Use Cloudinary Fetch to resize and optimize
-            const cloudName = process.env.CLOUDINARY_CLOUD_NAME || 'djuhxdjj';
-            const options = "w_600,c_limit,f_auto,q_auto"; 
-            const proxyUrl = `https://res.cloudinary.com/${cloudName}/image/fetch/${options}/${encodeURIComponent(originalUrl)}`;
+            // 2. 🔥 PIPE THE IMAGE (Strong Protection + Bypass Restrictions) 🔥
+            // This hides the original source and works even if Cloudinary fetch is restricted
+            const response = await axios({
+                method: 'get',
+                url: originalUrl,
+                responseType: 'stream',
+                timeout: 10000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Referer': 'https://novelfire.com/' // Spoof referer if needed for some sites
+                }
+            });
 
-            // 3. Redirect to Cloudinary
-            res.redirect(proxyUrl);
+            // Set headers
+            res.set('Content-Type', response.headers['content-type'] || 'image/jpeg');
+            res.set('Cache-Control', 'public, max-age=604800'); // Cache for 7 days
+            
+            // Pipe the data
+            response.data.pipe(res);
+
         } catch (error) {
-            console.error("Proxy Error:", error);
-            res.status(500).send("Error proxying image");
+            console.error("Proxy Error:", error.message);
+            // Fallback to a placeholder if image fails
+            res.redirect('https://res.cloudinary.com/djuhxdjj/image/upload/v1716543210/placeholder_novel.png');
         }
     });
 
