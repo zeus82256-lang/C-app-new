@@ -88,8 +88,8 @@ function obfuscateText(text) {
             
             result += String.fromCharCode(charCode);
         }
-        // Return as Base64
-        return Buffer.from(result).toString('base64');
+        // Return as Base64 using 'binary' encoding to preserve raw bytes
+        return Buffer.from(result, 'binary').toString('base64');
     } catch (e) {
         return text;
     }
@@ -826,17 +826,38 @@ module.exports = function(app, verifyToken, upload) {
             const { novelId, chapterId } = req.params;
             if (!mongoose.Types.ObjectId.isValid(novelId)) return res.status(404).json({ message: 'Invalid ID' });
 
-            const novel = await Novel.findById(novelId).lean();
-            if (!novel) return res.status(404).json({ message: 'Novel not found' });
-
             const role = getUserRole(req);
+            const isId = mongoose.Types.ObjectId.isValid(chapterId);
+
+            // 🔥 LIGHTNING FAST OPTIMIZED FETCH 🔥
+            // Use aggregation to fetch ONLY the specific chapter metadata and total count
+            const novelData = await Novel.aggregate([
+                { $match: { _id: new mongoose.Types.ObjectId(novelId) } },
+                {
+                    $project: {
+                        status: 1,
+                        chaptersCount: { $size: "$chapters" },
+                        chapter: {
+                            $filter: {
+                                input: "$chapters",
+                                as: "chap",
+                                cond: isId 
+                                    ? { $eq: ["$$chap._id", new mongoose.Types.ObjectId(chapterId)] }
+                                    : { $eq: ["$$chap.number", parseInt(chapterId)] }
+                            }
+                        }
+                    }
+                }
+            ]);
+
+            if (!novelData || novelData.length === 0) return res.status(404).json({ message: 'Novel not found' });
+            
+            const novel = novelData[0];
             if (novel.status === 'خاصة' && role !== 'admin') {
                 return res.status(403).json({ message: "Access Denied" });
             }
 
-            let chapterMeta = novel.chapters.find(c => c._id.toString() === chapterId) || 
-                              novel.chapters.find(c => c.number == chapterId);
-
+            const chapterMeta = novel.chapter && novel.chapter[0];
             if (!chapterMeta) return res.status(404).json({ message: 'Chapter metadata not found' });
 
             if (role !== 'admin') {
@@ -858,14 +879,13 @@ module.exports = function(app, verifyToken, upload) {
                     }
                 } catch (firestoreError) {
                     console.error("❌ Firestore Fetch Error:", firestoreError.message);
-                    // If it's an authentication error, provide a clearer message
                     if (firestoreError.message.includes("UNAUTHENTICATED")) {
                         return res.status(500).json({ 
                             message: "خطأ في الاتصال بقاعدة البيانات (غير مصرح). يرجى التأكد من إعدادات Firebase.",
                             details: firestoreError.message 
                         });
                     }
-                    throw firestoreError; // Rethrow to be caught by the main catch block
+                    throw firestoreError;
                 }
             } else {
                 console.error("❌ Firestore is not initialized. Cannot fetch chapter content.");
@@ -878,7 +898,6 @@ module.exports = function(app, verifyToken, upload) {
             let copyrightStyles = {};
 
             try {
-                // Fetch settings for both Blocklist AND Global Copyrights AND Global Replacements
                 const adminSettings = await Settings.findOne({ 
                     $or: [
                         { globalBlocklist: { $exists: true, $not: { $size: 0 } } },
@@ -889,10 +908,8 @@ module.exports = function(app, verifyToken, upload) {
                 }).sort({ updatedAt: -1 }).lean(); 
 
                 if (adminSettings) {
-                    // 1. Cleaner Logic (Blocklist)
                     if (adminSettings.globalBlocklist && adminSettings.globalBlocklist.length > 0) {
-                        const blocklist = adminSettings.globalBlocklist;
-                        blocklist.forEach(word => {
+                        adminSettings.globalBlocklist.forEach(word => {
                             if (!word) return;
                             if (word.includes('\n') || word.includes('\r')) {
                                 content = content.split(word).join('');
@@ -904,7 +921,6 @@ module.exports = function(app, verifyToken, upload) {
                         });
                     }
 
-                    // 2. 🔥 Global Replacements Logic (Server-Side) 🔥
                     if (adminSettings.globalReplacements && adminSettings.globalReplacements.length > 0) {
                         adminSettings.globalReplacements.forEach(rep => {
                             if (rep.original) {
@@ -915,38 +931,26 @@ module.exports = function(app, verifyToken, upload) {
                         });
                     }
 
-                    // 3. Formatting cleanup
                     content = content.replace(/^\s*[\r\n]/gm, ''); 
                     content = content.replace(/\n\s*\n/g, '\n\n'); 
 
-                    // 3. 🔥🔥 INTERNAL CHAPTER SEPARATOR (SMART FIRST LINE ONLY) 🔥🔥
-                    // Check if separator enabled in settings
                     if (adminSettings.enableChapterSeparator) {
                         const separatorLine = `\n\n${adminSettings.chapterSeparatorText || '________________________________________'}\n\n`;
-                        
-                        // We check the FIRST non-empty paragraph only
-                        // Split by double newlines or single to find first block
                         const lines = content.split('\n');
                         let replaced = false;
-                        
                         for (let i = 0; i < lines.length; i++) {
                             const lineTrimmed = lines[i].trim();
                             if (lineTrimmed.length > 0) {
-                                // 🔥 Updated Regex: Matches 'Chapter', 'الفصل', 'فصل' OR checks for ':'
                                 if (/^(?:الفصل|Chapter|فصل)|:/i.test(lineTrimmed)) {
                                     lines[i] = lines[i] + separatorLine;
                                     replaced = true;
                                 }
-                                break; // Stop after first non-empty line regardless of match
+                                break;
                             }
                         }
-                        
-                        if (replaced) {
-                            content = lines.join('\n');
-                        }
+                        if (replaced) content = lines.join('\n');
                     }
 
-                    // 4. Copyright Logic (Separated)
                     const frequency = adminSettings.copyrightFrequency || 'always';
                     const everyX = adminSettings.copyrightEveryX || 5;
                     const chapNum = parseInt(chapterMeta.number);
@@ -962,27 +966,25 @@ module.exports = function(app, verifyToken, upload) {
                         copyrightStart = adminSettings.globalChapterStartText || "";
                         copyrightEnd = adminSettings.globalChapterEndText || "";
                         copyrightStyles = adminSettings.globalCopyrightStyles || {};
-                        // Ensure font size is sent if missing
                         if (!copyrightStyles.fontSize) copyrightStyles.fontSize = 14; 
                     }
                 }
             } catch (cleanerErr) {}
 
-            let totalAvailable = novel.chapters.length;
-            if (role !== 'admin') {
-                totalAvailable = novel.chapters.filter(c => !isChapterHidden(c.title)).length;
-            }
+            // Calculate total available chapters (approximate if we don't want to fetch all)
+            // For now, we'll use the novel.chaptersCount we projected
+            let totalAvailable = novel.chaptersCount;
 
-            // 🔥 SEND SEPARATE FIELDS, DO NOT MERGE INTO CONTENT 🔥
             res.json({ 
                 ...chapterMeta, 
-                content: obfuscateText(content), // 🔥 OBFUSCATED CONTENT (Genius Protection)
-                copyrightStart, // Separate Data
-                copyrightEnd,   // Separate Data
-                copyrightStyles, // Separate Style
+                content: obfuscateText(content), 
+                copyrightStart, 
+                copyrightEnd,   
+                copyrightStyles, 
                 totalChapters: totalAvailable
             });
         } catch (error) {
+            console.error("Get Chapter Error:", error);
             res.status(500).json({ message: error.message });
         }
     });
