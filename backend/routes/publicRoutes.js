@@ -1,4 +1,3 @@
-
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken'); 
 const axios = require('axios');
@@ -420,10 +419,9 @@ module.exports = function(app, verifyToken, upload) {
             
             if (!user) return res.status(404).json({ message: "User not found" });
 
-            // Obfuscate URLs for privacy
+            // Send plain URLs (no obfuscation)
             const userObj = user.toObject();
-            if (userObj.picture) userObj.picture = obfuscateUrl(userObj.picture);
-            if (userObj.banner) userObj.banner = obfuscateUrl(userObj.banner);
+            // userObj.picture and banner remain as they are
 
             res.json({ user: userObj }); 
         } catch (e) {
@@ -562,8 +560,8 @@ module.exports = function(app, verifyToken, upload) {
                     _id: targetUser._id,
                     name: targetUser.name,
                     email: targetUserId === req.user.id ? targetUser.email : undefined, 
-                    picture: obfuscateUrl(targetUser.picture),
-                    banner: obfuscateUrl(targetUser.banner),
+                    picture: targetUser.picture,
+                    banner: targetUser.banner,
                     bio: targetUser.bio,
                     role: targetUser.role,
                     createdAt: targetUser.createdAt,
@@ -572,7 +570,7 @@ module.exports = function(app, verifyToken, upload) {
                 readChapters: totalReadChapters,
                 addedChapters,
                 totalViews,
-                myWorks: myWorks.map(w => ({ ...w, cover: obfuscateUrl(w.cover) })),
+                myWorks: myWorks.map(w => ({ ...w, cover: w.cover })),
                 worksPage: page
             });
 
@@ -694,7 +692,7 @@ module.exports = function(app, verifyToken, upload) {
             // Format output to match old structure but lightweight
             novelsData = novelsData.map(n => ({
                 ...n,
-                cover: obfuscateUrl(n.cover), // 🔥 OBFUSCATED URL
+                cover: n.cover, // plain Cloudinary URL
                 // Create a fake chapters array with just 1 item if needed by frontend logic
                 chapters: n.lastChapter ? [n.lastChapter] : []
             }));
@@ -748,13 +746,8 @@ module.exports = function(app, verifyToken, upload) {
             
             const novelDoc = result[0];
             
-            // 🔥 OBFUSCATED URLS WITH IMAGE PROXY FOR PROTECTION & CACHING
-            if (novelDoc.cover) {
-                novelDoc.cover = `${process.env.APP_URL}/api/image-proxy?url=${encodeURIComponent(obfuscateUrl(novelDoc.cover))}`;
-            }
-            if (novelDoc.banner) {
-                novelDoc.banner = `${process.env.APP_URL}/api/image-proxy?url=${encodeURIComponent(obfuscateUrl(novelDoc.banner))}`;
-            }
+            // 🔥 Send plain Cloudinary URLs (no proxy wrapping)
+            // (cover and banner remain as they are)
 
             if (novelDoc.status === 'خاصة' && role !== 'admin') {
                 return res.status(403).json({ message: "Access Denied" });
@@ -980,10 +973,10 @@ module.exports = function(app, verifyToken, upload) {
                 totalAvailable = novel.chapters.filter(c => !isChapterHidden(c.title)).length;
             }
 
-            // 🔥 SEND SEPARATE FIELDS, DO NOT MERGE INTO CONTENT 🔥
+            // 🔥 SEND PLAIN CONTENT (NO OBFUSCATION)
             res.json({ 
                 ...chapterMeta, 
-                content: obfuscateText(content), // 🔥 OBFUSCATED CONTENT (Genius Protection)
+                content, // plain text
                 copyrightStart, // Separate Data
                 copyrightEnd,   // Separate Data
                 copyrightStyles, // Separate Style
@@ -1043,7 +1036,7 @@ module.exports = function(app, verifyToken, upload) {
             }
 
             const libraryObj = libraryItem.toObject();
-            libraryObj.cover = obfuscateUrl(libraryObj.cover);
+            libraryObj.cover = libraryObj.cover; // plain Cloudinary URL
             res.json(libraryObj);
         } catch (error) { 
             console.error(error);
@@ -1081,7 +1074,7 @@ module.exports = function(app, verifyToken, upload) {
             
             const formattedItems = items.map(item => ({
                 ...item,
-                cover: obfuscateUrl(item.cover)
+                cover: item.cover // plain Cloudinary URL
             }));
             
             res.json(formattedItems);
@@ -1093,7 +1086,7 @@ module.exports = function(app, verifyToken, upload) {
     app.get('/api/novel/status/:novelId', verifyToken, async (req, res) => {
         const item = await NovelLibrary.findOne({ user: req.user.id, novelId: req.params.novelId }).lean();
         if (item) {
-            item.cover = obfuscateUrl(item.cover);
+            item.cover = item.cover; // plain Cloudinary URL
         }
         const readChapters = item ? item.readChapters : [];
         res.json(item || { isFavorite: false, progress: 0, lastChapterId: 0, readChapters: [] });
@@ -1233,7 +1226,7 @@ module.exports = function(app, verifyToken, upload) {
                 return {
                     _id: n._id,
                     title: n.title,
-                    cover: n.cover,
+                    cover: n.cover, // plain Cloudinary URL
                     newChaptersCount: visibleUnreadCount > 0 ? visibleUnreadCount : 1, // Fallback to 1
                     lastChapterNumber: lastVisible.number,
                     lastChapterTitle: lastVisible.title,
@@ -1326,7 +1319,7 @@ module.exports = function(app, verifyToken, upload) {
         } catch (error) {
             console.error("Proxy Error:", error.message);
             // Fallback to a placeholder if image fails
-            res.redirect('https://res.cloudinary.com/djuhxdjj/image/upload/v1716543210/placeholder_novel.png');
+            res.redirect('https://picsum.photos/seed/novel/400/600');
         }
     });
 
