@@ -8,16 +8,13 @@ const Settings = require('../models/settings.model.js');
 // 🔥 قائمة الأدمن المسموح بهم حصراً
 const ADMIN_EMAILS = ["flaf.aboode@gmail.com", "zeus", "zeus@gmail.com"];
 
-// 🔥 Helper for URL Obfuscation (Genius Level Protection)
+// 🔥 Helper for URL Obfuscation (Simplified to Base64 for images as requested)
 const ZEUS_SECRET = "Z3uS_N0v3l_2026_S3cr3t_K3y";
 function obfuscateUrl(url) {
     if (!url) return "";
     try {
-        let result = "";
-        for (let i = 0; i < url.length; i++) {
-            result += String.fromCharCode(url.charCodeAt(i) ^ ZEUS_SECRET.charCodeAt(i % ZEUS_SECRET.length));
-        }
-        return Buffer.from(result).toString('base64');
+        // Just return Base64 to "hide" the URL from casual view without complex encryption
+        return Buffer.from(url).toString('base64');
     } catch (e) {
         return url;
     }
