@@ -63,7 +63,7 @@ const BASE_CATEGORIES = [
     'مغامرات', 'نظام', 'حريم', 'رعب', 'خيال علمي', 'دراما', 'غموض', 'تاريخي'
 ];
 
-// 🔥 Helper for Content Obfuscation (Genius Level Protection)
+// 🔥 Helper for Content Obfuscation (Genius Level Protection - Multi-layered)
 const ZEUS_SECRET = "Z3uS_N0v3l_2026_S3cr3t_K3y";
 
 function obfuscateText(text) {
@@ -71,10 +71,22 @@ function obfuscateText(text) {
     try {
         // Encode to URI component to handle Arabic characters safely
         const encoded = encodeURIComponent(text);
-        // Simple XOR with secret key
         let result = "";
+        
         for (let i = 0; i < encoded.length; i++) {
-            result += String.fromCharCode(encoded.charCodeAt(i) ^ ZEUS_SECRET.charCodeAt(i % ZEUS_SECRET.length));
+            let charCode = encoded.charCodeAt(i);
+            
+            // Layer 1: XOR with secret
+            charCode = charCode ^ ZEUS_SECRET.charCodeAt(i % ZEUS_SECRET.length);
+            
+            // Layer 2: Dynamic Offset based on position
+            const offset = (i * 7) % 13;
+            charCode = (charCode + offset) % 256;
+            
+            // Layer 3: Rotation (3 positions)
+            charCode = (charCode + 3) % 256;
+            
+            result += String.fromCharCode(charCode);
         }
         // Return as Base64
         return Buffer.from(result).toString('base64');
@@ -83,14 +95,17 @@ function obfuscateText(text) {
     }
 }
 
-// 🔥 Helper for URL Obfuscation (Genius Level Protection)
+// 🔥 Helper for URL Obfuscation (Strong Protection)
 function obfuscateUrl(url) {
     if (!url) return "";
     try {
-        // Simple XOR with secret key for URLs
         let result = "";
         for (let i = 0; i < url.length; i++) {
-            result += String.fromCharCode(url.charCodeAt(i) ^ ZEUS_SECRET.charCodeAt(i % ZEUS_SECRET.length));
+            let charCode = url.charCodeAt(i);
+            charCode = charCode ^ ZEUS_SECRET.charCodeAt(i % ZEUS_SECRET.length);
+            const offset = (i * 3) % 7;
+            charCode = (charCode + offset) % 256;
+            result += String.fromCharCode(charCode);
         }
         return Buffer.from(result).toString('base64');
     } catch (e) {
@@ -567,34 +582,23 @@ module.exports = function(app, verifyToken, upload) {
         }
     });
 
-    app.post('/api/novels/:id/view', verifyToken, async (req, res) => {
+    // 🔥 ROCKET SPEED VIEW COUNT: Open to everyone, no restrictions
+    app.post('/api/novels/:id/view', async (req, res) => {
         try {
-            if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).send('Invalid ID');
+            const { id } = req.params;
+            if (!mongoose.Types.ObjectId.isValid(id)) return res.status(404).send('Invalid ID');
             
-            const { chapterNumber } = req.body; 
+            // 🔥 Direct increment for maximum performance
+            await Novel.findByIdAndUpdate(id, {
+                $inc: { 
+                    views: 1,
+                    dailyViews: 1,
+                    weeklyViews: 1,
+                    monthlyViews: 1
+                }
+            });
             
-            if (!chapterNumber) {
-                return res.status(200).json({ message: 'Chapter number required for view count' });
-            }
-
-            const novel = await Novel.findById(req.params.id);
-            if (!novel) return res.status(404).send('Novel not found');
-
-            const userId = req.user.id;
-            const viewKey = `${userId}_ch_${chapterNumber}`;
-            const alreadyViewed = novel.viewedBy.includes(viewKey);
-
-            if (!alreadyViewed) {
-                novel.viewedBy.push(viewKey);
-                novel.views += 1;
-                novel.dailyViews += 1;
-                novel.weeklyViews += 1;
-                novel.monthlyViews += 1;
-                await novel.save();
-                return res.status(200).json({ viewed: true, total: novel.views });
-            } else {
-                return res.status(200).json({ viewed: false, message: 'Already viewed this chapter', total: novel.views });
-            }
+            res.status(200).json({ success: true });
         } catch (error) { 
             res.status(500).send('Error'); 
         }
@@ -743,8 +747,14 @@ module.exports = function(app, verifyToken, upload) {
             if (!result || result.length === 0) return res.status(404).json({ message: 'Novel not found' });
             
             const novelDoc = result[0];
-            novelDoc.cover = obfuscateUrl(novelDoc.cover); // 🔥 OBFUSCATED URL
-            novelDoc.banner = obfuscateUrl(novelDoc.banner); // 🔥 OBFUSCATED URL
+            
+            // 🔥 OBFUSCATED URLS WITH IMAGE PROXY FOR PROTECTION & CACHING
+            if (novelDoc.cover) {
+                novelDoc.cover = `${process.env.APP_URL}/api/image-proxy?url=${encodeURIComponent(obfuscateUrl(novelDoc.cover))}`;
+            }
+            if (novelDoc.banner) {
+                novelDoc.banner = `${process.env.APP_URL}/api/image-proxy?url=${encodeURIComponent(obfuscateUrl(novelDoc.banner))}`;
+            }
 
             if (novelDoc.status === 'خاصة' && role !== 'admin') {
                 return res.status(403).json({ message: "Access Denied" });
@@ -1274,12 +1284,16 @@ module.exports = function(app, verifyToken, upload) {
             const { url } = req.query;
             if (!url) return res.status(400).send("URL required");
 
-            // 1. Deobfuscate the URL
+            // 1. 🔥 DEOBFUSCATE URL (Reverse the strong protection)
             let originalUrl = "";
             try {
-                const text = Buffer.from(url, 'base64').toString('utf-8');
-                for (let i = 0; i < text.length; i++) {
-                    originalUrl += String.fromCharCode(text.charCodeAt(i) ^ ZEUS_SECRET.charCodeAt(i % ZEUS_SECRET.length));
+                const buffer = Buffer.from(url, 'base64').toString('binary');
+                for (let i = 0; i < buffer.length; i++) {
+                    let charCode = buffer.charCodeAt(i);
+                    const offset = (i * 3) % 7;
+                    charCode = (charCode - offset + 256) % 256;
+                    charCode = charCode ^ ZEUS_SECRET.charCodeAt(i % ZEUS_SECRET.length);
+                    originalUrl += String.fromCharCode(charCode);
                 }
             } catch (e) {
                 originalUrl = url; // Fallback if not obfuscated
@@ -1298,13 +1312,13 @@ module.exports = function(app, verifyToken, upload) {
                 timeout: 10000,
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Referer': 'https://novelfire.com/' // Spoof referer if needed for some sites
+                    'Referer': 'https://www.google.com/' // Spoof referer
                 }
             });
 
             // Set headers
             res.set('Content-Type', response.headers['content-type'] || 'image/jpeg');
-            res.set('Cache-Control', 'public, max-age=604800'); // Cache for 7 days
+            res.set('Cache-Control', 'public, max-age=604800, immutable'); // 🔥 STRONG CACHE
             
             // Pipe the data
             response.data.pipe(res);
