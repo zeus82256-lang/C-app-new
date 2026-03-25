@@ -387,8 +387,12 @@ module.exports = function(app, verifyToken, upload) {
             let query = {};
             
             if (userId) {
-                if (!mongoose.Types.ObjectId.isValid(userId)) return res.status(400).json({ message: "Invalid ID" });
-                query._id = userId;
+                // 🔥 SMART CHECK: If it's a valid ObjectId, use it. Otherwise, assume it's an email (legacy/fallback)
+                if (mongoose.Types.ObjectId.isValid(userId)) {
+                    query._id = userId;
+                } else {
+                    query.email = userId.toLowerCase();
+                }
             } else if (email) {
                 query.email = email.toLowerCase(); // Ensure case insensitivity
             } else {
@@ -396,11 +400,16 @@ module.exports = function(app, verifyToken, upload) {
             }
 
             // Fetch ONLY basic info, NO calculations
-            const user = await User.findOne(query).select('name email picture banner bio role createdAt isHistoryPublic');
+            const user = await User.findOne(query).select('name picture banner bio role createdAt isHistoryPublic');
             
             if (!user) return res.status(404).json({ message: "User not found" });
 
-            res.json({ user }); 
+            // Obfuscate URLs for privacy
+            const userObj = user.toObject();
+            if (userObj.picture) userObj.picture = obfuscateUrl(userObj.picture);
+            if (userObj.banner) userObj.banner = obfuscateUrl(userObj.banner);
+
+            res.json({ user: userObj }); 
         } catch (e) {
             res.status(500).json({ error: e.message });
         }
@@ -712,6 +721,7 @@ module.exports = function(app, verifyToken, upload) {
                         titleEn: 1,
                         author: 1,
                         authorEmail: 1,
+                        authorId: 1, // 🔥 NEW: Include authorId
                         cover: 1,
                         description: 1,
                         category: 1,
@@ -1254,4 +1264,41 @@ module.exports = function(app, verifyToken, upload) {
             res.status(500).json({ error: error.message });
         }
     });
+
+    // =========================================================
+    // 🖼️ IMAGE PROXY & RESIZER (Cloudinary Powered)
+    // =========================================================
+    app.get('/api/image-proxy', async (req, res) => {
+        try {
+            const { url } = req.query;
+            if (!url) return res.status(400).send("URL required");
+
+            // 1. Deobfuscate the URL
+            let originalUrl = "";
+            try {
+                const text = Buffer.from(url, 'base64').toString('utf-8');
+                for (let i = 0; i < text.length; i++) {
+                    originalUrl += String.fromCharCode(text.charCodeAt(i) ^ ZEUS_SECRET.charCodeAt(i % ZEUS_SECRET.length));
+                }
+            } catch (e) {
+                originalUrl = url; // Fallback if not obfuscated
+            }
+
+            if (!originalUrl.startsWith('http')) {
+                return res.status(400).send("Invalid URL");
+            }
+
+            // 2. Use Cloudinary Fetch to resize and optimize
+            const cloudName = process.env.CLOUDINARY_CLOUD_NAME || 'djuhxdjj';
+            const options = "w_600,c_limit,f_auto,q_auto"; 
+            const proxyUrl = `https://res.cloudinary.com/${cloudName}/image/fetch/${options}/${encodeURIComponent(originalUrl)}`;
+
+            // 3. Redirect to Cloudinary
+            res.redirect(proxyUrl);
+        } catch (error) {
+            console.error("Proxy Error:", error);
+            res.status(500).send("Error proxying image");
+        }
+    });
+
 };
