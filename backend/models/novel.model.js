@@ -13,6 +13,7 @@ const novelSchema = new mongoose.Schema({
     titleEn: { type: String },
     author: { type: String, required: true }, 
     authorEmail: { type: String }, 
+    authorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // 🔥 NEW FIELD
     cover: { type: String }, 
     description: { type: String },
     category: { type: String, index: true },
