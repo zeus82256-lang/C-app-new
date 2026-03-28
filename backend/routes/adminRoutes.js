@@ -1,9 +1,3 @@
-// =========================================================
-// ملف: adminRoutes.js (بعد التعديل)
-// التغيير: جعل محاولات الترجمة لا نهائية مع تأخير متزايد بدلاً من 3 محاولات فقط.
-// جميع الأجزاء الأخرى لم يتم تغييرها.
-// =========================================================
-
 const mongoose = require('mongoose');
 const path = require('path');
 const AdmZip = require('adm-zip');
@@ -91,7 +85,8 @@ async function translateNovelMetadata(novelId, originalData, jobId = null) {
         if (!availableCategories.length) {
             // Fallback to hardcoded categories if not set
             availableCategories = [
-                'بناء القواعد', 'الهجرة', 'الزراعة', 'الحياة المدرسية', 'الحياة الحضرية', 'أكشن', 'حياة مدرسية', 'حسم في القتل', 'حريم', 'حرب النجوم', 'تراجيدي', 'تاريخي', 'رياضة', 'رومانسي', 'رعب', 'راشد', 'دراما', 'خيال علمي', 'خيال', 'خارق لطبيعية', 'شيانشيا', 'شونين', 'شوانهوان', 'شريحة من الحياة', 'سينين', 'سحر', 'زراعة', 'كوميديا', 'كوارث', 'قوى خارقة', 'فنون قتالية', 'فانتازيا', 'غموض', 'عسكري', 'موريم', 'مغامرة', 'مغامرات', 'مصاصو الدماء', 'محاكي', 'مأساة', 'لعبة', 'وشيا', 'نظام'
+                'أكشن', 'رومانسي', 'فانتازيا', 'شيانشيا', 'شوانهوان', 'وشيا',
+                'مغامرات', 'نظام', 'حريم', 'رعب', 'خيال علمي', 'دراما', 'غموض', 'تاريخي'
             ];
         }
         const categoriesListStr = availableCategories.join('، ');
@@ -124,12 +119,13 @@ async function translateNovelMetadata(novelId, originalData, jobId = null) {
 
         if (jobId) await updateMetadataJob(jobId, 'active', 'جاري ترجمة البيانات...', 'info');
 
-        // 4. Call Gemini with key rotation and retry logic (infinite attempts with increasing delay)
+        // 4. Call Gemini with key rotation and retry logic (same as translator)
         let keyIndex = 0;
         let attempt = 0;
         let lastError = null;
         let parsed = null;
-        
+
+        // 🔥 MODIFICATION: Removed maxAttempts limit → now infinite retries on 429
         while (!parsed) {
             try {
                 const currentKey = apiKeys[keyIndex % apiKeys.length];
@@ -153,15 +149,16 @@ async function translateNovelMetadata(novelId, originalData, jobId = null) {
                 if (err.message.includes('429') || err.message.includes('quota')) {
                     keyIndex++;
                     attempt++;
-                    const waitTime = Math.min(60000, 5000 * Math.pow(1.5, attempt)); // زيادة الوقت حتى 60 ثانية
-                    if (jobId) {
-                        await updateMetadataJob(jobId, 'active', `⚠️ ضغط على المفتاح، تبديل وإعادة المحاولة بعد ${Math.floor(waitTime/1000)} ثانية... (محاولة ${attempt})`, 'warning');
-                    }
-                    await delay(waitTime);
+                    await delay(5000);
+                    if (jobId) await updateMetadataJob(jobId, 'active', `⚠️ ضغط على المفتاح، تبديل وإعادة المحاولة... (محاولة ${attempt})`, 'warning');
                     continue;
                 }
                 throw err; // غير 429 -> فشل مباشر
             }
+        }
+
+        if (!parsed) {
+            throw lastError || new Error('فشل بعد عدة محاولات');
         }
 
         if (jobId) await updateMetadataJob(jobId, 'active', 'تم استلام الرد من الذكاء الاصطناعي', 'info');
@@ -587,65 +584,6 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         }
     });
 
-// Delete Novel (Admin/Author)
-    app.delete('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
-        try {
-            const novelId = req.params.id;
-            const novel = await Novel.findById(novelId);
-            if (!novel) {
-                return res.status(404).json({ message: "الرواية غير موجودة" });
-            }
-
-            // التحقق من الصلاحيات (المشرف أو المؤلف)
-            if (req.user.role !== 'admin' && novel.authorEmail !== req.user.email) {
-                return res.status(403).json({ message: "لا تملك صلاحية حذف هذه الرواية" });
-            }
-
-            // 1. حذف الفصول من Firestore (إن وجدت)
-            if (firestore) {
-                try {
-                    const chaptersRef = firestore.collection('novels').doc(novelId).collection('chapters');
-                    const snapshot = await chaptersRef.get();
-                    
-                    // Batch delete all chapters
-                    const batch = firestore.batch();
-                    snapshot.forEach(doc => {
-                        batch.delete(doc.ref);
-                    });
-                    await batch.commit();
-                    
-                    // Delete the novel document from Firestore
-                    await firestore.collection('novels').doc(novelId).delete();
-                    
-                    await logScraper(`✅ تم حذف ${snapshot.size} فصل من Firestore للرواية ${novel.title}`, 'success');
-                } catch (fsError) {
-                    console.error("❌ فشل حذف الفصول من Firestore:", fsError);
-                    await logScraper(`❌ فشل حذف الفصول من Firestore: ${fsError.message}`, 'error');
-                    return res.status(500).json({ message: "فشل حذف الفصول من قاعدة البيانات السحابية، يرجى المحاولة لاحقاً." });
-                }
-            }
-
-            // 2. حذف الرواية من MongoDB
-            await Novel.findByIdAndDelete(novelId);
-            
-            // 3. حذف أي سجلات في مكتبة المستخدمين مرتبطة بهذه الرواية
-            await NovelLibrary.deleteMany({ novelId: novelId });
-            
-            // 4. (اختياري) حذف مهام الترجمة المرتبطة بالرواية
-            if (mongoose.models.MetadataTranslationJob) {
-                await mongoose.models.MetadataTranslationJob.deleteMany({ novelId: novelId });
-            }
-
-            await logScraper(`🗑️ تم حذف الرواية ${novel.title} بالكامل (MongoDB + Firestore)`, 'success');
-            res.json({ message: "تم حذف الرواية وجميع فصولها بنجاح" });
-            
-        } catch (error) {
-            console.error("Error deleting novel:", error);
-            await logScraper(`❌ فشل حذف الرواية: ${error.message}`, 'error');
-            res.status(500).json({ error: error.message });
-        }
-    });
-
     // =========================================================
     // 🔄 GLOBAL REPLACEMENTS API (SERVER-SIDE)
     // =========================================================
@@ -694,29 +632,6 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
             res.json({ message: "Updated", list: settings.globalReplacements });
         } catch (e) {
             res.status(500).json({ error: e.message });
-        }
-    });
-
-app.put('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
-        try {
-            const { title, titleEn, cover, description, category, tags, status } = req.body;
-            const novel = await Novel.findById(req.params.id);
-            if (!novel) return res.status(404).json({ message: "Novel not found" });
-
-            if (req.user.role !== 'admin' && novel.authorEmail !== req.user.email) {
-                return res.status(403).json({ message: "Access Denied" });
-            }
-
-            let updateData = { title, titleEn, cover, description, category, tags, status };
-            if (req.user.role === 'admin') {
-                updateData.author = req.user.name;
-                updateData.authorEmail = req.user.email;
-                updateData.authorId = req.user.id; // 🔥 NEW: Set authorId
-            }
-            const updated = await Novel.findByIdAndUpdate(req.params.id, updateData, { new: true });
-            res.json(updated);
-        } catch (error) {
-            res.status(500).json({ error: error.message });
         }
     });
 
@@ -1407,7 +1322,3 @@ app.put('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
         }
     });
 };
-
-// تصدير الدوال المساعدة للاستخدام في الملفات الأخرى
-module.exports.logScraper = logScraper;
-module.exports.getGlobalSettings = getGlobalSettings;
