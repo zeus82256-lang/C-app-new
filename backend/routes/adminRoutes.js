@@ -1,4 +1,3 @@
-
 const mongoose = require('mongoose');
 const path = require('path');
 const AdmZip = require('adm-zip');
@@ -751,6 +750,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 }
 
                 // New Novel - Full Creation
+                // 🔥 MODIFICATION: Set internal status to 'خاصة' (private) instead of using scraped status
                 novel = new Novel({
                     title: novelData.title,
                     titleEn: novelData.title, 
@@ -761,7 +761,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                     authorId: authorId, // 🔥 NEW: Set authorId
                     category: novelData.category || 'أخرى',
                     tags: novelData.tags || [],
-                    status: novelData.status || 'مستمرة', // Default from scraper
+                    status: 'خاصة', // 🔥 PRIVATE UNTIL TRANSLATED
                     chapters: [],
                     views: 0,
                     // 🔥 Watchlist Fields
@@ -771,7 +771,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                     lastChapterUpdate: novelData.lastUpdate ? new Date(novelData.lastUpdate) : new Date() // Use Source Date
                 });
                 await novel.save();
-                await logScraper(`✨ تم إنشاء الرواية: ${novelData.title}`, 'info');
+                await logScraper(`✨ تم إنشاء الرواية: ${novelData.title} (خاصة)`, 'info');
             } else {
                 // 🔥🔥 CRITICAL: EXISTING NOVEL - UPDATE ONLY WATCHLIST & STATUS 🔥🔥
                 
@@ -781,7 +781,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 // Update Source Status
                 if (novelData.status) {
                     novel.sourceStatus = novelData.status;
-                    // Also update main status ONLY if completed
+                    // Also update main status ONLY if completed (source completed)
                     if (novelData.status === 'مكتملة') {
                         novel.status = 'مكتملة';
                         await logScraper(`🏁 تم تحديث الحالة إلى مكتملة`, 'success');
@@ -795,38 +795,45 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 // We deliberately skip any other metadata updates here.
                 
                 // 🛑 DO NOT SAVE LAST UPDATE DATE YET
-                // We save it only if new chapters are added
+                // We save it only if new chapters are added and novel is public
                 
                 await novel.save();
             }
 
             // Save Chapters (This logic handles duplicates internally)
             let addedCount = 0;
+            // 🔥 NEW: Check if novel is private (status === 'خاصة')
+            const isPrivate = (novel.status === 'خاصة');
+            
             if (chapters && Array.isArray(chapters) && chapters.length > 0) {
                 for (const chap of chapters) {
-                    const existingChap = novel.chapters.find(c => c.number === chap.number);
-                    if (!existingChap) {
-                        // Firestore
-                        if (firestore) {
-                            await firestore.collection('novels').doc(novel._id.toString())
-                                .collection('chapters').doc(chap.number.toString()).set({
-                                    title: chap.title,
-                                    content: chap.content,
-                                    lastUpdated: new Date()
-                                });
+                    // Always store in Firestore (regardless of privacy)
+                    if (firestore) {
+                        await firestore.collection('novels').doc(novel._id.toString())
+                            .collection('chapters').doc(chap.number.toString()).set({
+                                title: chap.title,
+                                content: chap.content,
+                                lastUpdated: new Date()
+                            }, { merge: true });
+                    }
+                    
+                    // Only add to MongoDB if novel is NOT private
+                    if (!isPrivate) {
+                        const existingChap = novel.chapters.find(c => c.number === chap.number);
+                        if (!existingChap) {
+                            // MongoDB Meta
+                            novel.chapters.push({
+                                number: chap.number,
+                                title: chap.title,
+                                createdAt: new Date(),
+                                views: 0
+                            });
+                            addedCount++;
                         }
-                        // MongoDB Meta
-                        novel.chapters.push({
-                            number: chap.number,
-                            title: chap.title,
-                            createdAt: new Date(),
-                            views: 0
-                        });
-                        addedCount++;
                     }
                 }
 
-                if (addedCount > 0) {
+                if (!isPrivate && addedCount > 0) {
                     novel.chapters.sort((a, b) => a.number - b.number);
                     
                     // 🔥🔥 CRITICAL FIX: Only update lastChapterUpdate if NEW chapters were added
@@ -842,12 +849,15 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                         novel.lastChapterUpdate = new Date();
                     }
 
-                    // Reactivate if new chapters added and not completed
+                    // Reactivate if new chapters added and not completed (only if not private)
                     if (novel.status === 'متوقفة' && novel.sourceStatus !== 'مكتملة') {
                         novel.status = 'مستمرة';
                     }
                     await novel.save();
                     await logScraper(`✅ تم حفظ ${addedCount} فصل جديد وتحديث تاريخ الرواية`, 'success');
+                } else if (isPrivate) {
+                    // Private novel: chapters stored only in Firestore, not visible yet
+                    await logScraper(`ℹ️ تم حفظ ${chapters.length} فصل في Firestore (الرواية خاصة، لن تظهر للقراء حتى تتم الترجمة)`, 'info');
                 } else {
                     // No chapters added, DO NOT TOUCH lastChapterUpdate
                     // This prevents the novel from jumping to top without new content
