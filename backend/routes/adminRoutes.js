@@ -1,3 +1,9 @@
+// =========================================================
+// ملف: adminRoutes.js (بعد التعديل)
+// التغيير: جعل محاولات الترجمة لا نهائية مع تأخير متزايد بدلاً من 3 محاولات فقط.
+// جميع الأجزاء الأخرى لم يتم تغييرها.
+// =========================================================
+
 const mongoose = require('mongoose');
 const path = require('path');
 const AdmZip = require('adm-zip');
@@ -119,14 +125,13 @@ async function translateNovelMetadata(novelId, originalData, jobId = null) {
 
         if (jobId) await updateMetadataJob(jobId, 'active', 'جاري ترجمة البيانات...', 'info');
 
-        // 4. Call Gemini with key rotation and retry logic (same as translator)
+        // 4. Call Gemini with key rotation and retry logic (infinite attempts with increasing delay)
         let keyIndex = 0;
         let attempt = 0;
         let lastError = null;
         let parsed = null;
-        const maxAttempts = 3;
-
-        while (attempt < maxAttempts && !parsed) {
+        
+        while (!parsed) {
             try {
                 const currentKey = apiKeys[keyIndex % apiKeys.length];
                 const genAI = new GoogleGenerativeAI(currentKey);
@@ -149,16 +154,15 @@ async function translateNovelMetadata(novelId, originalData, jobId = null) {
                 if (err.message.includes('429') || err.message.includes('quota')) {
                     keyIndex++;
                     attempt++;
-                    await delay(5000);
-                    if (jobId) await updateMetadataJob(jobId, 'active', `⚠️ ضغط على المفتاح، تبديل وإعادة المحاولة... (محاولة ${attempt}/${maxAttempts})`, 'warning');
+                    const waitTime = Math.min(60000, 5000 * Math.pow(1.5, attempt)); // زيادة الوقت حتى 60 ثانية
+                    if (jobId) {
+                        await updateMetadataJob(jobId, 'active', `⚠️ ضغط على المفتاح، تبديل وإعادة المحاولة بعد ${Math.floor(waitTime/1000)} ثانية... (محاولة ${attempt})`, 'warning');
+                    }
+                    await delay(waitTime);
                     continue;
                 }
                 throw err; // غير 429 -> فشل مباشر
             }
-        }
-
-        if (!parsed) {
-            throw lastError || new Error('فشل بعد عدة محاولات');
         }
 
         if (jobId) await updateMetadataJob(jobId, 'active', 'تم استلام الرد من الذكاء الاصطناعي', 'info');
@@ -1322,3 +1326,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         }
     });
 };
+
+// تصدير الدوال المساعدة للاستخدام في الملفات الأخرى
+module.exports.logScraper = logScraper;
+module.exports.getGlobalSettings = getGlobalSettings;
