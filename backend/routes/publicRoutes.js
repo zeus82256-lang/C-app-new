@@ -1,4 +1,3 @@
-
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken'); 
 const axios = require('axios');
@@ -753,45 +752,84 @@ module.exports = function(app, verifyToken, upload) {
             
             const role = getUserRole(req);
 
-            // Using aggregation to efficiently unwrap, sort, and slice the array
-            const pipeline = [
-                { $match: { _id: new mongoose.Types.ObjectId(id) } },
+            // 🔥 MODIFIED: First fetch the novel to check if it has chapters in MongoDB
+            const novel = await Novel.findById(id).select('status chapters sourceChaptersCount');
+            if (!novel) return res.status(404).json({ message: 'Novel not found' });
+
+            // If the novel has chapters in MongoDB, use aggregation as before
+            if (novel.chapters && novel.chapters.length > 0) {
+                // Using aggregation to efficiently unwrap, sort, and slice the array
+                const pipeline = [
+                    { $match: { _id: new mongoose.Types.ObjectId(id) } },
+                    
+                    // 1. Unwind the chapters array to documents
+                    { $unwind: "$chapters" },
+
+                    // 2. Filter hidden chapters (if not admin)
+                    ...(role !== 'admin' ? [{
+                        $match: {
+                            $and: [
+                                { "chapters.title": { $not: { $regex: /chapter|ago|month|week|day|year/i } } }
+                                // Add more filters here if needed based on isChapterHidden logic
+                            ]
+                        }
+                    }] : []),
+
+                    // 3. Sort by number
+                    { $sort: { "chapters.number": sortOrder } },
+
+                    // 4. Project only needed fields (Metadata only, NO content)
+                    {
+                        $project: {
+                            _id: "$chapters._id",
+                            number: "$chapters.number",
+                            title: "$chapters.title",
+                            createdAt: "$chapters.createdAt",
+                            views: "$chapters.views"
+                        }
+                    },
+
+                    // 5. Pagination
+                    { $skip: skip },
+                    { $limit: limit }
+                ];
+
+                const chapters = await Novel.aggregate(pipeline);
+                return res.json(chapters);
+            }
+
+            // 🔥 NEW: If no chapters in MongoDB, fetch from Firestore
+            if (!firestore) {
+                return res.status(500).json({ message: "Firestore not connected" });
+            }
+
+            try {
+                const chaptersRef = firestore.collection('novels').doc(id).collection('chapters');
+                const snapshot = await chaptersRef.get();
                 
-                // 1. Unwind the chapters array to documents
-                { $unwind: "$chapters" },
+                const chapters = [];
+                snapshot.forEach(doc => {
+                    const data = doc.data();
+                    chapters.push({
+                        number: parseInt(doc.id),
+                        title: data.title || `الفصل ${doc.id}`,
+                        createdAt: data.lastUpdated ? data.lastUpdated.toDate() : new Date(),
+                        views: 0
+                    });
+                });
 
-                // 2. Filter hidden chapters (if not admin)
-                ...(role !== 'admin' ? [{
-                    $match: {
-                        $and: [
-                            { "chapters.title": { $not: { $regex: /chapter|ago|month|week|day|year/i } } }
-                            // Add more filters here if needed based on isChapterHidden logic
-                        ]
-                    }
-                }] : []),
+                // Sort by number
+                chapters.sort((a, b) => a.number - b.number);
+                if (sortOrder === -1) chapters.reverse();
 
-                // 3. Sort by number
-                { $sort: { "chapters.number": sortOrder } },
+                // Apply pagination
+                const paginated = chapters.slice(skip, skip + limit);
+                res.json(paginated);
 
-                // 4. Project only needed fields (Metadata only, NO content)
-                {
-                    $project: {
-                        _id: "$chapters._id",
-                        number: "$chapters.number",
-                        title: "$chapters.title",
-                        createdAt: "$chapters.createdAt",
-                        views: "$chapters.views"
-                    }
-                },
-
-                // 5. Pagination
-                { $skip: skip },
-                { $limit: limit }
-            ];
-
-            const chapters = await Novel.aggregate(pipeline);
-
-            res.json(chapters);
+            } catch (firestoreError) {
+                console.error("Firestore fetch error:", firestoreError);
+                res.status(500).json({ message: "Failed to fetch chapters from Firestore" });
+            }
 
         } catch (error) {
             console.error("Chapters List Error:", error);
