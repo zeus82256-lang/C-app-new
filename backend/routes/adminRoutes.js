@@ -51,7 +51,7 @@ async function translateNovelMetadata(novelId, originalData) {
         // 1. Get translation settings
         const settings = await getGlobalSettings();
         const apiKeys = settings.translatorApiKeys || [];
-        const selectedModel = settings.translatorModel || 'gemini-1.5-flash';
+        const selectedModel = settings.translatorModel || 'gemini-2.5-flash';
         
         if (!apiKeys.length) {
             await logScraper(`⚠️ لا توجد مفاتيح API للترجمة، لن يتم ترجمة البيانات الوصفية للرواية ${originalData.title}`, 'warning');
