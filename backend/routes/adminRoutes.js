@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const path = require('path');
 const AdmZip = require('adm-zip');
 const jwt = require('jsonwebtoken'); // Required for manual token verification in export
+const { GoogleGenerativeAI } = require("@google/generative-ai"); // 🔥 NEW: Required for metadata translation
 
 // --- Config Imports ---
 let firestore, cloudinary;
@@ -41,6 +42,103 @@ async function logScraper(message, type = 'info') {
         }
     } catch (e) {
         console.error("Log error", e);
+    }
+}
+
+// 🔥 NEW: Translate novel metadata (title, description, tags) using Gemini
+async function translateNovelMetadata(novelId, originalData) {
+    try {
+        // 1. Get translation settings
+        const settings = await getGlobalSettings();
+        const apiKeys = settings.translatorApiKeys || [];
+        const selectedModel = settings.translatorModel || 'gemini-1.5-flash';
+        
+        if (!apiKeys.length) {
+            await logScraper(`⚠️ لا توجد مفاتيح API للترجمة، لن يتم ترجمة البيانات الوصفية للرواية ${originalData.title}`, 'warning');
+            return;
+        }
+
+        // 2. Get available categories from settings or fallback to BASE_CATEGORIES
+        let availableCategories = settings.managedCategories || [];
+        if (!availableCategories.length) {
+            // Fallback to hardcoded categories if not set
+            availableCategories = [
+                'أكشن', 'رومانسي', 'فانتازيا', 'شيانشيا', 'شوانهوان', 'وشيا',
+                'مغامرات', 'نظام', 'حريم', 'رعب', 'خيال علمي', 'دراما', 'غموض', 'تاريخي'
+            ];
+        }
+        const categoriesListStr = availableCategories.join('، ');
+
+        // 3. Prepare prompt for Gemini
+        const prompt = `
+أنت خبير في ترجمة بيانات الروايات من الإنجليزية إلى العربية.
+المهمة: قم بترجمة البيانات التالية إلى العربية، ثم قم بتصنيف الرواية ضمن التصنيفات المتاحة التالية: ${categoriesListStr}.
+
+البيانات الأصلية:
+- العنوان: ${originalData.title}
+- الوصف: ${originalData.description || ''}
+- التصنيفات الأصلية (tags): ${originalData.tags?.join(', ') || ''}
+
+المطلوب:
+1. ترجمة العنوان إلى العربية.
+2. ترجمة الوصف إلى العربية (إذا كان موجوداً).
+3. استخرج التصنيفات المناسبة من القائمة المتاحة (${categoriesListStr}) بناءً على التصنيفات الأصلية (tags) المذكورة أعلاه. لا تخرج تصنيفات غير موجودة في القائمة. أعد قائمة بأسماء التصنيفات المطابقة فقط.
+
+أعد النتيجة بصيغة JSON فقط بالشكل التالي:
+{
+  "arabicTitle": "العنوان المترجم",
+  "arabicDescription": "الوصف المترجم",
+  "matchedCategories": ["تصنيف1", "تصنيف2"]
+}
+
+إذا لم يتم العثور على تصنيفات مطابقة، أعد مصفوفة فارغة.
+لا تضف أي نصوص خارج JSON.
+`;
+
+        // 4. Call Gemini
+        const keyIndex = 0; // Use first key, simple round-robin not needed for this small task
+        const genAI = new GoogleGenerativeAI(apiKeys[keyIndex % apiKeys.length]);
+        const model = genAI.getGenerativeModel({ model: selectedModel });
+        
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        let jsonText = response.text().trim();
+        
+        // Clean JSON if needed
+        if (jsonText.startsWith("```json")) {
+            jsonText = jsonText.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+        } else if (jsonText.startsWith("```")) {
+            jsonText = jsonText.replace(/^```\s*/, "").replace(/\s*```$/, "");
+        }
+
+        const parsed = JSON.parse(jsonText);
+        
+        // 5. Update novel in MongoDB
+        const updateData = {};
+        if (parsed.arabicTitle && parsed.arabicTitle.trim()) {
+            updateData.title = parsed.arabicTitle;
+        }
+        if (parsed.arabicDescription && parsed.arabicDescription.trim()) {
+            updateData.description = parsed.arabicDescription;
+        }
+        if (parsed.matchedCategories && Array.isArray(parsed.matchedCategories) && parsed.matchedCategories.length > 0) {
+            updateData.tags = parsed.matchedCategories;
+            // Also set main category to first matched category if it exists
+            if (parsed.matchedCategories[0]) {
+                updateData.category = parsed.matchedCategories[0];
+            }
+        }
+        
+        if (Object.keys(updateData).length > 0) {
+            await Novel.updateOne({ _id: novelId }, { $set: updateData });
+            await logScraper(`✅ تم تحديث البيانات الوصفية للرواية: العنوان: ${parsed.arabicTitle || originalData.title}`, 'success');
+        } else {
+            await logScraper(`ℹ️ لم يتم العثور على بيانات جديدة لتحديثها للرواية ${originalData.title}`, 'info');
+        }
+        
+    } catch (error) {
+        console.error("Metadata translation error:", error);
+        await logScraper(`❌ فشل ترجمة البيانات الوصفية للرواية ${originalData.title}: ${error.message}`, 'error');
     }
 }
 
@@ -772,6 +870,14 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 });
                 await novel.save();
                 await logScraper(`✨ تم إنشاء الرواية: ${novelData.title} (خاصة)`, 'info');
+
+                // 🔥 NEW: Start async translation of metadata
+                translateNovelMetadata(novel._id, {
+                    title: novelData.title,
+                    description: novelData.description,
+                    tags: novelData.tags || []
+                }).catch(err => console.error("Background metadata translation error:", err));
+
             } else {
                 // 🔥🔥 CRITICAL: EXISTING NOVEL - UPDATE ONLY WATCHLIST & STATUS 🔥🔥
                 
@@ -882,6 +988,31 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         } catch (error) {
             console.error("Scraper Receiver Error:", error);
             await logScraper(`❌ خطأ خادم: ${error.message}`, 'error');
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    // =========================================================
+    // 🔥 NEW: TRANSLATE METADATA FOR EXISTING NOVEL
+    // =========================================================
+    app.post('/api/admin/novels/:id/translate-metadata', verifyAdmin, async (req, res) => {
+        try {
+            const novelId = req.params.id;
+            const novel = await Novel.findById(novelId);
+            if (!novel) {
+                return res.status(404).json({ message: "الرواية غير موجودة" });
+            }
+
+            // Start translation in background
+            translateNovelMetadata(novel._id, {
+                title: novel.titleEn || novel.title, // Use English title if available, otherwise fallback
+                description: novel.description,
+                tags: novel.tags
+            }).catch(err => console.error("Background metadata translation error:", err));
+
+            res.json({ message: "تم بدء ترجمة البيانات الوصفية للرواية في الخلفية" });
+        } catch (error) {
+            console.error("Error starting metadata translation:", error);
             res.status(500).json({ error: error.message });
         }
     });
