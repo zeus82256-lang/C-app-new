@@ -1,4 +1,3 @@
-
 const mongoose = require('mongoose');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const Novel = require('../models/novel.model.js');
@@ -318,24 +317,52 @@ Arabic Text (Excerpt):
                     throw new Error(`فشل الحفظ في Firestore: ${fsSaveErr.message}`);
                 }
 
-                // 🔥🔥 FIX: Update createdAt to NOW so it triggers "New Chapter" logic
-                const updates = { 
-                    $set: { 
-                        "chapters.$.title": extractedTitle, // 🔥 Use the extracted title
-                        "chapters.$.createdAt": new Date(), // Resetting date to make it appear as NEW
-                        "lastChapterUpdate": new Date() 
-                    } 
-                };
-
-                if (freshNovel.status === 'خاصة') {
-                    updates.$set.status = 'مستمرة';
-                    await pushLog(jobId, `🔓 تم تغيير حالة الرواية إلى 'عامه' لأن فصل تم ترجمته`, 'success');
+                // 🔥🔥 MODIFIED: Handle adding chapter to MongoDB if it doesn't exist (private novel case)
+                const now = new Date();
+                // Check if chapter already exists in MongoDB
+                const existingChapterIndex = freshNovel.chapters.findIndex(c => c.number === chapterNum);
+                
+                if (existingChapterIndex === -1) {
+                    // Chapter not in MongoDB yet → add it (novel was private)
+                    await Novel.updateOne(
+                        { _id: freshNovel._id },
+                        {
+                            $push: {
+                                chapters: {
+                                    number: chapterNum,
+                                    title: extractedTitle,
+                                    createdAt: now,
+                                    views: 0
+                                }
+                            },
+                            $set: {
+                                lastChapterUpdate: now,
+                                status: freshNovel.status === 'خاصة' ? 'مستمرة' : freshNovel.status // change to public if was private
+                            }
+                        }
+                    );
+                    await pushLog(jobId, `✅ تم إضافة الفصل ${chapterNum} إلى قاعدة البيانات (الرواية أصبحت عامة)`, 'success');
+                } else {
+                    // Chapter exists → update title and createdAt
+                    await Novel.updateOne(
+                        { _id: freshNovel._id, "chapters.number": chapterNum },
+                        {
+                            $set: {
+                                "chapters.$.title": extractedTitle,
+                                "chapters.$.createdAt": now,
+                                "lastChapterUpdate": now
+                            }
+                        }
+                    );
+                    if (freshNovel.status === 'خاصة') {
+                        await Novel.updateOne(
+                            { _id: freshNovel._id },
+                            { $set: { status: 'مستمرة' } }
+                        );
+                        await pushLog(jobId, `🔓 تم تغيير حالة الرواية إلى 'مستمرة' (عامة)`, 'success');
+                    }
+                    await pushLog(jobId, `✅ تم تحديث الفصل ${chapterNum} وتاريخه`, 'success');
                 }
-
-                await Novel.findOneAndUpdate(
-                    { _id: freshNovel._id, "chapters.number": chapterNum },
-                    updates
-                );
 
                 await TranslationJob.findByIdAndUpdate(jobId, {
                     $inc: { translatedCount: 1 },
@@ -354,21 +381,46 @@ Arabic Text (Excerpt):
                             .collection('chapters').doc(chapterNum.toString())
                             .set({ content: translatedText }, { merge: true });
                         
-                        // 🔥 Also update createdAt on fallback save
-                        const updates = { 
-                            $set: { 
-                                "chapters.$.title": extractedTitle, // 🔥 Use extracted title
-                                "chapters.$.createdAt": new Date(),
-                                "lastChapterUpdate": new Date()
-                            } 
-                        };
+                        // 🔥 Also handle fallback save in MongoDB
+                        const now = new Date();
+                        const existingChapterIndex = freshNovel.chapters.findIndex(c => c.number === chapterNum);
                         
-                        if (freshNovel.status === 'خاصة') updates.$set.status = 'مستمرة';
-
-                        await Novel.findOneAndUpdate(
-                            { _id: freshNovel._id, "chapters.number": chapterNum },
-                            updates
-                        );
+                        if (existingChapterIndex === -1) {
+                            await Novel.updateOne(
+                                { _id: freshNovel._id },
+                                {
+                                    $push: {
+                                        chapters: {
+                                            number: chapterNum,
+                                            title: extractedTitle,
+                                            createdAt: now,
+                                            views: 0
+                                        }
+                                    },
+                                    $set: {
+                                        lastChapterUpdate: now,
+                                        status: freshNovel.status === 'خاصة' ? 'مستمرة' : freshNovel.status
+                                    }
+                                }
+                            );
+                        } else {
+                            await Novel.updateOne(
+                                { _id: freshNovel._id, "chapters.number": chapterNum },
+                                {
+                                    $set: {
+                                        "chapters.$.title": extractedTitle,
+                                        "chapters.$.createdAt": now,
+                                        "lastChapterUpdate": now
+                                    }
+                                }
+                            );
+                            if (freshNovel.status === 'خاصة') {
+                                await Novel.updateOne(
+                                    { _id: freshNovel._id },
+                                    { $set: { status: 'مستمرة' } }
+                                );
+                            }
+                        }
 
                         await TranslationJob.findByIdAndUpdate(jobId, {
                             $pull: { targetChapters: chapterNum } // Remove even if extraction failed
