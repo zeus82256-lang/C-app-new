@@ -21,6 +21,7 @@ const NovelLibrary = require('../models/novelLibrary.model.js');
 const Settings = require('../models/settings.model.js');
 const Comment = require('../models/comment.model.js');
 const ChapterScraperJob = require('../models/chapterScraperJob.model.js'); // 🔥 NEW MODEL
+const MetadataTranslationJob = require('../models/metadataTranslationJob.model.js'); // 🔥 NEW MODEL
 
 // 🔥 MODEL FOR SCRAPER LOGS
 const ScraperLogSchema = new mongoose.Schema({
@@ -45,20 +46,39 @@ async function logScraper(message, type = 'info') {
     }
 }
 
-// 🔥 NEW: Translate novel metadata (title, description, tags) using Gemini
-async function translateNovelMetadata(novelId, originalData) {
+// 🔥 Helper to update metadata translation job
+async function updateMetadataJob(jobId, status, message, type) {
     try {
-        // 1. Get translation settings
+        if (!jobId) return;
+        const update = { status, lastUpdate: new Date() };
+        if (message) {
+            update.$push = { logs: { message, type, timestamp: new Date() } };
+        }
+        if (status === 'completed' || status === 'failed') {
+            update.processedCount = 3; // all steps done
+        }
+        await MetadataTranslationJob.findByIdAndUpdate(jobId, update);
+    } catch (e) {
+        console.error("Error updating metadata job:", e);
+    }
+}
+
+// 🔥 NEW: Translate novel metadata (title, description, tags) using Gemini (same as translator)
+async function translateNovelMetadata(novelId, originalData, jobId = null) {
+    try {
+        // 1. Get translation settings (same as translator)
         const settings = await getGlobalSettings();
         const apiKeys = settings.translatorApiKeys || [];
-        const selectedModel = settings.translatorModel || 'gemini-2.5-flash';
+        const selectedModel = settings.translatorModel || 'gemini-1.5-flash';
         
         if (!apiKeys.length) {
-            await logScraper(`⚠️ لا توجد مفاتيح API للترجمة، لن يتم ترجمة البيانات الوصفية للرواية ${originalData.title}`, 'warning');
+            const msg = `⚠️ لا توجد مفاتيح API للترجمة، لن يتم ترجمة البيانات الوصفية للرواية ${originalData.title}`;
+            await logScraper(msg, 'warning');
+            if (jobId) await updateMetadataJob(jobId, 'failed', msg, 'error');
             return;
         }
 
-        // 2. Get available categories from settings or fallback to BASE_CATEGORIES
+        // 2. Get available categories from settings or fallback
         let availableCategories = settings.managedCategories || [];
         if (!availableCategories.length) {
             // Fallback to hardcoded categories if not set
@@ -95,8 +115,10 @@ async function translateNovelMetadata(novelId, originalData) {
 لا تضف أي نصوص خارج JSON.
 `;
 
-        // 4. Call Gemini
-        const keyIndex = 0; // Use first key, simple round-robin not needed for this small task
+        if (jobId) await updateMetadataJob(jobId, 'active', 'جاري ترجمة البيانات...', 'info');
+
+        // 4. Call Gemini (same logic as translator)
+        const keyIndex = 0; // simple round-robin not needed
         const genAI = new GoogleGenerativeAI(apiKeys[keyIndex % apiKeys.length]);
         const model = genAI.getGenerativeModel({ model: selectedModel });
         
@@ -104,6 +126,8 @@ async function translateNovelMetadata(novelId, originalData) {
         const response = await result.response;
         let jsonText = response.text().trim();
         
+        if (jobId) await updateMetadataJob(jobId, 'active', 'تم استلام الرد من الذكاء الاصطناعي', 'info');
+
         // Clean JSON if needed
         if (jsonText.startsWith("```json")) {
             jsonText = jsonText.replace(/^```json\s*/, "").replace(/\s*```$/, "");
@@ -117,28 +141,33 @@ async function translateNovelMetadata(novelId, originalData) {
         const updateData = {};
         if (parsed.arabicTitle && parsed.arabicTitle.trim()) {
             updateData.title = parsed.arabicTitle;
+            if (jobId) await updateMetadataJob(jobId, 'active', `✅ تم ترجمة العنوان إلى: ${parsed.arabicTitle}`, 'success');
         }
         if (parsed.arabicDescription && parsed.arabicDescription.trim()) {
             updateData.description = parsed.arabicDescription;
+            if (jobId) await updateMetadataJob(jobId, 'active', '✅ تم ترجمة الوصف', 'success');
         }
         if (parsed.matchedCategories && Array.isArray(parsed.matchedCategories) && parsed.matchedCategories.length > 0) {
             updateData.tags = parsed.matchedCategories;
-            // Also set main category to first matched category if it exists
             if (parsed.matchedCategories[0]) {
                 updateData.category = parsed.matchedCategories[0];
             }
+            if (jobId) await updateMetadataJob(jobId, 'active', `✅ تم تحديث التصنيفات إلى: ${parsed.matchedCategories.join(', ')}`, 'success');
         }
         
         if (Object.keys(updateData).length > 0) {
             await Novel.updateOne({ _id: novelId }, { $set: updateData });
             await logScraper(`✅ تم تحديث البيانات الوصفية للرواية: العنوان: ${parsed.arabicTitle || originalData.title}`, 'success');
+            if (jobId) await updateMetadataJob(jobId, 'completed', '🏁 اكتملت ترجمة البيانات بنجاح', 'success');
         } else {
             await logScraper(`ℹ️ لم يتم العثور على بيانات جديدة لتحديثها للرواية ${originalData.title}`, 'info');
+            if (jobId) await updateMetadataJob(jobId, 'completed', 'ℹ️ لم يتم العثور على بيانات جديدة لتحديثها', 'info');
         }
         
     } catch (error) {
         console.error("Metadata translation error:", error);
         await logScraper(`❌ فشل ترجمة البيانات الوصفية للرواية ${originalData.title}: ${error.message}`, 'error');
+        if (jobId) await updateMetadataJob(jobId, 'failed', `❌ فشل الترجمة: ${error.message}`, 'error');
     }
 }
 
@@ -871,7 +900,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 await novel.save();
                 await logScraper(`✨ تم إنشاء الرواية: ${novelData.title} (خاصة)`, 'info');
 
-                // 🔥 NEW: Start async translation of metadata
+                // 🔥 NEW: Start async translation of metadata (without job)
                 translateNovelMetadata(novel._id, {
                     title: novelData.title,
                     description: novelData.description,
@@ -993,8 +1022,33 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     });
 
     // =========================================================
-    // 🔥 NEW: TRANSLATE METADATA FOR EXISTING NOVEL
+    // 🔥 NEW: METADATA TRANSLATION JOB MANAGEMENT API
     // =========================================================
+    
+    // 1. Get all metadata translation jobs
+    app.get('/api/translator/metadata-jobs', verifyToken, verifyAdmin, async (req, res) => {
+        try {
+            const jobs = await MetadataTranslationJob.find()
+                .sort({ createdAt: -1 })
+                .limit(20);
+            res.json(jobs);
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // 2. Get a specific job
+    app.get('/api/translator/metadata-jobs/:id', verifyToken, verifyAdmin, async (req, res) => {
+        try {
+            const job = await MetadataTranslationJob.findById(req.params.id);
+            if (!job) return res.status(404).json({ message: "Job not found" });
+            res.json(job);
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // 3. Start a new metadata translation job
     app.post('/api/admin/novels/:id/translate-metadata', verifyAdmin, async (req, res) => {
         try {
             const novelId = req.params.id;
@@ -1003,372 +1057,39 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 return res.status(404).json({ message: "الرواية غير موجودة" });
             }
 
-            // Start translation in background
+            // Create job
+            const job = new MetadataTranslationJob({
+                novelId: novel._id,
+                novelTitle: novel.title,
+                cover: novel.cover,
+                status: 'active',
+                processedCount: 0,
+                totalSteps: 3,
+                logs: [{ message: '🚀 تم بدء مهمة ترجمة البيانات الوصفية', type: 'info', timestamp: new Date() }]
+            });
+            await job.save();
+
+            // Start translation in background with job tracking
             translateNovelMetadata(novel._id, {
-                title: novel.titleEn || novel.title, // Use English title if available, otherwise fallback
+                title: novel.titleEn || novel.title,
                 description: novel.description,
                 tags: novel.tags
-            }).catch(err => console.error("Background metadata translation error:", err));
+            }, job._id).catch(err => console.error("Background metadata translation error:", err));
 
-            res.json({ message: "تم بدء ترجمة البيانات الوصفية للرواية في الخلفية" });
+            res.json({ message: "تم بدء الترجمة بنجاح", jobId: job._id });
         } catch (error) {
             console.error("Error starting metadata translation:", error);
             res.status(500).json({ error: error.message });
         }
     });
 
-    // Bulk Upload (Kept same)
-    app.post('/api/admin/chapters/bulk-upload', verifyAdmin, upload.single('zip'), async (req, res) => {
+    // 4. Delete a job
+    app.delete('/api/translator/metadata-jobs/:id', verifyToken, verifyAdmin, async (req, res) => {
         try {
-            if (!req.file) return res.status(400).json({ message: "No ZIP file uploaded" });
-            const { novelId } = req.body;
-            
-            if (!novelId) return res.status(400).json({ message: "Novel ID required" });
-
-            const novel = await Novel.findById(novelId);
-            if (!novel) return res.status(404).json({ message: "Novel not found" });
-
-            if (req.user.role !== 'admin') {
-                if (novel.authorEmail !== req.user.email) {
-                    return res.status(403).json({ message: "لا تملك صلاحية النشر لهذه الرواية" });
-                }
-            }
-
-            const zip = new AdmZip(req.file.buffer);
-            const zipEntries = zip.getEntries();
-            
-            let successCount = 0;
-            let errors = [];
-            
-            for (const entry of zipEntries) {
-                if (entry.isDirectory || !entry.entryName.endsWith('.txt')) continue;
-
-                try {
-                    const fileName = path.basename(entry.entryName, '.txt');
-                    const chapterNumber = parseInt(fileName);
-
-                    if (isNaN(chapterNumber)) {
-                        errors.push(`تخطي ${entry.entryName}: الاسم ليس رقماً`);
-                        continue;
-                    }
-
-                    const fullText = zip.readAsText(entry, 'utf8');
-                    const lines = fullText.split('\n');
-                    if (lines.length === 0) continue;
-
-                    const firstLine = lines[0].trim();
-                    let chapterTitle = firstLine;
-                    const colonIndex = firstLine.indexOf(':');
-                    if (colonIndex > -1) chapterTitle = firstLine.substring(colonIndex + 1).trim();
-                    if (!chapterTitle) chapterTitle = firstLine;
-
-                    const content = lines.slice(1).join('\n').trim();
-
-                    if (firestore) {
-                        await firestore.collection('novels').doc(novelId).collection('chapters').doc(chapterNumber.toString()).set({
-                            title: chapterTitle,
-                            content: content,
-                            lastUpdated: new Date()
-                        });
-                    }
-
-                    const chapterMeta = { 
-                        number: chapterNumber, 
-                        title: chapterTitle, 
-                        createdAt: new Date(), 
-                        views: 0 
-                    };
-
-                    const existingIndex = novel.chapters.findIndex(c => c.number === chapterNumber);
-                    if (existingIndex > -1) {
-                        novel.chapters[existingIndex] = { ...novel.chapters[existingIndex].toObject(), ...chapterMeta };
-                    } else {
-                        novel.chapters.push(chapterMeta);
-                    }
-                    successCount++;
-                } catch (err) {
-                    errors.push(`خطأ في ${entry.entryName}`);
-                }
-            }
-
-            if (successCount > 0) {
-                novel.chapters.sort((a, b) => a.number - b.number);
-                novel.lastChapterUpdate = new Date();
-                if (novel.status === 'متوقفة') novel.status = 'مستمرة';
-                await novel.save();
-            }
-
-            res.json({ message: `نجح: ${successCount}`, errors, successCount });
-
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    });
-
-    // Users Management
-    app.get('/api/admin/users', verifyAdmin, async (req, res) => {
-        if (req.user.role !== 'admin') return res.status(403).json({ message: "Access Denied" });
-        try {
-            const users = await User.find({}).sort({ createdAt: -1 });
-            res.json(users);
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    });
-
-    app.put('/api/admin/users/:id/role', verifyAdmin, async (req, res) => {
-        if (req.user.role !== 'admin') return res.status(403).json({ message: "Access Denied" });
-        try {
-            const { role } = req.body;
-            const user = await User.findByIdAndUpdate(req.params.id, { role }, { new: true });
-            res.json(user);
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    });
-
-    app.delete('/api/admin/users/:id', verifyAdmin, async (req, res) => {
-        if (req.user.role !== 'admin') return res.status(403).json({ message: "Access Denied" });
-        try {
-            const targetUserId = req.params.id;
-            const deleteContent = req.query.deleteContent === 'true'; 
-            if (targetUserId === req.user.id) return res.status(400).json({message: "Cannot delete yourself"});
-
-            const targetUser = await User.findById(targetUserId);
-            if (!targetUser) return res.status(404).json({ message: "User not found" });
-
-            await Comment.deleteMany({ user: targetUserId });
-
-            if (deleteContent) {
-                const userNovels = await Novel.find({ authorEmail: targetUser.email });
-                if (firestore && userNovels.length > 0) {
-                    for (const novel of userNovels) {
-                        try {
-                            const chaptersRef = firestore.collection('novels').doc(novel._id.toString()).collection('chapters');
-                            const snapshot = await chaptersRef.get();
-                            if (!snapshot.empty) {
-                                const deletePromises = snapshot.docs.map(doc => doc.ref.delete());
-                                await Promise.all(deletePromises);
-                            }
-                            await firestore.collection('novels').doc(novel._id.toString()).delete();
-                        } catch (err) {}
-                    }
-                }
-                await Novel.deleteMany({ authorEmail: targetUser.email });
-            }
-
-            await User.findByIdAndDelete(targetUserId);
-            await NovelLibrary.deleteMany({ user: targetUserId });
-            await Settings.deleteMany({ user: targetUserId });
-            
-            res.json({ message: "User deleted" });
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    });
-
-    app.put('/api/admin/users/:id/block-comment', verifyAdmin, async (req, res) => {
-        if (req.user.role !== 'admin') return res.status(403).json({ message: "Access Denied" });
-        try {
-            const { block } = req.body;
-            const user = await User.findByIdAndUpdate(req.params.id, { isCommentBlocked: block }, { new: true });
-            res.json({ message: "Updated", user });
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    });
-
-    // Novels Management
-    app.post('/api/admin/novels', verifyAdmin, async (req, res) => {
-        try {
-            const { title, titleEn, cover, description, category, tags, status } = req.body;
-            const newNovel = new Novel({
-                title, 
-                titleEn: titleEn || '', 
-                cover, 
-                description, 
-                author: req.user.name, 
-                authorEmail: req.user.email,
-                authorId: req.user.id, // 🔥 NEW: Set authorId
-                category, tags, status: status || 'مستمرة'
-            });
-            await newNovel.save();
-            res.json(newNovel);
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    });
-
-    app.put('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
-        try {
-            const { title, titleEn, cover, description, category, tags, status } = req.body;
-            const novel = await Novel.findById(req.params.id);
-            if (!novel) return res.status(404).json({ message: "Novel not found" });
-
-            if (req.user.role !== 'admin' && novel.authorEmail !== req.user.email) {
-                return res.status(403).json({ message: "Access Denied" });
-            }
-
-            let updateData = { title, titleEn, cover, description, category, tags, status };
-            if (req.user.role === 'admin') {
-                updateData.author = req.user.name;
-                updateData.authorEmail = req.user.email;
-                updateData.authorId = req.user.id; // 🔥 NEW: Set authorId
-            }
-            const updated = await Novel.findByIdAndUpdate(req.params.id, updateData, { new: true });
-            res.json(updated);
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    });
-
-    app.delete('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
-        try {
-            const novelId = req.params.id;
-            const novel = await Novel.findById(novelId);
-            if (!novel) return res.status(404).json({ message: "Novel not found" });
-
-            if (req.user.role !== 'admin' && novel.authorEmail !== req.user.email) {
-                return res.status(403).json({ message: "Access Denied" });
-            }
-
-            if (firestore) {
-                try {
-                    const chaptersRef = firestore.collection('novels').doc(novelId).collection('chapters');
-                    const snapshot = await chaptersRef.get();
-                    if (!snapshot.empty) {
-                        const deletePromises = snapshot.docs.map(doc => doc.ref.delete());
-                        await Promise.all(deletePromises);
-                    }
-                    await firestore.collection('novels').doc(novelId).delete();
-                } catch (fsError) {}
-            }
-
-            await Novel.findByIdAndDelete(novelId);
-            await NovelLibrary.deleteMany({ novelId: novelId });
-            res.json({ message: "Deleted" });
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    });
-
-    app.post('/api/admin/chapters', verifyAdmin, async (req, res) => {
-        try {
-            const { novelId, number, title, content } = req.body;
-            const novel = await Novel.findById(novelId);
-            if (!novel) return res.status(404).json({ message: "Novel not found" });
-
-            if (req.user.role !== 'admin' && novel.authorEmail !== req.user.email) {
-                return res.status(403).json({ message: "Access Denied" });
-            }
-
-            if (firestore) {
-                await firestore.collection('novels').doc(novelId).collection('chapters').doc(number.toString()).set({
-                    title, content, lastUpdated: new Date()
-                });
-            }
-
-            const existingIndex = novel.chapters.findIndex(c => c.number == number);
-            const chapterMeta = { number: Number(number), title, createdAt: new Date(), views: 0 };
-
-            if (existingIndex > -1) {
-                novel.chapters[existingIndex] = { ...novel.chapters[existingIndex].toObject(), ...chapterMeta };
-            } else {
-                novel.chapters.push(chapterMeta);
-            }
-            
-            novel.lastChapterUpdate = new Date();
-            if (novel.status === 'متوقفة') novel.status = 'مستمرة';
-            novel.markModified('chapters');
-            await novel.save();
-
-            res.json({ message: "Chapter saved" });
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    });
-
-    app.put('/api/admin/chapters/:novelId/:number', verifyAdmin, async (req, res) => {
-        try {
-            const { novelId, number } = req.params;
-            const { title, content } = req.body;
-            const novel = await Novel.findById(novelId);
-            if (!novel) return res.status(404).json({ message: "Novel not found" });
-
-            if (req.user.role !== 'admin' && novel.authorEmail !== req.user.email) {
-                return res.status(403).json({ message: "Access Denied" });
-            }
-
-            if (firestore) {
-                await firestore.collection('novels').doc(novelId).collection('chapters').doc(number.toString()).update({
-                    title, content, lastUpdated: new Date()
-                });
-            }
-
-            const idx = novel.chapters.findIndex(c => c.number == number);
-            if (idx > -1) {
-                novel.chapters[idx].title = title;
-                novel.markModified('chapters');
-                await novel.save();
-            }
-            res.json({ message: "Updated" });
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    });
-
-    app.delete('/api/admin/chapters/:novelId/:number', verifyAdmin, async (req, res) => {
-        try {
-            const { novelId, number } = req.params;
-            const novel = await Novel.findById(novelId);
-            if (!novel) return res.status(404).json({ message: "Novel not found" });
-
-            if (req.user.role !== 'admin' && novel.authorEmail !== req.user.email) {
-                return res.status(403).json({ message: "Access Denied" });
-            }
-            
-            novel.chapters = novel.chapters.filter(c => c.number != number);
-            await novel.save();
-
-            if (firestore) {
-                await firestore.collection('novels').doc(novelId).collection('chapters').doc(number.toString()).delete();
-            }
-            res.json({ message: "Deleted" });
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    });
-
-    app.post('/api/admin/chapters/batch-delete', verifyAdmin, async (req, res) => {
-        try {
-            const { novelId, chapterNumbers } = req.body;
-            
-            if (!novelId || !Array.isArray(chapterNumbers) || chapterNumbers.length === 0) {
-                return res.status(400).json({ message: "Invalid request data" });
-            }
-
-            const novel = await Novel.findById(novelId);
-            if (!novel) return res.status(404).json({ message: "Novel not found" });
-
-            if (req.user.role !== 'admin' && novel.authorEmail !== req.user.email) {
-                return res.status(403).json({ message: "Access Denied" });
-            }
-
-            novel.chapters = novel.chapters.filter(c => !chapterNumbers.includes(c.number));
-            await novel.save();
-
-            if (firestore) {
-                const batch = firestore.batch();
-                chapterNumbers.forEach(num => {
-                    const docRef = firestore.collection('novels').doc(novelId).collection('chapters').doc(num.toString());
-                    batch.delete(docRef);
-                });
-                await batch.commit();
-            }
-
-            res.json({ message: `Deleted ${chapterNumbers.length} chapters` });
-        } catch (error) {
-            res.status(500).json({ error: error.message });
+            await MetadataTranslationJob.findByIdAndDelete(req.params.id);
+            res.json({ success: true });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
         }
     });
 
