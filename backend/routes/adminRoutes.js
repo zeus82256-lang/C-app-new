@@ -1,4 +1,3 @@
-// adminRoutes.js (نسخة منقحة، مع إزالة أجزاء الترجمة وإضافة التصدير)
 const mongoose = require('mongoose');
 const path = require('path');
 const AdmZip = require('adm-zip');
@@ -169,6 +168,9 @@ async function processTitleExtractionJob(jobId) {
     }
 }
 
+// =========================================================
+// تصدير الدوال المساعدة لاستخدامها في الملفات الأخرى
+// =========================================================
 module.exports = function(app, verifyToken, verifyAdmin, upload) {
 
     // =========================================================
@@ -1458,7 +1460,5 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
 };
 
 // تصدير الدوال المساعدة لاستخدامها في الملفات الأخرى
-module.exports = {
-    logScraper,
-    getGlobalSettings
-};
+module.exports.logScraper = logScraper;
+module.exports.getGlobalSettings = getGlobalSettings;
