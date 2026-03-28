@@ -490,6 +490,7 @@ module.exports = function(app, verifyToken, verifyAdmin) {
             // 1. Filter
             // 2. Count chapters database-side ($size) without loading them
             // 3. Exclude heavy fields like 'chapters', 'description' if not needed
+            // 🔥 MODIFIED: Use sourceChaptersCount if available, otherwise fallback to chapters length
             const novels = await Novel.aggregate([
                 { $match: query },
                 {
@@ -500,8 +501,13 @@ module.exports = function(app, verifyToken, verifyAdmin) {
                         author: 1,
                         status: 1,
                         createdAt: 1,
-                        // ⚡⚡ ROCKET SPEED: Get array size directly in DB engine
-                        chaptersCount: { $size: { $ifNull: ["$chapters", []] } } 
+                        // ⚡⚡ ROCKET SPEED: Get array size directly in DB engine, but prioritize sourceChaptersCount
+                        chaptersCount: {
+                            $ifNull: [
+                                "$sourceChaptersCount",
+                                { $size: { $ifNull: ["$chapters", []] } }
+                            ]
+                        }
                     }
                 },
                 { $sort: { createdAt: -1 } },
@@ -553,7 +559,19 @@ module.exports = function(app, verifyToken, verifyAdmin) {
                     .filter(c => c.number >= resumeFrom)
                     .map(c => c.number);
             } else if (chapters === 'all') {
-                targetChapters = novel.chapters.map(c => c.number);
+                // 🔥 MODIFIED: If novel has no chapters in MongoDB (private novel), fetch from Firestore
+                if (novel.chapters.length === 0 && firestore) {
+                    try {
+                        const chaptersRef = firestore.collection('novels').doc(novelId.toString()).collection('chapters');
+                        const snapshot = await chaptersRef.get();
+                        targetChapters = snapshot.docs.map(doc => parseInt(doc.id)).sort((a, b) => a - b);
+                    } catch (err) {
+                        console.error("Failed to fetch chapters from Firestore:", err);
+                        targetChapters = [];
+                    }
+                } else {
+                    targetChapters = novel.chapters.map(c => c.number);
+                }
             } else if (Array.isArray(chapters)) {
                 targetChapters = chapters;
             }
