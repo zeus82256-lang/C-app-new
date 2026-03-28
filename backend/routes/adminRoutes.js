@@ -575,6 +575,29 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         }
     });
 
+app.put('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
+        try {
+            const { title, titleEn, cover, description, category, tags, status } = req.body;
+            const novel = await Novel.findById(req.params.id);
+            if (!novel) return res.status(404).json({ message: "Novel not found" });
+
+            if (req.user.role !== 'admin' && novel.authorEmail !== req.user.email) {
+                return res.status(403).json({ message: "Access Denied" });
+            }
+
+            let updateData = { title, titleEn, cover, description, category, tags, status };
+            if (req.user.role === 'admin') {
+                updateData.author = req.user.name;
+                updateData.authorEmail = req.user.email;
+                updateData.authorId = req.user.id; // 🔥 NEW: Set authorId
+            }
+            const updated = await Novel.findByIdAndUpdate(req.params.id, updateData, { new: true });
+            res.json(updated);
+        } catch (error) {
+            res.status(500).json({ error: error.message });
+        }
+    });
+
 // Delete Novel (Admin/Author)
     app.delete('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
         try {
