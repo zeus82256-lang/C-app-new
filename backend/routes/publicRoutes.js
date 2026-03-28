@@ -742,100 +742,90 @@ module.exports = function(app, verifyToken, upload) {
     });
 
     // 🔥🔥🔥 PAGINATED CHAPTER LIST (SERVER-SIDE LAZY LOADING) 🔥🔥🔥
-    app.get('/api/novels/:id/chapters-list', async (req, res) => {
-        try {
-            const { id } = req.params;
-            const page = parseInt(req.query.page) || 1;
-            const limit = parseInt(req.query.limit) || 25;
-            const sortOrder = req.query.sort === 'desc' ? -1 : 1; // Default Ascending (1, 2, 3...)
-            const skip = (page - 1) * limit;
-            
-            const role = getUserRole(req);
+    // 🔥🔥🔥 PAGINATED CHAPTER LIST (SERVER-SIDE LAZY LOADING) 🔥🔥🔥
+app.get('/api/novels/:id/chapters-list', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 25;
+        const sortOrder = req.query.sort === 'desc' ? -1 : 1;
+        const skip = (page - 1) * limit;
+        
+        const role = getUserRole(req);
 
-            // 🔥 MODIFIED: First fetch the novel to check if it has chapters in MongoDB
-            const novel = await Novel.findById(id).select('status chapters sourceChaptersCount');
-            if (!novel) return res.status(404).json({ message: 'Novel not found' });
+        // Fetch novel to get status and existing chapters
+        const novel = await Novel.findById(id).select('status chapters sourceChaptersCount');
+        if (!novel) return res.status(404).json({ message: 'Novel not found' });
 
-            // If the novel has chapters in MongoDB, use aggregation as before
-            if (novel.chapters && novel.chapters.length > 0) {
-                // Using aggregation to efficiently unwrap, sort, and slice the array
-                const pipeline = [
-                    { $match: { _id: new mongoose.Types.ObjectId(id) } },
-                    
-                    // 1. Unwind the chapters array to documents
-                    { $unwind: "$chapters" },
+        // إذا كانت الرواية خاصة والمستخدم ليس أدمن، نمنع الوصول
+        if (novel.status === 'خاصة' && role !== 'admin') {
+            return res.status(403).json({ message: "Access Denied" });
+        }
 
-                    // 2. Filter hidden chapters (if not admin)
-                    ...(role !== 'admin' ? [{
-                        $match: {
-                            $and: [
-                                { "chapters.title": { $not: { $regex: /chapter|ago|month|week|day|year/i } } }
-                                // Add more filters here if needed based on isChapterHidden logic
-                            ]
-                        }
-                    }] : []),
-
-                    // 3. Sort by number
-                    { $sort: { "chapters.number": sortOrder } },
-
-                    // 4. Project only needed fields (Metadata only, NO content)
-                    {
-                        $project: {
-                            _id: "$chapters._id",
-                            number: "$chapters.number",
-                            title: "$chapters.title",
-                            createdAt: "$chapters.createdAt",
-                            views: "$chapters.views"
-                        }
-                    },
-
-                    // 5. Pagination
-                    { $skip: skip },
-                    { $limit: limit }
-                ];
-
-                const chapters = await Novel.aggregate(pipeline);
-                return res.json(chapters);
-            }
-
-            // 🔥 NEW: If no chapters in MongoDB, fetch from Firestore
-            if (!firestore) {
-                return res.status(500).json({ message: "Firestore not connected" });
-            }
-
+        // جلب جميع الفصول من Firestore (إن وجدت)
+        let firestoreChapters = [];
+        if (firestore) {
             try {
                 const chaptersRef = firestore.collection('novels').doc(id).collection('chapters');
                 const snapshot = await chaptersRef.get();
-                
-                const chapters = [];
-                snapshot.forEach(doc => {
+                firestoreChapters = snapshot.docs.map(doc => {
                     const data = doc.data();
-                    chapters.push({
+                    return {
                         number: parseInt(doc.id),
                         title: data.title || `الفصل ${doc.id}`,
                         createdAt: data.lastUpdated ? data.lastUpdated.toDate() : new Date(),
                         views: 0
-                    });
+                    };
                 });
-
-                // Sort by number
-                chapters.sort((a, b) => a.number - b.number);
-                if (sortOrder === -1) chapters.reverse();
-
-                // Apply pagination
-                const paginated = chapters.slice(skip, skip + limit);
-                res.json(paginated);
-
-            } catch (firestoreError) {
-                console.error("Firestore fetch error:", firestoreError);
-                res.status(500).json({ message: "Failed to fetch chapters from Firestore" });
+            } catch (err) {
+                console.error('Firestore chapters fetch error:', err);
             }
-
-        } catch (error) {
-            console.error("Chapters List Error:", error);
-            res.status(500).json({ message: error.message });
         }
-    });
+
+        // بناء خريطة للفصول الموجودة في MongoDB (مترجمة) لتحديث البيانات
+        const mongoChaptersMap = new Map();
+        for (const ch of novel.chapters) {
+            mongoChaptersMap.set(ch.number, {
+                number: ch.number,
+                title: ch.title,
+                createdAt: ch.createdAt,
+                views: ch.views
+            });
+        }
+
+        // دمج الفصول: نأخذ من Firestore ونستبدل البيانات الموجودة في MongoDB
+        const allChaptersMap = new Map();
+        for (const ch of firestoreChapters) {
+            allChaptersMap.set(ch.number, ch);
+        }
+        for (const [num, ch] of mongoChaptersMap) {
+            allChaptersMap.set(num, ch);
+        }
+
+        // تحويل الخريطة إلى مصفوفة وفرز حسب الرقم
+        let allChapters = Array.from(allChaptersMap.values());
+        allChapters.sort((a, b) => a.number - b.number);
+        if (sortOrder === -1) allChapters.reverse();
+
+        // تطبيق البحث (chapterSearch) إذا وجد
+        const search = req.query.search;
+        if (search) {
+            const lowerSearch = search.toLowerCase();
+            allChapters = allChapters.filter(ch => 
+                ch.number.toString().includes(lowerSearch) ||
+                (ch.title && ch.title.toLowerCase().includes(lowerSearch))
+            );
+        }
+
+        // تطبيق التصفح (pagination)
+        const paginated = allChapters.slice(skip, skip + limit);
+
+        res.json(paginated);
+    } catch (error) {
+        console.error("Chapters List Error:", error);
+        res.status(500).json({ message: error.message });
+    }
+});
 
     app.get('/api/novels/:novelId/chapters/:chapterId', async (req, res) => {
         try {
