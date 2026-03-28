@@ -1,4 +1,3 @@
-
 const mongoose = require('mongoose');
 
 const chapterSchema = new mongoose.Schema({
@@ -24,6 +23,7 @@ const novelSchema = new mongoose.Schema({
     // 🔥 Watchlist & Scraper Fields
     sourceUrl: { type: String }, // رابط المصدر الأصلي
     sourceStatus: { type: String }, // الحالة في المصدر (Ongoing/Completed)
+    sourceChaptersCount: { type: Number, default: 0 }, // 🔥 NEW: أعلى رقم فصل تم استلامه من المصدر (يستخدم لعرض العدد الإجمالي للفصول حتى قبل الترجمة)
     isWatched: { type: Boolean, default: false }, // هل هي في قائمة المراقبة اليومية؟
     
     views: { type: Number, default: 0 }, 
