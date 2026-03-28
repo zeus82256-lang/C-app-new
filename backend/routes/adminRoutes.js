@@ -588,6 +588,65 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         }
     });
 
+// Delete Novel (Admin/Author)
+    app.delete('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
+        try {
+            const novelId = req.params.id;
+            const novel = await Novel.findById(novelId);
+            if (!novel) {
+                return res.status(404).json({ message: "الرواية غير موجودة" });
+            }
+
+            // التحقق من الصلاحيات (المشرف أو المؤلف)
+            if (req.user.role !== 'admin' && novel.authorEmail !== req.user.email) {
+                return res.status(403).json({ message: "لا تملك صلاحية حذف هذه الرواية" });
+            }
+
+            // 1. حذف الفصول من Firestore (إن وجدت)
+            if (firestore) {
+                try {
+                    const chaptersRef = firestore.collection('novels').doc(novelId).collection('chapters');
+                    const snapshot = await chaptersRef.get();
+                    
+                    // Batch delete all chapters
+                    const batch = firestore.batch();
+                    snapshot.forEach(doc => {
+                        batch.delete(doc.ref);
+                    });
+                    await batch.commit();
+                    
+                    // Delete the novel document from Firestore
+                    await firestore.collection('novels').doc(novelId).delete();
+                    
+                    await logScraper(`✅ تم حذف ${snapshot.size} فصل من Firestore للرواية ${novel.title}`, 'success');
+                } catch (fsError) {
+                    console.error("❌ فشل حذف الفصول من Firestore:", fsError);
+                    await logScraper(`❌ فشل حذف الفصول من Firestore: ${fsError.message}`, 'error');
+                    return res.status(500).json({ message: "فشل حذف الفصول من قاعدة البيانات السحابية، يرجى المحاولة لاحقاً." });
+                }
+            }
+
+            // 2. حذف الرواية من MongoDB
+            await Novel.findByIdAndDelete(novelId);
+            
+            // 3. حذف أي سجلات في مكتبة المستخدمين مرتبطة بهذه الرواية
+            await NovelLibrary.deleteMany({ novelId: novelId });
+            
+            // 4. (اختياري) حذف مهام الترجمة المرتبطة بالرواية
+            if (mongoose.models.MetadataTranslationJob) {
+                await mongoose.models.MetadataTranslationJob.deleteMany({ novelId: novelId });
+            }
+
+            await logScraper(`🗑️ تم حذف الرواية ${novel.title} بالكامل (MongoDB + Firestore)`, 'success');
+            res.json({ message: "تم حذف الرواية وجميع فصولها بنجاح" });
+            
+        } catch (error) {
+            console.error("Error deleting novel:", error);
+            await logScraper(`❌ فشل حذف الرواية: ${error.message}`, 'error');
+            res.status(500).json({ error: error.message });
+        }
+    });
+
     // =========================================================
     // 🔄 GLOBAL REPLACEMENTS API (SERVER-SIDE)
     // =========================================================
