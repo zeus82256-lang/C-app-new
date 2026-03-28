@@ -121,12 +121,10 @@ async function processTranslationJob(jobId) {
             }
 
             const freshNovel = await Novel.findById(job.novelId);
-            const chapterIndex = freshNovel.chapters.findIndex(c => c.number === chapterNum);
             
-            if (chapterIndex === -1) {
-                await pushLog(jobId, `فصل ${chapterNum} غير موجود في الفهرس`, 'warning');
-                continue;
-            }
+            // 🔥🔥 REMOVED: The check that chapter exists in MongoDB
+            // Now we proceed directly to fetch content from Firestore.
+            // If content doesn't exist, we log and continue.
 
             let sourceContent = ""; 
             try {
