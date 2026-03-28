@@ -833,6 +833,19 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                     }
                 }
 
+                // 🔥 NEW: Update sourceChaptersCount with the highest chapter number received
+                let maxChapter = 0;
+                if (chapters && chapters.length > 0) {
+                    maxChapter = Math.max(...chapters.map(c => c.number));
+                }
+                if (maxChapter > (novel.sourceChaptersCount || 0)) {
+                    await Novel.updateOne(
+                        { _id: novel._id },
+                        { $set: { sourceChaptersCount: maxChapter } }
+                    );
+                    await logScraper(`📊 تم تحديث عدد الفصول المصدر إلى ${maxChapter}`, 'info');
+                }
+
                 if (!isPrivate && addedCount > 0) {
                     novel.chapters.sort((a, b) => a.number - b.number);
                     
