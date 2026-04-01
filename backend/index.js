@@ -20,6 +20,8 @@ try {
     console.warn('⚠️  Could not find .env file. Using platform environment variables instead.');
 }
 
+console.log('MONGODB_URI used:', process.env.MONGODB_URI ? process.env.MONGODB_URI.replace(/:[^:@]+@/, ':****@') : 'undefined');
+
 const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
