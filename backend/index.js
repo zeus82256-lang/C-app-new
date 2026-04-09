@@ -1,6 +1,3 @@
-
-
-
 // =================================================================
 // 1. التحميل اليدوي لمتغيرات البيئة
 // =================================================================
@@ -49,26 +46,51 @@ app.use(cors({
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Database Connection
+// Database Connection with retry logic (no crash on failure)
 let cachedDb = null;
-async function connectToDatabase() {
+let connectionAttempts = 0;
+const MAX_RETRIES = 10;
+const RETRY_DELAY_MS = 7000;
+
+async function connectToDatabase(retry = true) {
     if (cachedDb) return cachedDb;
     try {
         const db = await mongoose.connect(process.env.MONGODB_URI, {
             serverSelectionTimeoutMS: 5000,
         });
         cachedDb = db;
+        connectionAttempts = 0;
         console.log("✅ Connected to MongoDB Atlas");
         return db;
     } catch (error) {
-        console.error("❌ MongoDB connection error:", error);
-        throw error;
+        console.error("❌ MongoDB connection error:", error.message);
+        if (retry && connectionAttempts < MAX_RETRIES) {
+            connectionAttempts++;
+            console.log(`🔄 Retrying connection (${connectionAttempts}/${MAX_RETRIES}) in ${RETRY_DELAY_MS/1000} seconds...`);
+            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+            return connectToDatabase(true);
+        } else if (retry && connectionAttempts >= MAX_RETRIES) {
+            console.error(`❌ CRITICAL: Could not connect to MongoDB after ${MAX_RETRIES} attempts. Server will continue but database features will fail.`);
+            // لا نرمي الخطأ، نستمر بدون قاعدة بيانات
+            return null;
+        } else {
+            throw error; // فقط إذا retry=false (لم نستخدمها حالياً)
+        }
     }
 }
-connectToDatabase();
 
+// Start connection in background without blocking server startup
+connectToDatabase(true).catch(err => {
+    // Already handled inside function, but for safety:
+    console.error("Unhandled MongoDB connection failure:", err.message);
+});
+
+// Middleware to ensure DB is connected (or at least attempted)
 app.use(async (req, res, next) => {
-    if (!cachedDb) await connectToDatabase();
+    if (!cachedDb) {
+        // محاولة الاتصال مرة أخرى إذا لم يكن هناك اتصال بعد
+        await connectToDatabase(true);
+    }
     next();
 });
 
