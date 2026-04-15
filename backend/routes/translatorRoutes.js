@@ -106,7 +106,7 @@ async function processTranslationJob(jobId) {
         let keyIndex = 0;
         const transPrompt = settings?.customPrompt || "You are a professional translator. Translate the novel chapter from English to Arabic. Output ONLY the Arabic translation. Use the glossary provided.";
         const extractPrompt = settings?.translatorExtractPrompt || DEFAULT_EXTRACT_PROMPT;
-        let selectedModel = settings?.translatorModel || 'gemini-1.5-flash'; 
+        let selectedModel = settings?.translatorModel || 'gemini-2.5-flash'; 
 
         const chaptersToProcess = job.targetChapters.sort((a, b) => a - b);
 
@@ -730,7 +730,7 @@ module.exports = function(app, verifyToken, verifyAdmin) {
             res.json({
                 customPrompt: settings.customPrompt || '',
                 translatorExtractPrompt: settings.translatorExtractPrompt || DEFAULT_EXTRACT_PROMPT,
-                translatorModel: settings.translatorModel || 'gemini-1.5-flash',
+                translatorModel: settings.translatorModel || 'gemini-2.5-flash',
                 translatorApiKeys: settings.translatorApiKeys || []
             });
         } catch (e) {
