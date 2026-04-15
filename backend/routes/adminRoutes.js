@@ -341,19 +341,16 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         }
     });
 
-// أضف هذا الكود داخل module.exports في ملف adminRoutes.js
-app.get('/admin/users', verifyToken, async (req, res) => {
-    try {
-        // التأكد أن الطلب من أدمن
-        if (req.user.role !== 'admin') {
-            return res.status(403).json({ message: "غير مسموح لك بالوصول" });
+// أضف هذا الكود داخل module.exports في ملف // 🟢 1. جلب قائمة المستخدمين
+    app.get('/api/admin/users', verifyAdmin, async (req, res) => {
+        try {
+            // ملاحظة: verifyAdmin الموجودة في ملفك تتحقق أصلاً من الرتبة
+            const users = await User.find().select('-password').sort({ createdAt: -1 });
+            res.json(users);
+        } catch (error) {
+            res.status(500).json({ message: "خطأ في جلب المستخدمين", error: error.message });
         }
-        const users = await User.find().select('-password').sort({ createdAt: -1 });
-        res.json(users);
-    } catch (error) {
-        res.status(500).json({ message: "خطأ في جلب المستخدمين", error: error.message });
-    }
-});
+    });
 
 app.delete('/admin/novel/:id', verifyToken, async (req, res) => {
     try {
