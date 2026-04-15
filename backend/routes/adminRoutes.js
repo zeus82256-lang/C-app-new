@@ -341,6 +341,33 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         }
     });
 
+// أضف هذا الكود داخل module.exports في ملف adminRoutes.js
+app.get('/admin/users', verifyToken, async (req, res) => {
+    try {
+        // التأكد أن الطلب من أدمن
+        if (req.user.role !== 'admin') {
+            return res.status(403).json({ message: "غير مسموح لك بالوصول" });
+        }
+        const users = await User.find().select('-password').sort({ createdAt: -1 });
+        res.json(users);
+    } catch (error) {
+        res.status(500).json({ message: "خطأ في جلب المستخدمين", error: error.message });
+    }
+});
+
+app.delete('/admin/novel/:id', verifyToken, async (req, res) => {
+    try {
+        if (req.user.role !== 'admin') return res.status(403).send("Unauthorized");
+        
+        await Novel.findByIdAndDelete(req.params.id);
+        // يمكنك أيضاً إضافة كود هنا لحذف فصول الرواية المرتبطة بها
+        
+        res.json({ message: "تم حذف الرواية بنجاح" });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
     // 2. Start Job
     app.post('/api/admin/tools/extract-titles/start', verifyAdmin, async (req, res) => {
         try {
@@ -598,6 +625,20 @@ app.put('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
             res.status(500).json({ error: error.message });
         }
     });
+
+app.put('/admin/users/:id/role', verifyToken, async (req, res) => {
+    try {
+        if (req.user.role !== 'admin') return res.status(403).send("Unauthorized");
+        
+        const { role } = req.body;
+        await User.findByIdAndUpdate(req.params.id, { role });
+        
+        res.json({ message: "تم تحديث الرتبة بنجاح" });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 
 // Delete Novel (Admin/Author)
     app.delete('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
