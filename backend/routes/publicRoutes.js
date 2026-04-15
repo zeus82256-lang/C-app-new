@@ -741,7 +741,11 @@ module.exports = function(app, verifyToken, upload) {
         }
     });
 
+    // =========================================================================
     // 🔥🔥🔥 PAGINATED CHAPTER LIST (SERVER-SIDE LAZY LOADING) 🔥🔥🔥
+    // =========================================================================
+    // تم تعديل هذا المسار لدمج الفصول من MongoDB وFirestore معاً
+    // =========================================================================
     app.get('/api/novels/:id/chapters-list', async (req, res) => {
         try {
             const { id } = req.params;
@@ -752,84 +756,80 @@ module.exports = function(app, verifyToken, upload) {
             
             const role = getUserRole(req);
 
-            // 🔥 MODIFIED: First fetch the novel to check if it has chapters in MongoDB
+            // جلب بيانات الرواية الأساسية
             const novel = await Novel.findById(id).select('status chapters sourceChaptersCount');
             if (!novel) return res.status(404).json({ message: 'Novel not found' });
 
-            // If the novel has chapters in MongoDB, use aggregation as before
+            // -----------------------------------------------------------------
+            // التعديل الجديد: دمج الفصول من MongoDB وFirestore
+            // -----------------------------------------------------------------
+            let allChapters = [];
+
+            // 1. الفصول من MongoDB (بيانات وصفية فقط)
             if (novel.chapters && novel.chapters.length > 0) {
-                // Using aggregation to efficiently unwrap, sort, and slice the array
-                const pipeline = [
-                    { $match: { _id: new mongoose.Types.ObjectId(id) } },
+                const mongoChapters = novel.chapters.map(c => ({
+                    number: c.number,
+                    title: c.title,
+                    createdAt: c.createdAt,
+                    views: c.views || 0,
+                    source: 'mongodb'
+                }));
+                allChapters = allChapters.concat(mongoChapters);
+            }
+
+            // 2. الفصول من Firestore (إذا كان متصلاً)
+            if (firestore) {
+                try {
+                    const chaptersRef = firestore.collection('novels').doc(id).collection('chapters');
+                    const snapshot = await chaptersRef.get();
                     
-                    // 1. Unwind the chapters array to documents
-                    { $unwind: "$chapters" },
-
-                    // 2. Filter hidden chapters (if not admin)
-                    ...(role !== 'admin' ? [{
-                        $match: {
-                            $and: [
-                                { "chapters.title": { $not: { $regex: /chapter|ago|month|week|day|year/i } } }
-                                // Add more filters here if needed based on isChapterHidden logic
-                            ]
+                    const firestoreChapters = [];
+                    snapshot.forEach(doc => {
+                        const data = doc.data();
+                        const number = parseInt(doc.id);
+                        if (!isNaN(number)) {
+                            firestoreChapters.push({
+                                number: number,
+                                title: data.title || `الفصل ${number}`,
+                                createdAt: data.lastUpdated ? data.lastUpdated.toDate() : new Date(),
+                                views: 0,
+                                source: 'firestore'
+                            });
                         }
-                    }] : []),
-
-                    // 3. Sort by number
-                    { $sort: { "chapters.number": sortOrder } },
-
-                    // 4. Project only needed fields (Metadata only, NO content)
-                    {
-                        $project: {
-                            _id: "$chapters._id",
-                            number: "$chapters.number",
-                            title: "$chapters.title",
-                            createdAt: "$chapters.createdAt",
-                            views: "$chapters.views"
-                        }
-                    },
-
-                    // 5. Pagination
-                    { $skip: skip },
-                    { $limit: limit }
-                ];
-
-                const chapters = await Novel.aggregate(pipeline);
-                return res.json(chapters);
-            }
-
-            // 🔥 NEW: If no chapters in MongoDB, fetch from Firestore
-            if (!firestore) {
-                return res.status(500).json({ message: "Firestore not connected" });
-            }
-
-            try {
-                const chaptersRef = firestore.collection('novels').doc(id).collection('chapters');
-                const snapshot = await chaptersRef.get();
-                
-                const chapters = [];
-                snapshot.forEach(doc => {
-                    const data = doc.data();
-                    chapters.push({
-                        number: parseInt(doc.id),
-                        title: data.title || `الفصل ${doc.id}`,
-                        createdAt: data.lastUpdated ? data.lastUpdated.toDate() : new Date(),
-                        views: 0
                     });
-                });
-
-                // Sort by number
-                chapters.sort((a, b) => a.number - b.number);
-                if (sortOrder === -1) chapters.reverse();
-
-                // Apply pagination
-                const paginated = chapters.slice(skip, skip + limit);
-                res.json(paginated);
-
-            } catch (firestoreError) {
-                console.error("Firestore fetch error:", firestoreError);
-                res.status(500).json({ message: "Failed to fetch chapters from Firestore" });
+                    allChapters = allChapters.concat(firestoreChapters);
+                } catch (firestoreError) {
+                    console.error("Firestore fetch error (ignoring):", firestoreError.message);
+                    // نتجاهل الخطأ ونكمل بالفصول المتاحة
+                }
             }
+
+            // 3. إزالة التكرار (الأفضلية لبيانات MongoDB لأنها أحدث)
+            const uniqueChaptersMap = new Map();
+            allChapters.forEach(ch => {
+                const existing = uniqueChaptersMap.get(ch.number);
+                if (!existing || ch.source === 'mongodb') {
+                    uniqueChaptersMap.set(ch.number, ch);
+                }
+            });
+            let uniqueChapters = Array.from(uniqueChaptersMap.values());
+
+            // 4. ترتيب حسب رقم الفصل
+            uniqueChapters.sort((a, b) => a.number - b.number);
+            if (sortOrder === -1) uniqueChapters.reverse();
+
+            // 5. تطبيق التصفية (إخفاء الفصول المخفية لغير الأدمن)
+            if (role !== 'admin') {
+                uniqueChapters = uniqueChapters.filter(ch => !isChapterHidden(ch.title));
+            }
+
+            // 6. التقسيم (Pagination)
+            const paginatedChapters = uniqueChapters.slice(skip, skip + limit);
+
+            // 7. إزالة حقل `source` قبل الإرسال للواجهة
+            const responseChapters = paginatedChapters.map(({ source, ...rest }) => rest);
+
+            res.json(responseChapters);
 
         } catch (error) {
             console.error("Chapters List Error:", error);
