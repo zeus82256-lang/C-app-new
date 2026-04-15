@@ -352,18 +352,17 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         }
     });
 
-app.delete('/admin/novel/:id', verifyToken, async (req, res) => {
-    try {
-        if (req.user.role !== 'admin') return res.status(403).send("Unauthorized");
-        
-        await Novel.findByIdAndDelete(req.params.id);
-        // يمكنك أيضاً إضافة كود هنا لحذف فصول الرواية المرتبطة بها
-        
-        res.json({ message: "تم حذف الرواية بنجاح" });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
+// 🔴 3. حذف رواية (الدالة المفقودة)
+    app.delete('/api/admin/novel/:id', verifyAdmin, async (req, res) => {
+        try {
+            const novel = await Novel.findByIdAndDelete(req.params.id);
+            if (!novel) return res.status(404).json({ message: "الرواية غير موجودة" });
+            
+            res.json({ message: "تم حذف الرواية بنجاح" });
+        } catch (error) {
+            res.status(500).json({ error: error.message });
+        }
+    });
 
     // 2. Start Job
     app.post('/api/admin/tools/extract-titles/start', verifyAdmin, async (req, res) => {
@@ -623,18 +622,20 @@ app.put('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
         }
     });
 
-app.put('/admin/users/:id/role', verifyToken, async (req, res) => {
-    try {
-        if (req.user.role !== 'admin') return res.status(403).send("Unauthorized");
-        
-        const { role } = req.body;
-        await User.findByIdAndUpdate(req.params.id, { role });
-        
-        res.json({ message: "تم تحديث الرتبة بنجاح" });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
+// 🔵 2. تحديث رتبة مستخدم
+    app.put('/api/admin/users/:id/role', verifyAdmin, async (req, res) => {
+        try {
+            const { role } = req.body;
+            const updatedUser = await User.findByIdAndUpdate(
+                req.params.id, 
+                { role }, 
+                { new: true }
+            );
+            res.json({ message: "تم تحديث الرتبة بنجاح", user: updatedUser });
+        } catch (error) {
+            res.status(500).json({ error: error.message });
+        }
+    });
 
 
 // Delete Novel (Admin/Author)
