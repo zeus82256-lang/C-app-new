@@ -557,19 +557,42 @@ module.exports = function(app, verifyToken, verifyAdmin) {
                     .filter(c => c.number >= resumeFrom)
                     .map(c => c.number);
             } else if (chapters === 'all') {
-                // 🔥 MODIFIED: If novel has no chapters in MongoDB (private novel), fetch from Firestore
-                if (novel.chapters.length === 0 && firestore) {
+                // ====================================================================
+                // 🔥🔥🔥 التعديل الجديد: دمج فصول MongoDB مع فصول Firestore 🔥🔥🔥
+                // ====================================================================
+                // السبب: الفصول التي فشلت في الترجمة سابقاً توجد فقط في Firestore
+                // ولا تظهر في `novel.chapters`، لذا يجب جمعها من المصدرين.
+                // ====================================================================
+                
+                // 1. الفصول الموجودة في MongoDB (مترجمة أو تمت إضافتها يدوياً)
+                const mongoChapters = novel.chapters.map(c => c.number);
+                
+                // 2. الفصول الموجودة في Firestore (جميع الفصول الأصلية، سواء ترجمت أم لا)
+                let firestoreChapters = [];
+                if (firestore) {
                     try {
                         const chaptersRef = firestore.collection('novels').doc(novelId.toString()).collection('chapters');
                         const snapshot = await chaptersRef.get();
-                        targetChapters = snapshot.docs.map(doc => parseInt(doc.id)).sort((a, b) => a - b);
+                        firestoreChapters = snapshot.docs.map(doc => parseInt(doc.id)).filter(num => !isNaN(num));
                     } catch (err) {
                         console.error("Failed to fetch chapters from Firestore:", err);
-                        targetChapters = [];
+                        // في حال فشل جلب Firestore، نعتمد على MongoDB فقط
                     }
-                } else {
-                    targetChapters = novel.chapters.map(c => c.number);
                 }
+                
+                // 3. دمج القائمتين وإزالة التكرار
+                const allChaptersSet = new Set([...mongoChapters, ...firestoreChapters]);
+                targetChapters = Array.from(allChaptersSet).sort((a, b) => a - b);
+                
+                // 4. استخدام `sourceChaptersCount` كمرجع إضافي (إذا كان أكبر من عدد الفصول المدمجة)
+                if (novel.sourceChaptersCount && novel.sourceChaptersCount > targetChapters.length) {
+                    // نضيف أرقاماً افتراضية من 1 إلى sourceChaptersCount، ثم ندمجها
+                    for (let i = 1; i <= novel.sourceChaptersCount; i++) {
+                        allChaptersSet.add(i);
+                    }
+                    targetChapters = Array.from(allChaptersSet).sort((a, b) => a - b);
+                }
+                // ====================================================================
             } else if (Array.isArray(chapters)) {
                 targetChapters = chapters;
             }
