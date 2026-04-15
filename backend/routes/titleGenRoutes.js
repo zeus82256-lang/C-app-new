@@ -1,4 +1,3 @@
-
 const mongoose = require('mongoose');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const Novel = require('../models/novel.model.js');
@@ -109,37 +108,52 @@ async function processTitleGenJob(jobId) {
             };
 
             let generatedTitle = "";
+            let generationSuccess = false;
 
-            try {
-                await pushLog(jobId, `1️⃣ جاري توليد عنوان للفصل ${chapterNum}...`, 'info');
-                
-                const model = getModel();
-                const input = `
+            // ========== التعديل الوحيد: دورة المفاتيح للفصل الواحد ==========
+            const maxKeyAttempts = keys.length;
+            let attempts = 0;
+
+            while (!generationSuccess && attempts < maxKeyAttempts) {
+                try {
+                    attempts++;
+                    await pushLog(jobId, `1️⃣ محاولة ${attempts}/${maxKeyAttempts} لتوليد عنوان الفصل ${chapterNum}...`, 'info');
+                    
+                    const model = getModel();
+                    const input = `
 ${systemPrompt}
 
 --- CHAPTER CONTENT ---
 ${sourceContent.substring(0, 15000)} 
 -----------------------
 `;
-                const result = await model.generateContent(input);
-                const response = await result.response;
-                generatedTitle = response.text().trim();
-                
-                // Cleanup Title
-                generatedTitle = generatedTitle.replace(/["'«»]/g, '').replace(/الفصل\s*\d+[:\-]?\s*/, '').trim();
+                    const result = await model.generateContent(input);
+                    const response = await result.response;
+                    generatedTitle = response.text().trim();
+                    
+                    // Cleanup Title
+                    generatedTitle = generatedTitle.replace(/["'«»]/g, '').replace(/الفصل\s*\d+[:\-]?\s*/, '').trim();
+                    generationSuccess = true;
+                    await pushLog(jobId, `✅ نجح توليد العنوان باستخدام المفتاح رقم ${(keyIndex % keys.length) + 1}`, 'success');
 
-            } catch (err) {
-                console.error(err);
-                if (err.message.includes('429') || err.message.includes('quota')) {
-                    keyIndex++;
-                    await pushLog(jobId, `⚠️ ضغط على المفتاح، تبديل وإعادة المحاولة...`, 'warning');
-                    await delay(3000);
-                    chaptersToProcess.unshift(chapterNum); // Retry
-                    continue;
+                } catch (err) {
+                    console.error(`❌ فشل المفتاح الحالي (محاولة ${attempts}/${maxKeyAttempts}):`, err.message);
+                    
+                    if (attempts < maxKeyAttempts) {
+                        keyIndex++; // الانتقال إلى المفتاح التالي
+                        await pushLog(jobId, `⚠️ تبديل المفتاح إلى ${(keyIndex % keys.length) + 1}/${keys.length} بسبب: ${err.message}`, 'warning');
+                        await delay(3000);
+                    } else {
+                        await pushLog(jobId, `❌ فشلت جميع المفاتيح (${maxKeyAttempts}) في توليد عنوان للفصل ${chapterNum}`, 'error');
+                    }
                 }
-                await pushLog(jobId, `❌ فشل توليد العنوان للفصل ${chapterNum}: ${err.message}`, 'error');
-                continue; 
             }
+
+            if (!generationSuccess) {
+                // نفدت جميع المحاولات دون نجاح، ننتقل إلى الفصل التالي
+                continue;
+            }
+            // ========== نهاية التعديل ==========
 
             if (generatedTitle) {
                 try {
