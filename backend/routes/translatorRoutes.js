@@ -153,12 +153,19 @@ async function processTranslationJob(jobId) {
             };
 
             let translatedText = "";
+            let translationSuccess = false;
 
-            try {
-                await pushLog(jobId, `1️⃣ جاري ترجمة الفصل ${chapterNum}...`, 'info');
-                
-                const model = getModel();
-                const translationInput = `
+            // ========== التعديل الوحيد: دورة المفاتيح للفصل الواحد ==========
+            const maxKeyAttempts = keys.length;
+            let attempts = 0;
+
+            while (!translationSuccess && attempts < maxKeyAttempts) {
+                try {
+                    attempts++;
+                    await pushLog(jobId, `1️⃣ محاولة ${attempts}/${maxKeyAttempts} لترجمة الفصل ${chapterNum}...`, 'info');
+                    
+                    const model = getModel();
+                    const translationInput = `
 ${transPrompt}
 
 --- GLOSSARY (Use these strictly) ---
@@ -169,22 +176,30 @@ ${glossaryText}
 ${sourceContent}
 ---------------------------------
 `;
-                const result = await model.generateContent(translationInput);
-                const response = await result.response;
-                translatedText = response.text();
+                    const result = await model.generateContent(translationInput);
+                    const response = await result.response;
+                    translatedText = response.text();
+                    translationSuccess = true;
+                    await pushLog(jobId, `✅ نجحت الترجمة باستخدام المفتاح رقم ${(keyIndex % keys.length) + 1}`, 'success');
 
-            } catch (err) {
-                console.error(err);
-                if (err.message.includes('429') || err.message.includes('quota')) {
-                    keyIndex++;
-                    await pushLog(jobId, `⚠️ ضغط على المفتاح، تبديل وإعادة المحاولة...`, 'warning');
-                    await delay(5000);
-                    chaptersToProcess.unshift(chapterNum);
-                    continue;
+                } catch (err) {
+                    console.error(`❌ فشل المفتاح الحالي (محاولة ${attempts}/${maxKeyAttempts}):`, err.message);
+                    
+                    if (attempts < maxKeyAttempts) {
+                        keyIndex++; // الانتقال إلى المفتاح التالي
+                        await pushLog(jobId, `⚠️ تبديل المفتاح إلى ${(keyIndex % keys.length) + 1}/${keys.length} بسبب: ${err.message}`, 'warning');
+                        await delay(3000);
+                    } else {
+                        await pushLog(jobId, `❌ فشلت جميع المفاتيح (${maxKeyAttempts}) في ترجمة الفصل ${chapterNum}`, 'error');
+                    }
                 }
-                await pushLog(jobId, `❌ فشل الترجمة للفصل ${chapterNum}: ${err.message}`, 'error');
-                continue; 
             }
+
+            if (!translationSuccess) {
+                // نفدت جميع المحاولات دون نجاح، ننتقل إلى الفصل التالي
+                continue;
+            }
+            // ========== نهاية التعديل ==========
 
             // 🔥🔥🔥 NEW: EXTRACT TITLE FROM TRANSLATED CONTENT 🔥🔥🔥
             // البحث عن أول فقرة، إذا احتوت على "الفصل" و ":" نأخذ ما بعد النقطتين كعنوان
