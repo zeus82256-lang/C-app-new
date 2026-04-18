@@ -1294,17 +1294,52 @@ app.put('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
             // Pipe archive data to the response
             archive.pipe(res);
 
-            // Sort chapters by number
-            novel.chapters.sort((a, b) => a.number - b.number);
+            // 🔥 التعديل الجديد: إذا كانت الرواية خاصة ولا تحتوي على فصول في MongoDB، نجلب الفصول مباشرة من Firestore
+            let chaptersToExport = [];
+            
+            if (novel.status === 'خاصة' && (!novel.chapters || novel.chapters.length === 0)) {
+                // نجلب قائمة الفصول من Firestore
+                if (!firestore) {
+                    throw new Error("Firestore غير متصل، لا يمكن جلب الفصول.");
+                }
+                const chaptersRef = firestore.collection('novels').doc(novelId).collection('chapters');
+                const snapshot = await chaptersRef.get();
+                
+                snapshot.forEach(doc => {
+                    const number = parseInt(doc.id);
+                    if (!isNaN(number)) {
+                        const data = doc.data();
+                        chaptersToExport.push({
+                            number: number,
+                            title: data.title || `الفصل ${number}`,
+                            content: data.content || ""
+                        });
+                    }
+                });
+                // ترتيب الفصول تصاعدياً
+                chaptersToExport.sort((a, b) => a.number - b.number);
+            } else {
+                // السلوك الافتراضي: نستخدم الفصول الموجودة في MongoDB (مع جلب المحتوى من Firestore)
+                chaptersToExport = novel.chapters.sort((a, b) => a.number - b.number).map(chap => ({
+                    number: chap.number,
+                    title: chap.title,
+                    // سيتم جلب المحتوى لاحقاً
+                }));
+            }
 
-            // Process chapters in batches to avoid memory overflow
-            // We use a simple loop but process one by one to keep memory low
-            for (const chap of novel.chapters) {
+            // Process chapters
+            for (const chap of chaptersToExport) {
                 let content = "";
-                // Fetch content from Firestore
-                if (firestore) {
-                    const doc = await firestore.collection('novels').doc(novelId).collection('chapters').doc(chap.number.toString()).get();
-                    if (doc.exists) content = doc.data().content || "";
+                
+                // إذا كانت الفصول مأخوذة مباشرة من Firestore (حالة الرواية الخاصة) فقد حصلنا على المحتوى مسبقاً
+                if (chap.content !== undefined) {
+                    content = chap.content;
+                } else {
+                    // جلب المحتوى من Firestore لكل فصل (السلوك الافتراضي)
+                    if (firestore) {
+                        const doc = await firestore.collection('novels').doc(novelId).collection('chapters').doc(chap.number.toString()).get();
+                        if (doc.exists) content = doc.data().content || "";
+                    }
                 }
 
                 // --- Apply Formatting Rules ---
