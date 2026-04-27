@@ -1246,6 +1246,62 @@ app.put('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
         }
     });
 
+// 🔥 إنشاء رواية جديدة (للمشرفين والكتّاب)
+app.post('/api/admin/novels', verifyAdmin, async (req, res) => {
+    try {
+        const {
+            title,
+            titleEn,
+            cover,
+            description,
+            category,
+            tags,
+            status
+        } = req.body;
+
+        if (!title || !cover) {
+            return res.status(400).json({ message: "العنوان والغلاف مطلوبان" });
+        }
+
+        const adminUser = await User.findById(req.user.id);
+        if (!adminUser) {
+            return res.status(404).json({ message: "المستخدم غير موجود" });
+        }
+
+        // يمكنك رفع الصورة هنا إن تم تمرير صورة محلية، لكن الواجهة ترسل رابطًا مباشرًا
+
+        const novel = new Novel({
+            title,
+            titleEn: titleEn || title, // نسخ احتياطي للانجليزي
+            cover,
+            description: description || '',
+            author: adminUser.name,
+            authorEmail: adminUser.email,
+            authorId: adminUser._id,
+            category: category || 'أخرى',
+            tags: tags || [],
+            status: status || 'مستمرة',
+            chapters: [],
+            views: 0,
+            isWatched: false // غير مراقبة تلقائياً
+        });
+
+        await novel.save();
+
+        // بدء ترجمة البيانات الوصفية اختياريًا في الخلفية
+        translateNovelMetadata(novel._id, {
+            title: novel.title,
+            description: description || '',
+            tags: tags || []
+        }).catch(err => console.error("Translation error:", err));
+
+        res.status(201).json({ message: "تم إنشاء الرواية بنجاح", novelId: novel._id });
+    } catch (error) {
+        console.error("Novel creation error:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
     // =========================================================
     // 📦 EXPORT CHAPTERS TO ZIP (ADMIN ONLY) - 🔥 STREAMING VERSION
     // =========================================================
