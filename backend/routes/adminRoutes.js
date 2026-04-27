@@ -1495,6 +1495,239 @@ app.post('/api/admin/novels', verifyAdmin, async (req, res) => {
         }
     });
 
+// =========================================================
+// 📝 SINGLE & BULK CHAPTER MANAGEMENT API
+// =========================================================
+
+// 1. Add Single Chapter (admin/author)
+app.post('/api/admin/chapters', verifyAdmin, async (req, res) => {
+    try {
+        const { novelId, number, title, content } = req.body;
+        if (!novelId || !number || !title || !content) {
+            return res.status(400).json({ message: "جميع الحقول مطلوبة" });
+        }
+
+        const novel = await Novel.findById(novelId);
+        if (!novel) return res.status(404).json({ message: "الرواية غير موجودة" });
+
+        // Check duplicate
+        const exists = novel.chapters.find(c => c.number == number);
+        if (exists) return res.status(400).json({ message: "رقم الفصل موجود مسبقاً" });
+
+        // 1. Save to Firestore
+        if (firestore) {
+            await firestore.collection('novels').doc(novelId).collection('chapters')
+                .doc(number.toString()).set({
+                    title,
+                    content,
+                    lastUpdated: new Date()
+                });
+        }
+
+        // 2. Add to MongoDB chapters array
+        novel.chapters.push({
+            number: parseInt(number),
+            title,
+            createdAt: new Date(),
+            views: 0
+        });
+        novel.lastChapterUpdate = new Date();
+        await novel.save();
+
+        await logScraper(`✅ تم إضافة الفصل ${number} للرواية ${novel.title}`, 'success');
+        res.json({ message: "تم إضافة الفصل بنجاح" });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: "فشل إضافة الفصل", error: error.message });
+    }
+});
+
+// 2. Update Chapter (title + content)
+app.put('/api/admin/chapters/:novelId/:chapterNumber', verifyAdmin, async (req, res) => {
+    try {
+        const { novelId, chapterNumber } = req.params;
+        const { title, content } = req.body;
+
+        const novel = await Novel.findById(novelId);
+        if (!novel) return res.status(404).json({ message: "الرواية غير موجودة" });
+
+        // Update MongoDB title
+        const chapterIdx = novel.chapters.findIndex(c => c.number == chapterNumber);
+        if (chapterIdx === -1) return res.status(404).json({ message: "الفصل غير موجود" });
+
+        if (title) {
+            novel.chapters[chapterIdx].title = title;
+        }
+        await novel.save();
+
+        // Update Firestore
+        if (firestore) {
+            const updateData = { lastUpdated: new Date() };
+            if (title) updateData.title = title;
+            if (content) updateData.content = content;  // رفع المحتوى المُحدَّث
+            await firestore.collection('novels').doc(novelId).collection('chapters')
+                .doc(chapterNumber.toString()).update(updateData);
+        }
+
+        await logScraper(`✅ تم تعديل الفصل ${chapterNumber}`, 'success');
+        res.json({ message: "تم تعديل الفصل بنجاح" });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: "فشل تعديل الفصل", error: error.message });
+    }
+});
+
+// 3. Delete Single Chapter
+app.delete('/api/admin/chapters/:novelId/:chapterNumber', verifyAdmin, async (req, res) => {
+    try {
+        const { novelId, chapterNumber } = req.params;
+
+        const novel = await Novel.findById(novelId);
+        if (!novel) return res.status(404).json({ message: "الرواية غير موجودة" });
+
+        // Remove from MongoDB array
+        const idx = novel.chapters.findIndex(c => c.number == chapterNumber);
+        if (idx !== -1) {
+            novel.chapters.splice(idx, 1);
+            await novel.save();
+        }
+
+        // Remove from Firestore
+        if (firestore) {
+            await firestore.collection('novels').doc(novelId).collection('chapters')
+                .doc(chapterNumber.toString()).delete();
+        }
+
+        await logScraper(`🗑️ تم حذف الفصل ${chapterNumber} من ${novel.title}`, 'success');
+        res.json({ message: "تم حذف الفصل بنجاح" });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: "فشل حذف الفصل", error: error.message });
+    }
+});
+
+// 4. Batch Delete Chapters
+app.post('/api/admin/chapters/batch-delete', verifyAdmin, async (req, res) => {
+    try {
+        const { novelId, chapterNumbers } = req.body;
+        if (!novelId || !Array.isArray(chapterNumbers)) {
+            return res.status(400).json({ message: "بيانات غير صالحة" });
+        }
+
+        const novel = await Novel.findById(novelId);
+        if (!novel) return res.status(404).json({ message: "الرواية غير موجودة" });
+
+        // Remove from MongoDB
+        novel.chapters = novel.chapters.filter(c => !chapterNumbers.includes(c.number));
+        await novel.save();
+
+        // Remove from Firestore
+        if (firestore) {
+            const batch = firestore.batch();
+            const chaptersRef = firestore.collection('novels').doc(novelId).collection('chapters');
+            chapterNumbers.forEach(num => {
+                batch.delete(chaptersRef.doc(num.toString()));
+            });
+            await batch.commit();
+        }
+
+        await logScraper(`🗑️ تم حذف ${chapterNumbers.length} فصل من ${novel.title}`, 'success');
+        res.json({ message: "تم الحذف الجماعي بنجاح" });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: "فشل الحذف الجماعي", error: error.message });
+    }
+});
+
+// 5. Bulk Upload Chapters (ZIP)
+const multer = require('multer');  // تأكد من تثبيته إن لم يكن موجوداً
+const uploadZip = multer({ storage: multer.memoryStorage() });
+
+app.post('/api/admin/chapters/bulk-upload', verifyAdmin, uploadZip.single('zip'), async (req, res) => {
+    try {
+        const { novelId } = req.body;
+        if (!novelId) return res.status(400).json({ message: "معرف الرواية مطلوب" });
+        if (!req.file) return res.status(400).json({ message: "يرجى إرفاق ملف ZIP" });
+
+        const novel = await Novel.findById(novelId);
+        if (!novel) return res.status(404).json({ message: "الرواية غير موجودة" });
+
+        const zip = new AdmZip(req.file.buffer);
+        const zipEntries = zip.getEntries();
+
+        let successCount = 0;
+        const errors = [];
+
+        for (const entry of zipEntries) {
+            if (entry.isDirectory) continue;
+
+            // Extract chapter number from filename (e.g., "123.txt" or "الفصل 123.txt")
+            const nameWithoutExt = path.basename(entry.entryName, path.extname(entry.entryName)).trim();
+            let chapterNumber = parseInt(nameWithoutExt);
+            if (isNaN(chapterNumber)) {
+                // Try to extract number from complex name
+                const match = nameWithoutExt.match(/(\d+)/);
+                if (match) chapterNumber = parseInt(match[1]);
+                else {
+                    errors.push(`تخطي: "${entry.entryName}" - لا يوجد رقم صحيح`);
+                    continue;
+                }
+            }
+
+            let content = zip.readAsText(entry);
+            // Extract title from first non-empty line
+            const lines = content.split('\n').filter(l => l.trim());
+            let title = `الفصل ${chapterNumber}`;
+            if (lines.length > 0) {
+                const firstLine = lines[0].trim();
+                if (firstLine.length < 100 && !firstLine.includes(':')) {
+                    title = firstLine;
+                }
+            }
+
+            // Check duplicate in novel
+            if (novel.chapters.some(c => c.number === chapterNumber)) {
+                errors.push(`موجود: فصل ${chapterNumber}`);
+                continue;
+            }
+
+            try {
+                // Save to Firestore
+                if (firestore) {
+                    await firestore.collection('novels').doc(novelId).collection('chapters')
+                        .doc(chapterNumber.toString()).set({
+                            title,
+                            content,
+                            lastUpdated: new Date()
+                        });
+                }
+
+                // Add to MongoDB
+                novel.chapters.push({
+                    number: chapterNumber,
+                    title,
+                    createdAt: new Date(),
+                    views: 0
+                });
+                successCount++;
+            } catch (e) {
+                errors.push(`خطأ في فصل ${chapterNumber}: ${e.message}`);
+            }
+        }
+
+        if (successCount > 0) {
+            novel.lastChapterUpdate = new Date();
+            await novel.save();
+        }
+
+        await logScraper(`📦 رفع ZIP: تم إضافة ${successCount} فصل للرواية ${novel.title}`, 'success');
+        res.json({ successCount, errors: errors.slice(0, 20) });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: "فشل معالجة الملف المضغوط", error: error.message });
+    }
+});
+
     // =========================================================
     // 🔄 TRANSFER ALL OWNERSHIP (ADMIN ONLY) - 🔥 FIXED PATH CONFLICT
     // =========================================================
