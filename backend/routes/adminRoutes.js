@@ -47,9 +47,23 @@ async function logScraper(message, type = 'info') {
     }
 }
 
-// 🔥 NEW: Unified provider caller (same as translatorRoutes)
-async function callTranslationProvider(provider, modelName, apiKey, prompt) {
+// 🔥 Check if a model is a translation-only model (cannot do JSON extraction)
+function isTranslationOnlyModel(modelId) {
+    if (!modelId) return false;
+    if (modelId.startsWith('@cf/meta/m2m100')) return true;
+    return false;
+}
+
+// 🔥 Find the first LLM model in a provider (for extraction)
+function findLLMModel(provider) {
+    if (!provider.models || provider.models.length === 0) return null;
+    return provider.models.find(m => !isTranslationOnlyModel(m.modelId)) || null;
+}
+
+// 🔥 NEW: Unified provider caller (same as translatorRoutes) – now with Cloudflare support
+async function callTranslationProvider(provider, modelName, apiKey, prompt, options = {}) {
     const providerId = (provider.providerId || 'gemini').toLowerCase();
+    const isCloudflare = (providerId === 'cloudflare');
 
     // ---- Gemini native ----
     if (providerId === 'gemini' && !provider.baseUrl) {
@@ -58,6 +72,38 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt) {
         const result = await model.generateContent(prompt);
         const response = await result.response;
         return response.text();
+    }
+
+    // ---- Cloudflare Workers AI ----
+    if (isCloudflare) {
+        const baseUrl = provider.baseUrl || '';
+        const url = `${baseUrl.replace(/\/+$/, '')}/${modelName}`;
+
+        const headers = {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json'
+        };
+
+        let body;
+        if (isTranslationOnlyModel(modelName)) {
+            body = {
+                text: prompt,
+                source_lang: options.sourceLang || 'en',
+                target_lang: options.targetLang || 'ar'
+            };
+        } else {
+            body = {
+                messages: [{ role: 'user', content: prompt }],
+                temperature: 0.3
+            };
+        }
+
+        const res = await axios.post(url, body, { headers, timeout: 120000 });
+        const data = res.data;
+        if (data.success && data.result) {
+            return data.result.translated_text || data.result.response || '';
+        }
+        throw new Error(`Cloudflare error: ${JSON.stringify(data)}`);
     }
 
     // ---- OpenAI-compatible (OpenRouter, custom baseUrl) ----
