@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+const axios = require('axios'); // 🔥 NEW: for OpenRouter and custom providers
 const Novel = require('../models/novel.model.js');
 const Glossary = require('../models/glossary.model.js');
 const TranslationJob = require('../models/translationJob.model.js');
@@ -72,6 +73,47 @@ OUTPUT JSON STRUCTURE:
 
 RETURN ONLY JSON:`;
 
+// 🔥 NEW: Unified provider caller supporting Gemini, OpenRouter, and custom OpenAI-compatible APIs
+async function callTranslationProvider(provider, modelName, apiKey, prompt) {
+    const providerId = (provider.providerId || 'gemini').toLowerCase();
+
+    // ---- Gemini native ----
+    if (providerId === 'gemini' && !provider.baseUrl) {
+        const genAI = new GoogleGenerativeAI(apiKey);
+        const model = genAI.getGenerativeModel({ model: modelName });
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        return response.text();
+    }
+
+    // ---- OpenAI-compatible (OpenRouter, custom baseUrl) ----
+    const baseUrl = provider.baseUrl || 'https://openrouter.ai/api/v1';
+    const url = `${baseUrl.replace(/\/+$/, '')}/chat/completions`;
+
+    const headers = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+    };
+    // Add OpenRouter specific headers if needed
+    if (providerId === 'openrouter') {
+        headers['HTTP-Referer'] = 'https://zeus-novel.app';
+        headers['X-Title'] = 'Zeus Novel Translator';
+    }
+
+    const body = {
+        model: modelName,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.3
+    };
+
+    const res = await axios.post(url, body, { headers, timeout: 120000 });
+    const choice = res.data?.choices?.[0];
+    if (choice && choice.message && choice.message.content) {
+        return choice.message.content;
+    }
+    throw new Error(`Invalid response from ${providerId}: ${JSON.stringify(res.data)}`);
+}
+
 // --- THE TRANSLATION WORKER (STRICT FIRESTORE MODE) ---
 async function processTranslationJob(jobId) {
     try {
@@ -94,19 +136,41 @@ async function processTranslationJob(jobId) {
         }
 
         const settings = await getGlobalSettings(); 
-        let keys = (job.apiKeys && job.apiKeys.length > 0) ? job.apiKeys : (settings?.translatorApiKeys || []);
         
-        if (!keys || keys.length === 0) {
+        // 🔥🔥 NEW: Read providers from new system; fallback to old keys if empty
+        let providers = settings.translationProviders && settings.translationProviders.length > 0
+            ? settings.translationProviders.slice()
+            : [];
+
+        // Fallback: if no new providers, build one from legacy settings
+        if (providers.length === 0) {
+            const legacyKeys = (job.apiKeys && job.apiKeys.length > 0) ? job.apiKeys : (settings?.translatorApiKeys || []);
+            if (legacyKeys.length > 0) {
+                const legacyModel = settings?.translatorModel || 'gemini-2.5-flash';
+                providers = [{
+                    providerId: 'gemini',
+                    name: 'Gemini (Legacy)',
+                    baseUrl: '',
+                    models: [{ modelId: legacyModel, modelName: legacyModel }],
+                    apiKeys: legacyKeys,
+                    selectedModel: legacyModel,
+                    priority: 0
+                }];
+            }
+        }
+
+        if (providers.length === 0) {
             job.status = 'failed';
-            job.logs.push({ message: 'لا توجد مفاتيح API محفوظة.', type: 'error' });
+            job.logs.push({ message: 'لا توجد مزوّدات ترجمة مفعلة مع مفاتيح API.', type: 'error' });
             await job.save();
             return;
         }
 
-        let keyIndex = 0;
+        // Sort by priority ascending
+        providers.sort((a, b) => (a.priority || 0) - (b.priority || 0));
+
         const transPrompt = settings?.customPrompt || "You are a professional translator. Translate the novel chapter from English to Arabic. Output ONLY the Arabic translation. Use the glossary provided.";
         const extractPrompt = settings?.translatorExtractPrompt || DEFAULT_EXTRACT_PROMPT;
-        let selectedModel = settings?.translatorModel || 'gemini-2.5-flash'; 
 
         const chaptersToProcess = job.targetChapters.sort((a, b) => a - b);
 
@@ -122,10 +186,6 @@ async function processTranslationJob(jobId) {
 
             const freshNovel = await Novel.findById(job.novelId);
             
-            // 🔥🔥 REMOVED: The check that chapter exists in MongoDB
-            // Now we proceed directly to fetch content from Firestore.
-            // If content doesn't exist, we log and continue.
-
             let sourceContent = ""; 
             try {
                 const docRef = firestore.collection('novels').doc(freshNovel._id.toString()).collection('chapters').doc(chapterNum.toString());
@@ -146,26 +206,7 @@ async function processTranslationJob(jobId) {
             const glossaryItems = await Glossary.find({ novelId: freshNovel._id });
             const glossaryText = glossaryItems.map(g => `"${g.term}": "${g.translation}"`).join(',\n');
 
-            const getModel = () => {
-                const currentKey = keys[keyIndex % keys.length];
-                const genAI = new GoogleGenerativeAI(currentKey);
-                return genAI.getGenerativeModel({ model: selectedModel });
-            };
-
-            let translatedText = "";
-            let translationSuccess = false;
-
-            // ========== التعديل الوحيد: دورة المفاتيح للفصل الواحد ==========
-            const maxKeyAttempts = keys.length;
-            let attempts = 0;
-
-            while (!translationSuccess && attempts < maxKeyAttempts) {
-                try {
-                    attempts++;
-                    await pushLog(jobId, `1️⃣ محاولة ${attempts}/${maxKeyAttempts} لترجمة الفصل ${chapterNum}...`, 'info');
-                    
-                    const model = getModel();
-                    const translationInput = `
+            const translationInput = `
 ${transPrompt}
 
 --- GLOSSARY (Use these strictly) ---
@@ -176,40 +217,70 @@ ${glossaryText}
 ${sourceContent}
 ---------------------------------
 `;
-                    const result = await model.generateContent(translationInput);
-                    const response = await result.response;
-                    translatedText = response.text();
-                    translationSuccess = true;
-                    await pushLog(jobId, `✅ نجحت الترجمة باستخدام المفتاح رقم ${(keyIndex % keys.length) + 1}`, 'success');
 
-                } catch (err) {
-                    console.error(`❌ فشل المفتاح الحالي (محاولة ${attempts}/${maxKeyAttempts}):`, err.message);
+            let translatedText = "";
+            let translationSuccess = false;
+
+            // ========== Multi-provider with double cycle ==========
+            const MAX_CYCLES = 2;
+            let cycle = 0;
+            
+            while (!translationSuccess && cycle < MAX_CYCLES) {
+                cycle++;
+                if (cycle > 1) {
+                    await pushLog(jobId, `🔄 دورة ${cycle}: محاولة إضافية عبر جميع المزوّدين`, 'info');
+                }
+                
+                for (const provider of providers) {
+                    if (translationSuccess) break;
+                    const providerName = provider.name || provider.providerId;
+                    const modelToUse = provider.selectedModel || (provider.models && provider.models[0]?.modelId) || 'gemini-2.5-flash';
+                    const keys = provider.apiKeys || [];
                     
-                    if (attempts < maxKeyAttempts) {
-                        keyIndex++; // الانتقال إلى المفتاح التالي
-                        await pushLog(jobId, `⚠️ تبديل المفتاح إلى ${(keyIndex % keys.length) + 1}/${keys.length} بسبب: ${err.message}`, 'warning');
-                        await delay(3000);
-                    } else {
-                        await pushLog(jobId, `❌ فشلت جميع المفاتيح (${maxKeyAttempts}) في ترجمة الفصل ${chapterNum}`, 'error');
+                    if (keys.length === 0) {
+                        await pushLog(jobId, `⚠️ المزوّد ${providerName} ليس لديه مفاتيح – تخطيه`, 'warning');
+                        continue;
                     }
+
+                    for (let keyIdx = 0; keyIdx < keys.length; keyIdx++) {
+                        const key = keys[keyIdx];
+                        try {
+                            await pushLog(jobId, `1️⃣ مزوّد: ${providerName} | نموذج: ${modelToUse} | مفتاح ${keyIdx + 1}/${keys.length}`, 'info');
+                            translatedText = await callTranslationProvider(provider, modelToUse, key, translationInput);
+                            translationSuccess = true;
+                            await pushLog(jobId, `✅ نجحت الترجمة باستخدام ${providerName}`, 'success');
+                            break;
+                        } catch (err) {
+                            console.error(`❌ فشل ${providerName} مفتاح ${keyIdx+1}: ${err.message}`);
+                            await pushLog(jobId, `❌ فشل: ${err.message}`, 'warning');
+                            if (keyIdx < keys.length - 1) {
+                                await delay(3000);
+                            }
+                        }
+                    }
+                    
+                    if (!translationSuccess) {
+                        await pushLog(jobId, `🚫 جميع مفاتيح ${providerName} فشلت`, 'warning');
+                    }
+                }
+                
+                if (!translationSuccess && cycle < MAX_CYCLES) {
+                    await delay(10000); // wait before second cycle
                 }
             }
 
             if (!translationSuccess) {
-                // نفدت جميع المحاولات دون نجاح، ننتقل إلى الفصل التالي
+                await pushLog(jobId, `❌ فشلت جميع المزوّدين بعد ${MAX_CYCLES} دورات – تخطي الفصل ${chapterNum}`, 'error');
                 continue;
             }
-            // ========== نهاية التعديل ==========
+            // ========== End multi-provider translation ==========
 
             // 🔥🔥🔥 NEW: EXTRACT TITLE FROM TRANSLATED CONTENT 🔥🔥🔥
-            // البحث عن أول فقرة، إذا احتوت على "الفصل" و ":" نأخذ ما بعد النقطتين كعنوان
             let extractedTitle = `الفصل ${chapterNum}`;
             try {
-                // تقسيم النص إلى أسطر
                 const lines = translatedText.split('\n');
                 let firstParagraph = "";
                 
-                // البحث عن أول سطر غير فارغ
                 for (const line of lines) {
                     if (line.trim().length > 0) {
                         firstParagraph = line.trim();
@@ -217,12 +288,9 @@ ${sourceContent}
                     }
                 }
 
-                // التحقق من وجود "الفصل" أو "Chapter" وعلامة النقطتين
-                // Regex: يبدأ بكلمة الفصل (اختياري أرقام) ثم نقطتين
                 if (firstParagraph && (firstParagraph.includes('الفصل') || firstParagraph.includes('Chapter')) && firstParagraph.includes(':')) {
                     const parts = firstParagraph.split(':');
                     if (parts.length > 1) {
-                        // أخذ كل شيء بعد النقطتين الأولى كعنوان
                         const potentialTitle = parts.slice(1).join(':').trim();
                         if (potentialTitle.length > 0) {
                             extractedTitle = potentialTitle;
@@ -237,11 +305,19 @@ ${sourceContent}
             try {
                 await pushLog(jobId, `2️⃣ جاري استخراج المصطلحات...`, 'info');
                 
-                keyIndex++; 
-                const modelJSON = getModel();
-                modelJSON.generationConfig = { responseMimeType: "application/json" };
-
-                const extractionInput = `
+                // Use the same successful provider for extraction (first one that worked? we don't track, so use first provider keys)
+                // For simplicity, we try with first provider that has keys
+                let extractionDone = false;
+                for (const provider of providers) {
+                    if (extractionDone) break;
+                    const modelToUse = provider.selectedModel || (provider.models && provider.models[0]?.modelId) || 'gemini-2.5-flash';
+                    const keys = provider.apiKeys || [];
+                    if (keys.length === 0) continue;
+                    
+                    for (const key of keys) {
+                        try {
+                            // For JSON extraction, we need a model with JSON response. Gemini and most OpenRouter models support it.
+                            const extractionInput = `
 ${extractPrompt}
 
 English Text (Excerpt):
@@ -249,79 +325,96 @@ English Text (Excerpt):
 
 Arabic Text (Excerpt):
 """${translatedText.substring(0, 8000)}"""
-`; 
-                const resultExt = await modelJSON.generateContent(extractionInput);
-                const responseExt = await resultExt.response;
-                let jsonText = responseExt.text().trim();
-                
-                // 🔥 Cleanup JSON string if it contains markdown code blocks
-                if (jsonText.startsWith("```json")) {
-                    jsonText = jsonText.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-                } else if (jsonText.startsWith("```")) {
-                    jsonText = jsonText.replace(/^```\s*/, "").replace(/\s*```$/, "");
-                }
-
-                let parsedTerms = [];
-                try {
-                    const parsed = JSON.parse(jsonText);
-                    // Handle if it's an array OR an object with a key like "newTerms"
-                    if (Array.isArray(parsed)) {
-                        parsedTerms = parsed;
-                    } else if (parsed.newTerms && Array.isArray(parsed.newTerms)) {
-                        parsedTerms = parsed.newTerms;
-                    } else if (parsed.terms && Array.isArray(parsed.terms)) {
-                        parsedTerms = parsed.terms;
-                    }
-                } catch (e) {
-                    console.log("JSON Parse Error", e);
-                }
-
-                if (parsedTerms.length > 0) {
-                    let newTermsCount = 0;
-                    for (const termObj of parsedTerms) {
-                        // Map prompt keys (name) to DB keys (term)
-                        const rawTerm = termObj.name || termObj.term;
-                        const translation = termObj.translation;
-                        
-                        if (rawTerm && translation) {
-                            // Map Prompt Categories (singular) to DB Categories (plural)
-                            let category = termObj.category ? termObj.category.toLowerCase() : 'other';
-                            if (category === 'character') category = 'characters';
-                            else if (category === 'location') category = 'locations';
-                            else if (category === 'item') category = 'items';
-                            else if (category === 'rank') category = 'ranks';
-                            else if (category === 'concept') category = 'other'; // Map concept to other as it's not in enum (or add to enum)
+`;
+                            let jsonText;
+                            if ((provider.providerId === 'gemini' || !provider.baseUrl) && provider.providerId !== 'openrouter') {
+                                // Gemini native with JSON mode
+                                const genAI = new GoogleGenerativeAI(key);
+                                const modelJSON = genAI.getGenerativeModel({ model: modelToUse });
+                                modelJSON.generationConfig = { responseMimeType: "application/json" };
+                                const resultExt = await modelJSON.generateContent(extractionInput);
+                                const responseExt = await resultExt.response;
+                                jsonText = responseExt.text().trim();
+                            } else {
+                                // Use OpenAI-compatible call; it returns plain text, we'll parse JSON anyway
+                                const extPrompt = extractionInput + "\n\nRETURN ONLY JSON.";
+                                jsonText = await callTranslationProvider(provider, modelToUse, key, extPrompt);
+                            }
                             
-                            // Check valid enum, fallback to 'other'
-                            if (!['characters', 'locations', 'items', 'ranks'].includes(category)) {
-                                category = 'other';
+                            // Cleanup JSON string
+                            if (jsonText.startsWith("```json")) {
+                                jsonText = jsonText.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+                            } else if (jsonText.startsWith("```")) {
+                                jsonText = jsonText.replace(/^```\s*/, "").replace(/\s*```$/, "");
                             }
 
-                            await Glossary.updateOne(
-                                { novelId: freshNovel._id, term: rawTerm }, 
-                                { 
-                                    $set: { 
-                                        translation: translation,
-                                        category: category,
-                                        description: termObj.description || ''
-                                    },
-                                    $setOnInsert: { autoGenerated: true }
-                                },
-                                { upsert: true }
-                            );
-                            newTermsCount++;
+                            let parsedTerms = [];
+                            try {
+                                const parsed = JSON.parse(jsonText);
+                                if (Array.isArray(parsed)) {
+                                    parsedTerms = parsed;
+                                } else if (parsed.newTerms && Array.isArray(parsed.newTerms)) {
+                                    parsedTerms = parsed.newTerms;
+                                } else if (parsed.terms && Array.isArray(parsed.terms)) {
+                                    parsedTerms = parsed.terms;
+                                }
+                            } catch (e) {
+                                console.log("JSON Parse Error", e);
+                            }
+
+                            if (parsedTerms.length > 0) {
+                                let newTermsCount = 0;
+                                for (const termObj of parsedTerms) {
+                                    const rawTerm = termObj.name || termObj.term;
+                                    const translation = termObj.translation;
+                                    
+                                    if (rawTerm && translation) {
+                                        let category = termObj.category ? termObj.category.toLowerCase() : 'other';
+                                        if (category === 'character') category = 'characters';
+                                        else if (category === 'location') category = 'locations';
+                                        else if (category === 'item') category = 'items';
+                                        else if (category === 'rank') category = 'ranks';
+                                        else if (category === 'concept') category = 'other';
+                                        
+                                        if (!['characters', 'locations', 'items', 'ranks'].includes(category)) {
+                                            category = 'other';
+                                        }
+
+                                        await Glossary.updateOne(
+                                            { novelId: freshNovel._id, term: rawTerm }, 
+                                            { 
+                                                $set: { 
+                                                    translation: translation,
+                                                    category: category,
+                                                    description: termObj.description || ''
+                                                },
+                                                $setOnInsert: { autoGenerated: true }
+                                            },
+                                            { upsert: true }
+                                        );
+                                        newTermsCount++;
+                                    }
+                                }
+                                if (newTermsCount > 0) await pushLog(jobId, `✅ تم إضافة/تحديث ${newTermsCount} مصطلح للمسرد`, 'success');
+                            } else {
+                                await pushLog(jobId, `ℹ️ لم يتم استخراج مصطلحات جديدة`, 'info');
+                            }
+                            extractionDone = true;
+                            break;
+                        } catch (extErr) {
+                            console.error("Extraction error:", extErr.message);
                         }
                     }
-                    if (newTermsCount > 0) await pushLog(jobId, `✅ تم إضافة/تحديث ${newTermsCount} مصطلح للمسرد`, 'success');
-                } else {
-                    await pushLog(jobId, `ℹ️ لم يتم استخراج مصطلحات جديدة`, 'info');
+                }
+                if (!extractionDone) {
+                    await pushLog(jobId, `⚠️ فشل استخراج المصطلحات لهذا الفصل`, 'warning');
                 }
 
                 try {
                     await firestore.collection('novels').doc(freshNovel._id.toString())
                         .collection('chapters').doc(chapterNum.toString())
                         .set({
-                            title: extractedTitle, // 🔥 Use the extracted title
+                            title: extractedTitle,
                             content: translatedText,
                             lastUpdated: new Date()
                         }, { merge: true });
@@ -330,13 +423,10 @@ Arabic Text (Excerpt):
                     throw new Error(`فشل الحفظ في Firestore: ${fsSaveErr.message}`);
                 }
 
-                // 🔥🔥 MODIFIED: Handle adding chapter to MongoDB if it doesn't exist (private novel case)
                 const now = new Date();
-                // Check if chapter already exists in MongoDB
                 const existingChapterIndex = freshNovel.chapters.findIndex(c => c.number === chapterNum);
                 
                 if (existingChapterIndex === -1) {
-                    // Chapter not in MongoDB yet → add it (novel was private)
                     await Novel.updateOne(
                         { _id: freshNovel._id },
                         {
@@ -350,13 +440,12 @@ Arabic Text (Excerpt):
                             },
                             $set: {
                                 lastChapterUpdate: now,
-                                status: freshNovel.status === 'خاصة' ? 'مستمرة' : freshNovel.status // change to public if was private
+                                status: freshNovel.status === 'خاصة' ? 'مستمرة' : freshNovel.status
                             }
                         }
                     );
                     await pushLog(jobId, `✅ تم إضافة الفصل ${chapterNum} إلى قاعدة البيانات (الرواية أصبحت عامة)`, 'success');
                 } else {
-                    // Chapter exists → update title and createdAt
                     await Novel.updateOne(
                         { _id: freshNovel._id, "chapters.number": chapterNum },
                         {
@@ -380,7 +469,7 @@ Arabic Text (Excerpt):
                 await TranslationJob.findByIdAndUpdate(jobId, {
                     $inc: { translatedCount: 1 },
                     $set: { currentChapter: chapterNum, lastUpdate: new Date() },
-                    $pull: { targetChapters: chapterNum } // 🔥 Remove processed chapter from queue
+                    $pull: { targetChapters: chapterNum }
                 });
 
                 await pushLog(jobId, `🎉 تم إنجاز الفصل ${chapterNum} بعنوان "${extractedTitle}" وحفظه في السيرفر`, 'success');
@@ -394,7 +483,6 @@ Arabic Text (Excerpt):
                             .collection('chapters').doc(chapterNum.toString())
                             .set({ content: translatedText }, { merge: true });
                         
-                        // 🔥 Also handle fallback save in MongoDB
                         const now = new Date();
                         const existingChapterIndex = freshNovel.chapters.findIndex(c => c.number === chapterNum);
                         
@@ -436,7 +524,7 @@ Arabic Text (Excerpt):
                         }
 
                         await TranslationJob.findByIdAndUpdate(jobId, {
-                            $pull: { targetChapters: chapterNum } // Remove even if extraction failed
+                            $pull: { targetChapters: chapterNum }
                         });
 
                         await pushLog(jobId, `⚠️ تم حفظ الترجمة (فشل الاستخراج): ${err.message}`, 'warning');
@@ -499,11 +587,6 @@ module.exports = function(app, verifyToken, verifyAdmin) {
                 query.title = { $regex: search, $options: 'i' };
             }
             
-            // 🔥🔥 AGGREGATION PIPELINE: 
-            // 1. Filter
-            // 2. Count chapters database-side ($size) without loading them
-            // 3. Exclude heavy fields like 'chapters', 'description' if not needed
-            // 🔥 MODIFIED: Use sourceChaptersCount if available, otherwise fallback to chapters length
             const novels = await Novel.aggregate([
                 { $match: query },
                 {
@@ -514,7 +597,6 @@ module.exports = function(app, verifyToken, verifyAdmin) {
                         author: 1,
                         status: 1,
                         createdAt: 1,
-                        // ⚡⚡ ROCKET SPEED: Get array size directly in DB engine, but prioritize sourceChaptersCount
                         chaptersCount: {
                             $ifNull: [
                                 "$sourceChaptersCount",
@@ -540,7 +622,6 @@ module.exports = function(app, verifyToken, verifyAdmin) {
         try {
             const { novelId, chapters, apiKeys, resumeFrom, jobId } = req.body; 
             
-            // 🔥 Resume existing job
             if (jobId) {
                 const existingJob = await TranslationJob.findById(jobId);
                 if (!existingJob) return res.status(404).json({ message: "Job not found" });
@@ -557,11 +638,13 @@ module.exports = function(app, verifyToken, verifyAdmin) {
             if (!novel) return res.status(404).json({ message: "Novel not found" });
 
             const userSettings = await getGlobalSettings();
-            const savedKeys = userSettings?.translatorApiKeys || [];
             
-            const effectiveKeys = (apiKeys && apiKeys.length > 0) ? apiKeys : savedKeys;
-
-            if (effectiveKeys.length === 0) {
+            // 🔥 CHECK providers instead of legacy keys
+            const providers = userSettings?.translationProviders || [];
+            const anyKeys = providers.some(p => p.apiKeys && p.apiKeys.length > 0);
+            const legacyKeys = userSettings?.translatorApiKeys || [];
+            
+            if (!anyKeys && legacyKeys.length === 0) {
                 return res.status(400).json({ message: "No API keys found. Please add keys in Settings first." });
             }
 
@@ -572,17 +655,8 @@ module.exports = function(app, verifyToken, verifyAdmin) {
                     .filter(c => c.number >= resumeFrom)
                     .map(c => c.number);
             } else if (chapters === 'all') {
-                // ====================================================================
-                // 🔥🔥🔥 التعديل الجديد: دمج فصول MongoDB مع فصول Firestore 🔥🔥🔥
-                // ====================================================================
-                // السبب: الفصول التي فشلت في الترجمة سابقاً توجد فقط في Firestore
-                // ولا تظهر في `novel.chapters`، لذا يجب جمعها من المصدرين.
-                // ====================================================================
-                
-                // 1. الفصول الموجودة في MongoDB (مترجمة أو تمت إضافتها يدوياً)
                 const mongoChapters = novel.chapters.map(c => c.number);
                 
-                // 2. الفصول الموجودة في Firestore (جميع الفصول الأصلية، سواء ترجمت أم لا)
                 let firestoreChapters = [];
                 if (firestore) {
                     try {
@@ -591,23 +665,18 @@ module.exports = function(app, verifyToken, verifyAdmin) {
                         firestoreChapters = snapshot.docs.map(doc => parseInt(doc.id)).filter(num => !isNaN(num));
                     } catch (err) {
                         console.error("Failed to fetch chapters from Firestore:", err);
-                        // في حال فشل جلب Firestore، نعتمد على MongoDB فقط
                     }
                 }
                 
-                // 3. دمج القائمتين وإزالة التكرار
                 const allChaptersSet = new Set([...mongoChapters, ...firestoreChapters]);
                 targetChapters = Array.from(allChaptersSet).sort((a, b) => a - b);
                 
-                // 4. استخدام `sourceChaptersCount` كمرجع إضافي (إذا كان أكبر من عدد الفصول المدمجة)
                 if (novel.sourceChaptersCount && novel.sourceChaptersCount > targetChapters.length) {
-                    // نضيف أرقاماً افتراضية من 1 إلى sourceChaptersCount، ثم ندمجها
                     for (let i = 1; i <= novel.sourceChaptersCount; i++) {
                         allChaptersSet.add(i);
                     }
                     targetChapters = Array.from(allChaptersSet).sort((a, b) => a - b);
                 }
-                // ====================================================================
             } else if (Array.isArray(chapters)) {
                 targetChapters = chapters;
             }
@@ -618,8 +687,8 @@ module.exports = function(app, verifyToken, verifyAdmin) {
                 cover: novel.cover,
                 targetChapters,
                 totalToTranslate: targetChapters.length,
-                apiKeys: effectiveKeys,
-                logs: [{ message: `تم بدء المهمة (استهداف ${targetChapters.length} فصل) باستخدام ${effectiveKeys.length} مفتاح`, type: 'info' }]
+                apiKeys: legacyKeys, // keep for backward compatibility, but actual translation will use providers
+                logs: [{ message: `تم بدء المهمة (استهداف ${targetChapters.length} فصل)`, type: 'info' }]
             });
 
             await job.save();
@@ -661,13 +730,11 @@ module.exports = function(app, verifyToken, verifyAdmin) {
     // 3. Get Jobs List (🔥 OPTIMIZED: Exclude logs and apiKeys)
     app.get('/api/translator/jobs', verifyToken, verifyAdmin, async (req, res) => {
         try {
-            // 🔥 Use .select() to exclude heavy fields. This is the fix for latency.
             const jobs = await TranslationJob.find()
                 .select('novelTitle cover status translatedCount totalToTranslate startTime') 
                 .sort({ updatedAt: -1 })
                 .limit(20);
             
-            // Map to lightweight UI objects
             const uiJobs = jobs.map(j => ({
                 id: j._id,
                 novelTitle: j.novelTitle,
@@ -689,8 +756,6 @@ module.exports = function(app, verifyToken, verifyAdmin) {
             const job = await TranslationJob.findById(req.params.id);
             if (!job) return res.status(404).json({message: "Job not found"});
 
-            // Optimize fetching max chapter (don't load whole object if possible, but mongoose is okay here for single item)
-            // Use aggregation to just get the max number
             const novelStats = await Novel.aggregate([
                 { $match: { _id: job.novelId } },
                 { $project: { maxChapter: { $max: "$chapters.number" } } }
@@ -721,7 +786,6 @@ module.exports = function(app, verifyToken, verifyAdmin) {
         try {
             const { novelId, term, translation, category, description } = req.body; 
             
-            // 🔥 Force category check
             const finalCategory = category && ['characters', 'locations', 'items', 'ranks', 'other'].includes(category) 
                                   ? category 
                                   : 'other';
@@ -761,7 +825,7 @@ module.exports = function(app, verifyToken, verifyAdmin) {
         }
     });
 
-    // 6. Translator Settings API (GLOBAL)
+    // 6. Translator Settings API (GLOBAL) – updated to include providers
     app.get('/api/translator/settings', verifyToken, verifyAdmin, async (req, res) => {
         try {
             let settings = await getGlobalSettings();
@@ -769,7 +833,8 @@ module.exports = function(app, verifyToken, verifyAdmin) {
                 customPrompt: settings.customPrompt || '',
                 translatorExtractPrompt: settings.translatorExtractPrompt || DEFAULT_EXTRACT_PROMPT,
                 translatorModel: settings.translatorModel || 'gemini-2.5-flash',
-                translatorApiKeys: settings.translatorApiKeys || []
+                translatorApiKeys: settings.translatorApiKeys || [],
+                translationProviders: settings.translationProviders || [] // 🔥 NEW
             });
         } catch (e) {
             res.status(500).json({ error: e.message });
@@ -778,7 +843,7 @@ module.exports = function(app, verifyToken, verifyAdmin) {
 
     app.post('/api/translator/settings', verifyToken, verifyAdmin, async (req, res) => {
         try {
-            const { customPrompt, translatorExtractPrompt, translatorModel, translatorApiKeys } = req.body;
+            const { customPrompt, translatorExtractPrompt, translatorModel, translatorApiKeys, translationProviders } = req.body;
             
             let settings = await getGlobalSettings();
 
@@ -786,6 +851,7 @@ module.exports = function(app, verifyToken, verifyAdmin) {
             if (translatorExtractPrompt !== undefined) settings.translatorExtractPrompt = translatorExtractPrompt;
             if (translatorModel !== undefined) settings.translatorModel = translatorModel;
             if (translatorApiKeys !== undefined) settings.translatorApiKeys = translatorApiKeys;
+            if (translationProviders !== undefined) settings.translationProviders = translationProviders; // 🔥 NEW
 
             await settings.save();
             res.json({ success: true });
