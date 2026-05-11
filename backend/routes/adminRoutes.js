@@ -1,8 +1,9 @@
 const mongoose = require('mongoose');
 const path = require('path');
 const AdmZip = require('adm-zip');
-const jwt = require('jsonwebtoken'); // Required for manual token verification in export
-const { GoogleGenerativeAI } = require("@google/generative-ai"); // 🔥 NEW: Required for metadata translation
+const jwt = require('jsonwebtoken');
+const axios = require('axios'); // 🔥 NEW: for custom/OpenRouter providers
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 // --- Config Imports ---
 let firestore, cloudinary;
@@ -20,8 +21,8 @@ const Novel = require('../models/novel.model.js');
 const NovelLibrary = require('../models/novelLibrary.model.js'); 
 const Settings = require('../models/settings.model.js');
 const Comment = require('../models/comment.model.js');
-const ChapterScraperJob = require('../models/chapterScraperJob.model.js'); // 🔥 NEW MODEL
-const MetadataTranslationJob = require('../models/metadataTranslationJob.model.js'); // 🔥 NEW MODEL
+const ChapterScraperJob = require('../models/chapterScraperJob.model.js');
+const MetadataTranslationJob = require('../models/metadataTranslationJob.model.js');
 
 // 🔥 MODEL FOR SCRAPER LOGS
 const ScraperLogSchema = new mongoose.Schema({
@@ -46,6 +47,46 @@ async function logScraper(message, type = 'info') {
     }
 }
 
+// 🔥 NEW: Unified provider caller (same as translatorRoutes)
+async function callTranslationProvider(provider, modelName, apiKey, prompt) {
+    const providerId = (provider.providerId || 'gemini').toLowerCase();
+
+    // ---- Gemini native ----
+    if (providerId === 'gemini' && !provider.baseUrl) {
+        const genAI = new GoogleGenerativeAI(apiKey);
+        const model = genAI.getGenerativeModel({ model: modelName });
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        return response.text();
+    }
+
+    // ---- OpenAI-compatible (OpenRouter, custom baseUrl) ----
+    const baseUrl = provider.baseUrl || 'https://openrouter.ai/api/v1';
+    const url = `${baseUrl.replace(/\/+$/, '')}/chat/completions`;
+
+    const headers = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+    };
+    if (providerId === 'openrouter') {
+        headers['HTTP-Referer'] = 'https://zeus-novel.app';
+        headers['X-Title'] = 'Zeus Novel Translator';
+    }
+
+    const body = {
+        model: modelName,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.3
+    };
+
+    const res = await axios.post(url, body, { headers, timeout: 120000 });
+    const choice = res.data?.choices?.[0];
+    if (choice && choice.message && choice.message.content) {
+        return choice.message.content;
+    }
+    throw new Error(`Invalid response from ${providerId}: ${JSON.stringify(res.data)}`);
+}
+
 // 🔥 Helper to update metadata translation job
 async function updateMetadataJob(jobId, status, message, type) {
     try {
@@ -55,7 +96,7 @@ async function updateMetadataJob(jobId, status, message, type) {
             update.$push = { logs: { message, type, timestamp: new Date() } };
         }
         if (status === 'completed' || status === 'failed') {
-            update.processedCount = 3; // all steps done
+            update.processedCount = 3;
         }
         await MetadataTranslationJob.findByIdAndUpdate(jobId, update);
     } catch (e) {
@@ -63,34 +104,53 @@ async function updateMetadataJob(jobId, status, message, type) {
     }
 }
 
-// 🔥 NEW: Translate novel metadata (title, description, tags) using Gemini (same as translator)
+// 🔥 UPDATED: Translate novel metadata using multi-provider system
 async function translateNovelMetadata(novelId, originalData, jobId = null) {
     const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
     try {
-        // 1. Get translation settings (same as translator)
         const settings = await getGlobalSettings();
-        let apiKeys = settings.translatorApiKeys || [];
-        const selectedModel = settings.translatorModel || 'gemini-1.5-flash';
         
-        if (!apiKeys.length) {
-            const msg = `⚠️ لا توجد مفاتيح API للترجمة، لن يتم ترجمة البيانات الوصفية للرواية ${originalData.title}`;
+        // Read providers from new system; fallback to legacy keys
+        let providers = settings.translationProviders && settings.translationProviders.length > 0
+            ? settings.translationProviders.slice()
+            : [];
+
+        if (providers.length === 0) {
+            const legacyKeys = settings.translatorApiKeys || [];
+            if (legacyKeys.length > 0) {
+                const legacyModel = settings.translatorModel || 'gemini-1.5-flash';
+                providers = [{
+                    providerId: 'gemini',
+                    name: 'Gemini (Legacy)',
+                    baseUrl: '',
+                    models: [{ modelId: legacyModel, modelName: legacyModel }],
+                    apiKeys: legacyKeys,
+                    selectedModel: legacyModel,
+                    priority: 0
+                }];
+            }
+        }
+
+        if (providers.length === 0) {
+            const msg = `⚠️ لا توجد مزوّدات ترجمة مفعلة مع مفاتيح API`;
             await logScraper(msg, 'warning');
             if (jobId) await updateMetadataJob(jobId, 'failed', msg, 'error');
             return;
         }
 
-        // 2. Get available categories from settings or fallback
+        // Sort by priority
+        providers.sort((a, b) => (a.priority || 0) - (b.priority || 0));
+
+        // Get available categories from settings or fallback
         let availableCategories = settings.managedCategories || [];
         if (!availableCategories.length) {
-            // Fallback to hardcoded categories if not set
             availableCategories = [
                 'بناء القواعد', 'الهجرة', 'الزراعة', 'الحياة المدرسية', 'الحياة الحضرية', 'أكشن', 'حياة مدرسية', 'حسم في القتل', 'حريم', 'حرب النجوم', 'تراجيدي', 'تاريخي', 'رياضة', 'رومانسي', 'رعب', 'راشد', 'دراما', 'خيال علمي', 'خيال', 'خارق لطبيعية', 'شيانشيا', 'شونين', 'شوانهوان', 'شريحة من الحياة', 'سينين', 'سحر', 'زراعة', 'كوميديا', 'كوارث', 'قوى خارقة', 'فنون قتالية', 'فانتازيا', 'غموض', 'عسكري', 'موريم', 'مغامرة', 'مغامرات', 'مصاصو الدماء', 'محاكي', 'مأساة', 'لعبة', 'وشيا', 'نظام'
             ];
         }
         const categoriesListStr = availableCategories.join('، ');
 
-        // 3. Prepare prompt for Gemini
         const prompt = `
 أنت خبير في ترجمة بيانات الروايات من الإنجليزية إلى العربية.
 المهمة: قم بترجمة البيانات التالية إلى العربية، ثم قم بتصنيف الرواية ضمن التصنيفات المتاحة التالية: ${categoriesListStr}.
@@ -101,7 +161,7 @@ async function translateNovelMetadata(novelId, originalData, jobId = null) {
 - التصنيفات الأصلية (tags): ${originalData.tags?.join(', ') || ''}
 
 المطلوب:
-1. ترجمة العنوان إلى العربية.1. ترجمة العنوان إلى العربية (بدون علامات تنصيص).
+1. ترجمة العنوان إلى العربية (بدون علامات تنصيص).
 2. ترجمة الوصف إلى العربية بأسلوب "إبداعي سياقي" (Localization):
    - تجنب الترجمة الحرفية تماماً؛ أعد صياغة الجمل لتكون انسيابية وقوية باللغة العربية.
    - الالتزام الصارم بالمصطلحات: (إله -> حاكم/حكام) ، (إلهية -> سماوية).
@@ -125,41 +185,59 @@ async function translateNovelMetadata(novelId, originalData, jobId = null) {
 
         if (jobId) await updateMetadataJob(jobId, 'active', 'جاري ترجمة البيانات...', 'info');
 
-        // 4. Call Gemini with key rotation and retry logic (same as translator)
-        let keyIndex = 0;
-        let attempt = 0;
-        let lastError = null;
+        // ---- Multi-provider translation with double cycle ----
+        const MAX_CYCLES = 2;
+        let cycle = 0;
         let parsed = null;
+        let lastError = null;
 
-        // 🔥 MODIFICATION: Removed maxAttempts limit → now infinite retries on 429
-        while (!parsed) {
-            try {
-                const currentKey = apiKeys[keyIndex % apiKeys.length];
-                const genAI = new GoogleGenerativeAI(currentKey);
-                const model = genAI.getGenerativeModel({ model: selectedModel });
-                
-                const result = await model.generateContent(prompt);
-                const response = await result.response;
-                let jsonText = response.text().trim();
-                
-                if (jsonText.startsWith("```json")) {
-                    jsonText = jsonText.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-                } else if (jsonText.startsWith("```")) {
-                    jsonText = jsonText.replace(/^```\s*/, "").replace(/\s*```$/, "");
-                }
+        while (!parsed && cycle < MAX_CYCLES) {
+            cycle++;
+            if (cycle > 1) {
+                await logScraper(`🔄 دورة ${cycle}: محاولة إضافية عبر جميع المزوّدين`, 'info');
+            }
+            for (const provider of providers) {
+                if (parsed) break;
+                const providerName = provider.name || provider.providerId;
+                const modelToUse = provider.selectedModel || (provider.models && provider.models[0]?.modelId) || 'gemini-1.5-flash';
+                const keys = provider.apiKeys || [];
 
-                parsed = JSON.parse(jsonText);
-                break;
-            } catch (err) {
-                lastError = err;
-                if (err.message.includes('429') || err.message.includes('quota')) {
-                    keyIndex++;
-                    attempt++;
-                    await delay(5000);
-                    if (jobId) await updateMetadataJob(jobId, 'active', `⚠️ ضغط على المفتاح، تبديل وإعادة المحاولة... (محاولة ${attempt})`, 'warning');
+                if (keys.length === 0) {
+                    await logScraper(`⚠️ المزوّد ${providerName} ليس لديه مفاتيح – تخطيه`, 'warning');
                     continue;
                 }
-                throw err; // غير 429 -> فشل مباشر
+
+                for (let keyIdx = 0; keyIdx < keys.length; keyIdx++) {
+                    const key = keys[keyIdx];
+                    try {
+                        await logScraper(`🔑 مزوّد: ${providerName} | نموذج: ${modelToUse} | مفتاح ${keyIdx + 1}/${keys.length}`, 'info');
+                        const rawText = await callTranslationProvider(provider, modelToUse, key, prompt);
+                        let jsonText = rawText.trim();
+                        if (jsonText.startsWith("```json")) {
+                            jsonText = jsonText.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+                        } else if (jsonText.startsWith("```")) {
+                            jsonText = jsonText.replace(/^```\s*/, "").replace(/\s*```$/, "");
+                        }
+                        parsed = JSON.parse(jsonText);
+                        if (jobId) await updateMetadataJob(jobId, 'active', `✅ نجحت الترجمة باستخدام ${providerName}`, 'success');
+                        break; // exit key loop
+                    } catch (err) {
+                        lastError = err;
+                        console.error(`❌ فشل ${providerName} مفتاح ${keyIdx+1}: ${err.message}`);
+                        if (err.message.includes('429') || err.message.includes('quota')) {
+                            if (jobId) await updateMetadataJob(jobId, 'active', `⚠️ ضغط على المفتاح، تبديل...`, 'warning');
+                            await delay(3000);
+                            continue; // try next key
+                        }
+                        // For other errors, try next key
+                    }
+                }
+                if (!parsed) {
+                    await logScraper(`🚫 جميع مفاتيح ${providerName} فشلت`, 'warning');
+                }
+            }
+            if (!parsed && cycle < MAX_CYCLES) {
+                await delay(10000);
             }
         }
 
@@ -167,9 +245,7 @@ async function translateNovelMetadata(novelId, originalData, jobId = null) {
             throw lastError || new Error('فشل بعد عدة محاولات');
         }
 
-        if (jobId) await updateMetadataJob(jobId, 'active', 'تم استلام الرد من الذكاء الاصطناعي', 'info');
-
-        // 5. Update novel in MongoDB
+        // Update novel in MongoDB
         const updateData = {};
         if (parsed.arabicTitle && parsed.arabicTitle.trim()) {
             updateData.title = parsed.arabicTitle;
@@ -192,13 +268,13 @@ async function translateNovelMetadata(novelId, originalData, jobId = null) {
             await logScraper(`✅ تم تحديث البيانات الوصفية للرواية: العنوان: ${parsed.arabicTitle || originalData.title}`, 'success');
             if (jobId) await updateMetadataJob(jobId, 'completed', '🏁 اكتملت ترجمة البيانات بنجاح', 'success');
         } else {
-            await logScraper(`ℹ️ لم يتم العثور على بيانات جديدة لتحديثها للرواية ${originalData.title}`, 'info');
-            if (jobId) await updateMetadataJob(jobId, 'completed', 'ℹ️ لم يتم العثور على بيانات جديدة لتحديثها', 'info');
+            await logScraper(`ℹ️ لم يتم العثور على بيانات جديدة لتحديثها`, 'info');
+            if (jobId) await updateMetadataJob(jobId, 'completed', 'ℹ️ لم يتم العثور على بيانات جديدة', 'info');
         }
-        
+
     } catch (error) {
         console.error("Metadata translation error:", error);
-        await logScraper(`❌ فشل ترجمة البيانات الوصفية للرواية ${originalData.title}: ${error.message}`, 'error');
+        await logScraper(`❌ فشل ترجمة البيانات الوصفية: ${error.message}`, 'error');
         if (jobId) await updateMetadataJob(jobId, 'failed', `❌ فشل الترجمة: ${error.message}`, 'error');
     }
 }
@@ -340,10 +416,9 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         }
     });
 
-// أضف هذا الكود داخل module.exports في ملف // 🟢 1. جلب قائمة المستخدمين
+// 🟢 1. جلب قائمة المستخدمين
     app.get('/api/admin/users', verifyAdmin, async (req, res) => {
         try {
-            // ملاحظة: verifyAdmin الموجودة في ملفك تتحقق أصلاً من الرتبة
             const users = await User.find().select('-password').sort({ createdAt: -1 });
             res.json(users);
         } catch (error) {
@@ -1268,11 +1343,9 @@ app.post('/api/admin/novels', verifyAdmin, async (req, res) => {
             return res.status(404).json({ message: "المستخدم غير موجود" });
         }
 
-        // يمكنك رفع الصورة هنا إن تم تمرير صورة محلية، لكن الواجهة ترسل رابطًا مباشرًا
-
         const novel = new Novel({
             title,
-            titleEn: titleEn || title, // نسخ احتياطي للانجليزي
+            titleEn: titleEn || title,
             cover,
             description: description || '',
             author: adminUser.name,
@@ -1283,12 +1356,11 @@ app.post('/api/admin/novels', verifyAdmin, async (req, res) => {
             status: status || 'مستمرة',
             chapters: [],
             views: 0,
-            isWatched: false // غير مراقبة تلقائياً
+            isWatched: false
         });
 
         await novel.save();
 
-        // بدء ترجمة البيانات الوصفية اختياريًا في الخلفية
         translateNovelMetadata(novel._id, {
             title: novel.title,
             description: description || '',
@@ -1305,13 +1377,10 @@ app.post('/api/admin/novels', verifyAdmin, async (req, res) => {
     // =========================================================
     // 📦 EXPORT CHAPTERS TO ZIP (ADMIN ONLY) - 🔥 STREAMING VERSION
     // =========================================================
-    // Note: We bypass `verifyToken` middleware in main `app.use` by handling token check manually here
-    // This allows browser/native Linking to trigger download via URL with query param
     app.get('/api/admin/novels/:id/export', async (req, res) => {
         try {
-            // 1. Manually verify token from Query Param (because Linking.openURL can't set Authorization Header)
             const token = req.query.token;
-            const includeTitle = req.query.includeTitle === 'true'; // Check if title should be included in content
+            const includeTitle = req.query.includeTitle === 'true';
 
             if (!token) return res.status(401).json({ message: "Authentication required" });
 
@@ -1330,31 +1399,25 @@ app.post('/api/admin/novels', verifyAdmin, async (req, res) => {
             const novel = await Novel.findById(novelId);
             if (!novel) return res.status(404).json({ message: "Novel not found" });
 
-            // Ensure ownership for contributors
             if (req.user.role !== 'admin' && novel.authorEmail !== req.user.email) {
                 return res.status(403).json({ message: "Access Denied to this novel" });
             }
 
             const settings = await getGlobalSettings();
             
-            // 🔥 STREAMING SETUP 🔥
             const archiver = require('archiver');
             const archive = archiver('zip', {
-                zlib: { level: 9 } // Sets the compression level.
+                zlib: { level: 9 }
             });
 
-            // Set Headers for Download
             res.set('Content-Type', 'application/zip');
             res.set('Content-Disposition', `attachment; filename="${encodeURIComponent(novel.title)}_chapters.zip"`);
 
-            // Pipe archive data to the response
             archive.pipe(res);
 
-            // 🔥 التعديل الجديد: إذا كانت الرواية خاصة ولا تحتوي على فصول في MongoDB، نجلب الفصول مباشرة من Firestore
             let chaptersToExport = [];
             
             if (novel.status === 'خاصة' && (!novel.chapters || novel.chapters.length === 0)) {
-                // نجلب قائمة الفصول من Firestore
                 if (!firestore) {
                     throw new Error("Firestore غير متصل، لا يمكن جلب الفصول.");
                 }
@@ -1372,26 +1435,20 @@ app.post('/api/admin/novels', verifyAdmin, async (req, res) => {
                         });
                     }
                 });
-                // ترتيب الفصول تصاعدياً
                 chaptersToExport.sort((a, b) => a.number - b.number);
             } else {
-                // السلوك الافتراضي: نستخدم الفصول الموجودة في MongoDB (مع جلب المحتوى من Firestore)
                 chaptersToExport = novel.chapters.sort((a, b) => a.number - b.number).map(chap => ({
                     number: chap.number,
                     title: chap.title,
-                    // سيتم جلب المحتوى لاحقاً
                 }));
             }
 
-            // Process chapters
             for (const chap of chaptersToExport) {
                 let content = "";
                 
-                // إذا كانت الفصول مأخوذة مباشرة من Firestore (حالة الرواية الخاصة) فقد حصلنا على المحتوى مسبقاً
                 if (chap.content !== undefined) {
                     content = chap.content;
                 } else {
-                    // جلب المحتوى من Firestore لكل فصل (السلوك الافتراضي)
                     if (firestore) {
                         const doc = await firestore.collection('novels').doc(novelId).collection('chapters').doc(chap.number.toString()).get();
                         if (doc.exists) content = doc.data().content || "";
@@ -1399,8 +1456,6 @@ app.post('/api/admin/novels', verifyAdmin, async (req, res) => {
                 }
 
                 // --- Apply Formatting Rules ---
-
-                // 1. Blocklist Cleaning
                 if (settings.globalBlocklist && settings.globalBlocklist.length > 0) {
                      settings.globalBlocklist.forEach(word => {
                         if (!word) return;
@@ -1414,7 +1469,6 @@ app.post('/api/admin/novels', verifyAdmin, async (req, res) => {
                      });
                 }
 
-                // 1.5. 🔥 Global Replacements Logic (Server-Side) 🔥
                 if (settings.globalReplacements && settings.globalReplacements.length > 0) {
                     settings.globalReplacements.forEach(rep => {
                         if (rep.original) {
@@ -1425,8 +1479,6 @@ app.post('/api/admin/novels', verifyAdmin, async (req, res) => {
                     });
                 }
                 
-                // 2. 🔥🔥 INTERNAL CHAPTER SEPARATOR (SMART FIRST LINE ONLY) 🔥🔥
-                // Note: Export logic needs to match Reader logic for consistency.
                 if (settings.enableChapterSeparator) {
                     const separatorLine = `\n\n${settings.chapterSeparatorText || '________________________________________'}\n\n`;
                     
@@ -1435,18 +1487,16 @@ app.post('/api/admin/novels', verifyAdmin, async (req, res) => {
                     for (let i = 0; i < lines.length; i++) {
                         const lineTrimmed = lines[i].trim();
                         if (lineTrimmed.length > 0) {
-                            // 🔥 Updated Regex: Matches 'Chapter', 'الفصل', 'فصل' OR checks for ':'
                             if (/^(?:الفصل|Chapter|فصل)|:/i.test(lineTrimmed)) {
                                 lines[i] = lines[i] + separatorLine;
                                 replaced = true;
                             }
-                            break; // Stop after first non-empty
+                            break;
                         }
                     }
                     if (replaced) content = lines.join('\n');
                 }
 
-                // 3. Copyright Logic
                 let showCopyright = true;
                 const freq = settings.copyrightFrequency || 'always';
                 const everyX = settings.copyrightEveryX || 5;
@@ -1455,41 +1505,30 @@ app.post('/api/admin/novels', verifyAdmin, async (req, res) => {
 
                 let finalContent = "";
                 
-                // Add Start Copyright + Separator UNDER it
                 if (showCopyright && settings.globalChapterStartText) {
                     finalContent += settings.globalChapterStartText + "\n\n_________________________________\n\n";
                 }
                 
-                // Add Title (Optional)
                 if (includeTitle) {
-                     // 🔥 Updated Title Format: الفصل X: العنوان
                      finalContent += `الفصل ${chap.number}: ${chap.title || ''}\n\n`;
                 }
                 
                 finalContent += content;
 
-                // Add End Copyright + Separator ABOVE it
                 if (showCopyright && settings.globalChapterEndText) {
                     finalContent += "\n\n_________________________________\n\n" + settings.globalChapterEndText;
                 }
 
-                // Add to ZIP Stream (FileName: 1.txt, 2.txt...)
                 archive.append(finalContent, { name: `${chap.number}.txt` });
-                
-                // Small delay to allow GC to work if needed (optional but good for huge lists)
-                // await new Promise(resolve => setImmediate(resolve));
             }
 
-            // Finalize the archive (this triggers the end of the stream)
             await archive.finalize();
 
         } catch (e) {
             console.error("Export Error:", e);
-            // If headers are already sent (streaming started), we can't send JSON error
             if (!res.headersSent) {
                 res.status(500).json({ error: e.message });
             } else {
-                // If streaming, just end it (client will get incomplete file)
                 res.end();
             }
         }
@@ -1499,7 +1538,6 @@ app.post('/api/admin/novels', verifyAdmin, async (req, res) => {
 // 📝 SINGLE & BULK CHAPTER MANAGEMENT API
 // =========================================================
 
-// 1. Add Single Chapter (admin/author)
 app.post('/api/admin/chapters', verifyAdmin, async (req, res) => {
     try {
         const { novelId, number, title, content } = req.body;
@@ -1510,11 +1548,9 @@ app.post('/api/admin/chapters', verifyAdmin, async (req, res) => {
         const novel = await Novel.findById(novelId);
         if (!novel) return res.status(404).json({ message: "الرواية غير موجودة" });
 
-        // Check duplicate
         const exists = novel.chapters.find(c => c.number == number);
         if (exists) return res.status(400).json({ message: "رقم الفصل موجود مسبقاً" });
 
-        // 1. Save to Firestore
         if (firestore) {
             await firestore.collection('novels').doc(novelId).collection('chapters')
                 .doc(number.toString()).set({
@@ -1524,7 +1560,6 @@ app.post('/api/admin/chapters', verifyAdmin, async (req, res) => {
                 });
         }
 
-        // 2. Add to MongoDB chapters array
         novel.chapters.push({
             number: parseInt(number),
             title,
@@ -1542,7 +1577,6 @@ app.post('/api/admin/chapters', verifyAdmin, async (req, res) => {
     }
 });
 
-// 2. Update Chapter (title + content)
 app.put('/api/admin/chapters/:novelId/:chapterNumber', verifyAdmin, async (req, res) => {
     try {
         const { novelId, chapterNumber } = req.params;
@@ -1551,7 +1585,6 @@ app.put('/api/admin/chapters/:novelId/:chapterNumber', verifyAdmin, async (req, 
         const novel = await Novel.findById(novelId);
         if (!novel) return res.status(404).json({ message: "الرواية غير موجودة" });
 
-        // Update MongoDB title
         const chapterIdx = novel.chapters.findIndex(c => c.number == chapterNumber);
         if (chapterIdx === -1) return res.status(404).json({ message: "الفصل غير موجود" });
 
@@ -1560,11 +1593,10 @@ app.put('/api/admin/chapters/:novelId/:chapterNumber', verifyAdmin, async (req, 
         }
         await novel.save();
 
-        // Update Firestore
         if (firestore) {
             const updateData = { lastUpdated: new Date() };
             if (title) updateData.title = title;
-            if (content) updateData.content = content;  // رفع المحتوى المُحدَّث
+            if (content) updateData.content = content;
             await firestore.collection('novels').doc(novelId).collection('chapters')
                 .doc(chapterNumber.toString()).update(updateData);
         }
@@ -1577,7 +1609,6 @@ app.put('/api/admin/chapters/:novelId/:chapterNumber', verifyAdmin, async (req, 
     }
 });
 
-// 3. Delete Single Chapter
 app.delete('/api/admin/chapters/:novelId/:chapterNumber', verifyAdmin, async (req, res) => {
     try {
         const { novelId, chapterNumber } = req.params;
@@ -1585,14 +1616,12 @@ app.delete('/api/admin/chapters/:novelId/:chapterNumber', verifyAdmin, async (re
         const novel = await Novel.findById(novelId);
         if (!novel) return res.status(404).json({ message: "الرواية غير موجودة" });
 
-        // Remove from MongoDB array
         const idx = novel.chapters.findIndex(c => c.number == chapterNumber);
         if (idx !== -1) {
             novel.chapters.splice(idx, 1);
             await novel.save();
         }
 
-        // Remove from Firestore
         if (firestore) {
             await firestore.collection('novels').doc(novelId).collection('chapters')
                 .doc(chapterNumber.toString()).delete();
@@ -1606,7 +1635,6 @@ app.delete('/api/admin/chapters/:novelId/:chapterNumber', verifyAdmin, async (re
     }
 });
 
-// 4. Batch Delete Chapters
 app.post('/api/admin/chapters/batch-delete', verifyAdmin, async (req, res) => {
     try {
         const { novelId, chapterNumbers } = req.body;
@@ -1617,11 +1645,9 @@ app.post('/api/admin/chapters/batch-delete', verifyAdmin, async (req, res) => {
         const novel = await Novel.findById(novelId);
         if (!novel) return res.status(404).json({ message: "الرواية غير موجودة" });
 
-        // Remove from MongoDB
         novel.chapters = novel.chapters.filter(c => !chapterNumbers.includes(c.number));
         await novel.save();
 
-        // Remove from Firestore
         if (firestore) {
             const batch = firestore.batch();
             const chaptersRef = firestore.collection('novels').doc(novelId).collection('chapters');
@@ -1639,8 +1665,7 @@ app.post('/api/admin/chapters/batch-delete', verifyAdmin, async (req, res) => {
     }
 });
 
-// 5. Bulk Upload Chapters (ZIP)
-const multer = require('multer');  // تأكد من تثبيته إن لم يكن موجوداً
+const multer = require('multer');
 const uploadZip = multer({ storage: multer.memoryStorage() });
 
 app.post('/api/admin/chapters/bulk-upload', verifyAdmin, uploadZip.single('zip'), async (req, res) => {
@@ -1661,11 +1686,9 @@ app.post('/api/admin/chapters/bulk-upload', verifyAdmin, uploadZip.single('zip')
         for (const entry of zipEntries) {
             if (entry.isDirectory) continue;
 
-            // Extract chapter number from filename (e.g., "123.txt" or "الفصل 123.txt")
             const nameWithoutExt = path.basename(entry.entryName, path.extname(entry.entryName)).trim();
             let chapterNumber = parseInt(nameWithoutExt);
             if (isNaN(chapterNumber)) {
-                // Try to extract number from complex name
                 const match = nameWithoutExt.match(/(\d+)/);
                 if (match) chapterNumber = parseInt(match[1]);
                 else {
@@ -1675,7 +1698,6 @@ app.post('/api/admin/chapters/bulk-upload', verifyAdmin, uploadZip.single('zip')
             }
 
             let content = zip.readAsText(entry);
-            // Extract title from first non-empty line
             const lines = content.split('\n').filter(l => l.trim());
             let title = `الفصل ${chapterNumber}`;
             if (lines.length > 0) {
@@ -1685,14 +1707,12 @@ app.post('/api/admin/chapters/bulk-upload', verifyAdmin, uploadZip.single('zip')
                 }
             }
 
-            // Check duplicate in novel
             if (novel.chapters.some(c => c.number === chapterNumber)) {
                 errors.push(`موجود: فصل ${chapterNumber}`);
                 continue;
             }
 
             try {
-                // Save to Firestore
                 if (firestore) {
                     await firestore.collection('novels').doc(novelId).collection('chapters')
                         .doc(chapterNumber.toString()).set({
@@ -1702,7 +1722,6 @@ app.post('/api/admin/chapters/bulk-upload', verifyAdmin, uploadZip.single('zip')
                         });
                 }
 
-                // Add to MongoDB
                 novel.chapters.push({
                     number: chapterNumber,
                     title,
@@ -1731,9 +1750,7 @@ app.post('/api/admin/chapters/bulk-upload', verifyAdmin, uploadZip.single('zip')
     // =========================================================
     // 🔄 TRANSFER ALL OWNERSHIP (ADMIN ONLY) - 🔥 FIXED PATH CONFLICT
     // =========================================================
-    // Use a unique path to avoid collision with /api/admin/novels/:id
     app.put('/api/admin/ownership/transfer-all', verifyAdmin, async (req, res) => {
-        // Double check admin role via DB to be safe
         const requestUser = await User.findById(req.user.id);
         if (!requestUser || requestUser.role !== 'admin') {
             return res.status(403).json({ message: "Access Denied. Admins only." });
@@ -1746,14 +1763,11 @@ app.post('/api/admin/chapters/bulk-upload', verifyAdmin, uploadZip.single('zip')
         }
 
         try {
-            // 1. Fetch Target User to get details
             const targetUser = await User.findById(targetUserId);
             if (!targetUser) {
                 return res.status(404).json({ message: "Target User not found" });
             }
 
-            // 2. Update ALL novels in the database
-            // We update 'author' (name) and 'authorEmail' to match the target user
             const result = await Novel.updateMany({}, {
                 $set: {
                     author: targetUser.name,
