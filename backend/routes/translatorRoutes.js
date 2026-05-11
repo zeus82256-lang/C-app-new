@@ -73,9 +73,25 @@ OUTPUT JSON STRUCTURE:
 
 RETURN ONLY JSON:`;
 
-// 🔥 NEW: Unified provider caller supporting Gemini, OpenRouter, and custom OpenAI-compatible APIs
-async function callTranslationProvider(provider, modelName, apiKey, prompt) {
+// 🔥 Check if a model is a translation-only model (cannot do JSON extraction)
+function isTranslationOnlyModel(modelId) {
+    if (!modelId) return false;
+    // Cloudflare translation models – cannot instruct with prompts
+    if (modelId.startsWith('@cf/meta/m2m100')) return true;
+    // Add other translation-only models here if needed
+    return false;
+}
+
+// 🔥 Find the first LLM model in a provider (for extraction)
+function findLLMModel(provider) {
+    if (!provider.models || provider.models.length === 0) return null;
+    return provider.models.find(m => !isTranslationOnlyModel(m.modelId)) || null;
+}
+
+// 🔥 Unified provider caller supporting Gemini, OpenRouter, Cloudflare, and custom APIs
+async function callTranslationProvider(provider, modelName, apiKey, prompt, options = {}) {
     const providerId = (provider.providerId || 'gemini').toLowerCase();
+    const isCloudflare = (providerId === 'cloudflare');
 
     // ---- Gemini native ----
     if (providerId === 'gemini' && !provider.baseUrl) {
@@ -84,6 +100,42 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt) {
         const result = await model.generateContent(prompt);
         const response = await result.response;
         return response.text();
+    }
+
+    // ---- Cloudflare Workers AI ----
+    if (isCloudflare) {
+        // baseUrl should be like: https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/run
+        const baseUrl = provider.baseUrl || '';
+        const url = `${baseUrl.replace(/\/+$/, '')}/${modelName}`;
+
+        const headers = {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json'
+        };
+
+        let body;
+        if (isTranslationOnlyModel(modelName)) {
+            // Translation model (e.g., @cf/meta/m2m100-1.2b)
+            body = {
+                text: prompt,
+                source_lang: options.sourceLang || 'en',
+                target_lang: options.targetLang || 'ar'
+            };
+        } else {
+            // LLM model (e.g., @cf/meta/llama-3.1-8b-instruct)
+            body = {
+                messages: [{ role: 'user', content: prompt }],
+                temperature: 0.3
+            };
+        }
+
+        const res = await axios.post(url, body, { headers, timeout: 120000 });
+        const data = res.data;
+        if (data.success && data.result) {
+            // Translation models return translated_text, LLM models return response
+            return data.result.translated_text || data.result.response || '';
+        }
+        throw new Error(`Cloudflare error: ${JSON.stringify(data)}`);
     }
 
     // ---- OpenAI-compatible (OpenRouter, custom baseUrl) ----
@@ -220,6 +272,7 @@ ${sourceContent}
 
             let translatedText = "";
             let translationSuccess = false;
+            let usedProvider = null; // track which provider succeeded
 
             // ========== Multi-provider with double cycle ==========
             const MAX_CYCLES = 2;
@@ -248,6 +301,7 @@ ${sourceContent}
                             await pushLog(jobId, `1️⃣ مزوّد: ${providerName} | نموذج: ${modelToUse} | مفتاح ${keyIdx + 1}/${keys.length}`, 'info');
                             translatedText = await callTranslationProvider(provider, modelToUse, key, translationInput);
                             translationSuccess = true;
+                            usedProvider = provider; // remember which provider worked
                             await pushLog(jobId, `✅ نجحت الترجمة باستخدام ${providerName}`, 'success');
                             break;
                         } catch (err) {
@@ -305,19 +359,13 @@ ${sourceContent}
             try {
                 await pushLog(jobId, `2️⃣ جاري استخراج المصطلحات...`, 'info');
                 
-                // Use the same successful provider for extraction (first one that worked? we don't track, so use first provider keys)
-                // For simplicity, we try with first provider that has keys
+                // 🔥 NEW: For extraction, pick the best LLM model from the same provider that succeeded,
+                // or fall back to any provider with an LLM.
                 let extractionDone = false;
-                for (const provider of providers) {
-                    if (extractionDone) break;
-                    const modelToUse = provider.selectedModel || (provider.models && provider.models[0]?.modelId) || 'gemini-2.5-flash';
-                    const keys = provider.apiKeys || [];
-                    if (keys.length === 0) continue;
-                    
-                    for (const key of keys) {
-                        try {
-                            // For JSON extraction, we need a model with JSON response. Gemini and most OpenRouter models support it.
-                            const extractionInput = `
+
+                // Helper function to try extraction with a specific provider + model
+                const tryExtraction = async (extProvider, extModelId, extKey) => {
+                    const extractionInput = `
 ${extractPrompt}
 
 English Text (Excerpt):
@@ -326,86 +374,179 @@ English Text (Excerpt):
 Arabic Text (Excerpt):
 """${translatedText.substring(0, 8000)}"""
 `;
-                            let jsonText;
-                            if ((provider.providerId === 'gemini' || !provider.baseUrl) && provider.providerId !== 'openrouter') {
-                                // Gemini native with JSON mode
-                                const genAI = new GoogleGenerativeAI(key);
-                                const modelJSON = genAI.getGenerativeModel({ model: modelToUse });
-                                modelJSON.generationConfig = { responseMimeType: "application/json" };
-                                const resultExt = await modelJSON.generateContent(extractionInput);
-                                const responseExt = await resultExt.response;
-                                jsonText = responseExt.text().trim();
-                            } else {
-                                // Use OpenAI-compatible call; it returns plain text, we'll parse JSON anyway
-                                const extPrompt = extractionInput + "\n\nRETURN ONLY JSON.";
-                                jsonText = await callTranslationProvider(provider, modelToUse, key, extPrompt);
-                            }
-                            
-                            // Cleanup JSON string
-                            if (jsonText.startsWith("```json")) {
-                                jsonText = jsonText.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-                            } else if (jsonText.startsWith("```")) {
-                                jsonText = jsonText.replace(/^```\s*/, "").replace(/\s*```$/, "");
-                            }
+                    let jsonText;
+                    if ((extProvider.providerId === 'gemini' || (!extProvider.baseUrl && extProvider.providerId !== 'openrouter' && extProvider.providerId !== 'cloudflare')) && extProvider.providerId !== 'openrouter' && extProvider.providerId !== 'cloudflare') {
+                        // Gemini native with JSON mode
+                        const genAI = new GoogleGenerativeAI(extKey);
+                        const modelJSON = genAI.getGenerativeModel({ model: extModelId });
+                        modelJSON.generationConfig = { responseMimeType: "application/json" };
+                        const resultExt = await modelJSON.generateContent(extractionInput);
+                        const responseExt = await resultExt.response;
+                        jsonText = responseExt.text().trim();
+                    } else {
+                        // OpenAI-compatible or Cloudflare LLM
+                        const extPrompt = extractionInput + "\n\nRETURN ONLY JSON.";
+                        jsonText = await callTranslationProvider(extProvider, extModelId, extKey, extPrompt);
+                    }
+                    
+                    // Cleanup JSON string
+                    if (jsonText.startsWith("```json")) {
+                        jsonText = jsonText.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+                    } else if (jsonText.startsWith("```")) {
+                        jsonText = jsonText.replace(/^```\s*/, "").replace(/\s*```$/, "");
+                    }
 
-                            let parsedTerms = [];
+                    let parsedTerms = [];
+                    try {
+                        const parsed = JSON.parse(jsonText);
+                        if (Array.isArray(parsed)) {
+                            parsedTerms = parsed;
+                        } else if (parsed.newTerms && Array.isArray(parsed.newTerms)) {
+                            parsedTerms = parsed.newTerms;
+                        } else if (parsed.terms && Array.isArray(parsed.terms)) {
+                            parsedTerms = parsed.terms;
+                        }
+                    } catch (e) {
+                        console.log("JSON Parse Error", e);
+                    }
+
+                    return parsedTerms;
+                };
+
+                // ---- STEP 1: Use the same provider that translated successfully ----
+                if (usedProvider) {
+                    const providerId = usedProvider.providerId;
+                    // If the model used for translation is an LLM (not translation-only), use it directly
+                    if (!isTranslationOnlyModel(usedProvider.selectedModel)) {
+                        const keys = usedProvider.apiKeys || [];
+                        for (const key of keys) {
                             try {
-                                const parsed = JSON.parse(jsonText);
-                                if (Array.isArray(parsed)) {
-                                    parsedTerms = parsed;
-                                } else if (parsed.newTerms && Array.isArray(parsed.newTerms)) {
-                                    parsedTerms = parsed.newTerms;
-                                } else if (parsed.terms && Array.isArray(parsed.terms)) {
-                                    parsedTerms = parsed.terms;
-                                }
-                            } catch (e) {
-                                console.log("JSON Parse Error", e);
-                            }
-
-                            if (parsedTerms.length > 0) {
-                                let newTermsCount = 0;
-                                for (const termObj of parsedTerms) {
-                                    const rawTerm = termObj.name || termObj.term;
-                                    const translation = termObj.translation;
-                                    
-                                    if (rawTerm && translation) {
-                                        let category = termObj.category ? termObj.category.toLowerCase() : 'other';
-                                        if (category === 'character') category = 'characters';
-                                        else if (category === 'location') category = 'locations';
-                                        else if (category === 'item') category = 'items';
-                                        else if (category === 'rank') category = 'ranks';
-                                        else if (category === 'concept') category = 'other';
-                                        
-                                        if (!['characters', 'locations', 'items', 'ranks'].includes(category)) {
-                                            category = 'other';
-                                        }
-
-                                        await Glossary.updateOne(
-                                            { novelId: freshNovel._id, term: rawTerm }, 
-                                            { 
-                                                $set: { 
-                                                    translation: translation,
-                                                    category: category,
-                                                    description: termObj.description || ''
+                                const terms = await tryExtraction(usedProvider, usedProvider.selectedModel, key);
+                                if (terms.length > 0) {
+                                    // Save terms...
+                                    let newTermsCount = 0;
+                                    for (const termObj of terms) {
+                                        const rawTerm = termObj.name || termObj.term;
+                                        const translation = termObj.translation;
+                                        if (rawTerm && translation) {
+                                            let category = termObj.category ? termObj.category.toLowerCase() : 'other';
+                                            if (category === 'character') category = 'characters';
+                                            else if (category === 'location') category = 'locations';
+                                            else if (category === 'item') category = 'items';
+                                            else if (category === 'rank') category = 'ranks';
+                                            else if (category === 'concept') category = 'other';
+                                            if (!['characters', 'locations', 'items', 'ranks'].includes(category)) category = 'other';
+                                            await Glossary.updateOne(
+                                                { novelId: freshNovel._id, term: rawTerm }, 
+                                                { 
+                                                    $set: { translation: translation, category: category, description: termObj.description || '' },
+                                                    $setOnInsert: { autoGenerated: true }
                                                 },
-                                                $setOnInsert: { autoGenerated: true }
-                                            },
-                                            { upsert: true }
-                                        );
-                                        newTermsCount++;
+                                                { upsert: true }
+                                            );
+                                            newTermsCount++;
+                                        }
                                     }
+                                    if (newTermsCount > 0) await pushLog(jobId, `✅ تم إضافة/تحديث ${newTermsCount} مصطلح للمسرد`, 'success');
+                                    else await pushLog(jobId, `ℹ️ لم يتم استخراج مصطلحات جديدة`, 'info');
+                                    extractionDone = true;
+                                    break;
                                 }
-                                if (newTermsCount > 0) await pushLog(jobId, `✅ تم إضافة/تحديث ${newTermsCount} مصطلح للمسرد`, 'success');
-                            } else {
-                                await pushLog(jobId, `ℹ️ لم يتم استخراج مصطلحات جديدة`, 'info');
+                            } catch (extErr) {
+                                console.error("Extraction error with same provider:", extErr.message);
                             }
-                            extractionDone = true;
-                            break;
-                        } catch (extErr) {
-                            console.error("Extraction error:", extErr.message);
+                        }
+                    } else {
+                        // Translation-only model – try to find an LLM model in the same provider
+                        const llmModel = findLLMModel(usedProvider);
+                        if (llmModel) {
+                            const keys = usedProvider.apiKeys || [];
+                            for (const key of keys) {
+                                try {
+                                    const terms = await tryExtraction(usedProvider, llmModel.modelId, key);
+                                    if (terms.length > 0) {
+                                        let newTermsCount = 0;
+                                        for (const termObj of terms) {
+                                            const rawTerm = termObj.name || termObj.term;
+                                            const translation = termObj.translation;
+                                            if (rawTerm && translation) {
+                                                let category = termObj.category ? termObj.category.toLowerCase() : 'other';
+                                                if (category === 'character') category = 'characters';
+                                                else if (category === 'location') category = 'locations';
+                                                else if (category === 'item') category = 'items';
+                                                else if (category === 'rank') category = 'ranks';
+                                                else if (category === 'concept') category = 'other';
+                                                if (!['characters', 'locations', 'items', 'ranks'].includes(category)) category = 'other';
+                                                await Glossary.updateOne(
+                                                    { novelId: freshNovel._id, term: rawTerm }, 
+                                                    { 
+                                                        $set: { translation: translation, category: category, description: termObj.description || '' },
+                                                        $setOnInsert: { autoGenerated: true }
+                                                    },
+                                                    { upsert: true }
+                                                );
+                                                newTermsCount++;
+                                            }
+                                        }
+                                        if (newTermsCount > 0) await pushLog(jobId, `✅ تم إضافة/تحديث ${newTermsCount} مصطلح للمسرد`, 'success');
+                                        else await pushLog(jobId, `ℹ️ لم يتم استخراج مصطلحات جديدة`, 'info');
+                                        extractionDone = true;
+                                        break;
+                                    }
+                                } catch (extErr) {
+                                    console.error("Extraction error with LLM model:", extErr.message);
+                                }
+                            }
                         }
                     }
                 }
+
+                // ---- STEP 2: Fallback – any provider with an LLM ----
+                if (!extractionDone) {
+                    for (const provider of providers) {
+                        if (extractionDone) break;
+                        const llmModel = findLLMModel(provider);
+                        if (!llmModel) continue;
+                        const keys = provider.apiKeys || [];
+                        for (const key of keys) {
+                            try {
+                                const terms = await tryExtraction(provider, llmModel.modelId, key);
+                                if (terms.length > 0) {
+                                    let newTermsCount = 0;
+                                    for (const termObj of terms) {
+                                        const rawTerm = termObj.name || termObj.term;
+                                        const translation = termObj.translation;
+                                        if (rawTerm && translation) {
+                                            let category = termObj.category ? termObj.category.toLowerCase() : 'other';
+                                            if (category === 'character') category = 'characters';
+                                            else if (category === 'location') category = 'locations';
+                                            else if (category === 'item') category = 'items';
+                                            else if (category === 'rank') category = 'ranks';
+                                            else if (category === 'concept') category = 'other';
+                                            if (!['characters', 'locations', 'items', 'ranks'].includes(category)) category = 'other';
+                                            await Glossary.updateOne(
+                                                { novelId: freshNovel._id, term: rawTerm }, 
+                                                { 
+                                                    $set: { translation: translation, category: category, description: termObj.description || '' },
+                                                    $setOnInsert: { autoGenerated: true }
+                                                },
+                                                { upsert: true }
+                                            );
+                                            newTermsCount++;
+                                        }
+                                    }
+                                    if (newTermsCount > 0) await pushLog(jobId, `✅ تم إضافة/تحديث ${newTermsCount} مصطلح للمسرد`, 'success');
+                                    else await pushLog(jobId, `ℹ️ لم يتم استخراج مصطلحات جديدة`, 'info');
+                                    extractionDone = true;
+                                    break;
+                                }
+                            } catch (extErr) {
+                                console.error("Extraction error fallback:", extErr.message);
+                            }
+                        }
+                    }
+                }
+
                 if (!extractionDone) {
                     await pushLog(jobId, `⚠️ فشل استخراج المصطلحات لهذا الفصل`, 'warning');
                 }
