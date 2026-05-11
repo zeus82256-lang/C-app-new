@@ -1,4 +1,3 @@
-
 const mongoose = require('mongoose');
 
 const settingsSchema = new mongoose.Schema({
@@ -67,6 +66,20 @@ OUTPUT JSON STRUCTURE:
 RETURN ONLY JSON:` },
     translatorApiKeys: [{ type: String }], // Global Keys for Translator
     
+    // 🔥 NEW: Multi-provider translation support
+    translationProviders: [{
+        providerId: { type: String, required: true }, // e.g., 'gemini', 'openrouter', 'custom1'
+        name: { type: String, required: true }, // display name
+        baseUrl: { type: String, default: '' }, // endpoint for custom/openrouter
+        models: [{
+            modelId: { type: String, required: true },
+            modelName: { type: String, required: true }
+        }],
+        apiKeys: [{ type: String }], // API keys for this provider
+        selectedModel: { type: String }, // the currently active model for this provider
+        priority: { type: Number, default: 0 } // order in fallback sequence
+    }],
+
     // 🔥 Title Generator Specific Settings
     titleGenModel: { type: String, default: 'gemini-2.5-flash' },
     titleGenPrompt: { type: String, default: 'Read the following chapter content and suggest a short, engaging, and professional Arabic title for it (Maximum 6 words). Output ONLY the Arabic title string without any quotes, prefixes, or chapter numbers.' },
