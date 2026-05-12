@@ -98,7 +98,7 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
             };
         }
 
-        const res = await axios.post(url, body, { headers, timeout: 120000 });
+        const res = await axios.post(url, body, { headers, timeout: 500000 });
         const data = res.data;
         if (data.success && data.result) {
             return data.result.translated_text || data.result.response || '';
@@ -125,7 +125,7 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
         temperature: 0.3
     };
 
-    const res = await axios.post(url, body, { headers, timeout: 120000 });
+    const res = await axios.post(url, body, { headers, timeout: 500000 });
     const choice = res.data?.choices?.[0];
     if (choice && choice.message && choice.message.content) {
         return choice.message.content;
