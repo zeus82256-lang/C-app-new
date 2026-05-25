@@ -66,16 +66,16 @@ OUTPUT JSON STRUCTURE:
 RETURN ONLY JSON:` },
     translatorApiKeys: [{ type: String }], // Global Keys for Translator
     
-    // 🔥 NEW: Multi-provider translation support
+    // 🔥 NEW: Multi-provider translation support (including ChatGPT Android)
     translationProviders: [{
-        providerId: { type: String, required: true }, // e.g., 'gemini', 'openrouter', 'custom1'
+        providerId: { type: String, required: true }, // e.g., 'gemini', 'openrouter', 'chatgpt-android', 'custom1'
         name: { type: String, required: true }, // display name
         baseUrl: { type: String, default: '' }, // endpoint for custom/openrouter
         models: [{
             modelId: { type: String, required: true },
             modelName: { type: String, required: true }
         }],
-        apiKeys: [{ type: String }], // API keys for this provider
+        apiKeys: [{ type: String }], // API keys for this provider (for ChatGPT Android, can be empty or placeholder)
         selectedModel: { type: String }, // the currently active model for this provider
         priority: { type: Number, default: 0 } // order in fallback sequence
     }],
