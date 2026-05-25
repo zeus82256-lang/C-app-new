@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const axios = require('axios'); // 🔥 NEW: for OpenRouter and custom providers
+const { v4: uuidv4 } = require('uuid'); // 🔥 NEW: for ChatGPT Android API
 const Novel = require('../models/novel.model.js');
 const Glossary = require('../models/glossary.model.js');
 const TranslationJob = require('../models/translationJob.model.js');
@@ -88,7 +89,7 @@ function findLLMModel(provider) {
     return provider.models.find(m => !isTranslationOnlyModel(m.modelId)) || null;
 }
 
-// 🔥 Unified provider caller supporting Gemini, OpenRouter, Cloudflare, and custom APIs
+// 🔥 Unified provider caller supporting Gemini, OpenRouter, Cloudflare, custom APIs, and ChatGPT Android
 async function callTranslationProvider(provider, modelName, apiKey, prompt, options = {}) {
     const providerId = (provider.providerId || 'gemini').toLowerCase();
     const isCloudflare = (providerId === 'cloudflare');
@@ -100,6 +101,122 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
         const result = await model.generateContent(prompt);
         const response = await result.response;
         return response.text();
+    }
+
+    // ---- ChatGPT Android API (Reverse Engineered) ----
+    if (providerId === 'chatgpt-android') {
+        // Helper function to get conduit token
+        async function getConduitToken() {
+            const prepareUrl = "https://android.chat.openai.com/backend-api/f/conversation/prepare";
+            const preparePayload = {
+                action: "next",
+                messages: [],
+                model: "auto",
+                history_and_training_disabled: false,
+                fork_from_shared_post: false,
+                enable_message_followups: false,
+                force_use_sse: false,
+                force_use_search: null,
+                force_paragen: false,
+                supports_buffering: false,
+                timezone: "Africa/Cairo",
+                timezone_offset_min: -180,
+                system_hints: [],
+                is_onboarding_conversation: false
+            };
+            const staticHeaders = {
+                'User-Agent': "ChatGPT/1.2027.000 (Android 15; RMX3834; build 2700000)",
+                'Accept': "application/json",
+                'Accept-Encoding': "gzip",
+                'Content-Type': "application/json",
+                'oai-package-name': "com.Modderme",
+                'oai-client-type': "android",
+                'oai-device-id': "84329164059103383964",
+                'accept-language': "en-US,en;q=0.9,ar-EG;q=0.8,ar;q=0.7",
+                'x-device-tier': "lower_mid",
+                'chatgpt-account-id': "84329164059103383964",
+                'chatgpt-residency-region': "no_constraint",
+                'Cookie': "__cflb=04dTod5Jcx9DYJeMeKbyj32ve2B3i9pLVRxJxEAaKD; _cfuvid=PXu6q36jhfgxnsdFkDmqwLzCfHOSgG588liApL0856A-1777834828.2542033-1.0.1.1-JFC10kaoqt9_IXzxrixI6zZuAm.TzRPF14QfJiD43MQ; oai-ll=; oai-sc=0gAAAAABp959mEmk6Qr5JsnqYMpWx1-15EJhCVV2EV6SQpet7Z7SjNuAT0x2cVScJu_g_TE9_NXidYfi68DtZfl4ImOQIRkr8PF-R-v9PUl7IPGtYiF1rwqdVm0NjapKV1lROdrmNGkiuNgcVMGYXMrP45hfmmQKiCQ5MBQLjfI7XI2tKSLvHT3WkjFEnmDZIRtVz85lyV9pxK181GJRARSxM53m06IfD3jEDjVbSR5QDQbL6Nxl4l7c; __cf_bm=y_lpbPz3viZYHSAd8nCLtIlm2JBCYWvEwOz8xvvwFow-1777835878.3854406-1.0.1.1-Muu0UxZKqufJhSVDELNGz2fO12Xcqc.oJ3hINoXkGIc2tGinJqVnmBTM7EAKDRfqdl1WdKtZ06fuCJ3y5DddxeMPVlBNX_r7daQReYa59qkFBwXOF3p4W3lwU.tdPN9A"
+            };
+            try {
+                const prepareRes = await axios.post(prepareUrl, preparePayload, { headers: staticHeaders, timeout: 30000 });
+                if (prepareRes.status === 200 && prepareRes.data.conduit_token) {
+                    return prepareRes.data.conduit_token;
+                }
+                throw new Error("No conduit token in response");
+            } catch (err) {
+                throw new Error(`ChatGPT Android: failed to get conduit token: ${err.message}`);
+            }
+        }
+
+        // Get conduit token
+        const conduitToken = await getConduitToken();
+        
+        // Build headers with conduit token and session IDs
+        const chatHeaders = {
+            'User-Agent': "ChatGPT/1.2027.000 (Android 15; RMX3834; build 2700000)",
+            'Accept': "application/json",
+            'Accept-Encoding': "gzip",
+            'Content-Type': "application/json",
+            'oai-package-name': "com.Modderme",
+            'oai-client-type': "android",
+            'oai-device-id': "84329164059103383964",
+            'accept-language': "en-US,en;q=0.9,ar-EG;q=0.8,ar;q=0.7",
+            'x-device-tier': "lower_mid",
+            'chatgpt-account-id': "84329164059103383964",
+            'chatgpt-residency-region': "no_constraint",
+            'Cookie': "__cflb=04dTod5Jcx9DYJeMeKbyj32ve2B3i9pLVRxJxEAaKD; _cfuvid=PXu6q36jhfgxnsdFkDmqwLzCfHOSgG588liApL0856A-1777834828.2542033-1.0.1.1-JFC10kaoqt9_IXzxrixI6zZuAm.TzRPF14QfJiD43MQ; oai-ll=; oai-sc=0gAAAAABp959mEmk6Qr5JsnqYMpWx1-15EJhCVV2EV6SQpet7Z7SjNuAT0x2cVScJu_g_TE9_NXidYfi68DtZfl4ImOQIRkr8PF-R-v9PUl7IPGtYiF1rwqdVm0NjapKV1lROdrmNGkiuNgcVMGYXMrP45hfmmQKiCQ5MBQLjfI7XI2tKSLvHT3WkjFEnmDZIRtVz85lyV9pxK181GJRARSxM53m06IfD3jEDjVbSR5QDQbL6Nxl4l7c; __cf_bm=y_lpbPz3viZYHSAd8nCLtIlm2JBCYWvEwOz8xvvwFow-1777835878.3854406-1.0.1.1-Muu0UxZKqufJhSVDELNGz2fO12Xcqc.oJ3hINoXkGIc2tGinJqVnmBTM7EAKDRfqdl1WdKtZ06fuCJ3y5DddxeMPVlBNX_r7daQReYa59qkFBwXOF3p4W3lwU.tdPN9A",
+            'Conduit-Token': conduitToken,
+            'x-oai-convo-session-id': uuidv4(),
+            'x-oai-turn-trace-id': uuidv4(),
+            'x-openai-target-path': '/backend-api/f/conversation'
+        };
+        
+        const messageId = uuidv4();
+        const parentMessageId = uuidv4();
+        
+        const payload = {
+            action: "next",
+            messages: [{
+                id: messageId,
+                author: { role: "user" },
+                content: { content_type: "text", parts: [prompt] },
+                status: "finished_successfully"
+            }],
+            model: modelName || "auto",
+            parent_message_id: parentMessageId,
+            stream: false,
+            timezone: "Africa/Cairo",
+            timezone_offset_min: -180
+        };
+        
+        const chatUrl = 'https://android.chat.openai.com/backend-api/f/conversation';
+        const response = await axios.post(chatUrl, payload, { headers: chatHeaders, timeout: options.timeout || 500000, responseType: 'stream' });
+        
+        // Collect full response from stream
+        let fullResponse = "";
+        await new Promise((resolve, reject) => {
+            response.data.on('data', (chunk) => {
+                const lines = chunk.toString().split('\n');
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        const data = line.slice(6);
+                        if (data === '[DONE]') continue;
+                        try {
+                            const event = JSON.parse(data);
+                            if (event.message && event.message.content && event.message.content.parts && event.message.content.parts[0]) {
+                                fullResponse = event.message.content.parts[0];
+                            }
+                        } catch (e) {}
+                    }
+                }
+            });
+            response.data.on('end', () => resolve());
+            response.data.on('error', reject);
+        });
+        
+        if (!fullResponse) throw new Error("ChatGPT Android: empty response");
+        return fullResponse;
     }
 
     // ---- Cloudflare Workers AI ----
@@ -375,7 +492,7 @@ Arabic Text (Excerpt):
 """${translatedText.substring(0, 8000)}"""
 `;
                     let jsonText;
-                    if ((extProvider.providerId === 'gemini' || (!extProvider.baseUrl && extProvider.providerId !== 'openrouter' && extProvider.providerId !== 'cloudflare')) && extProvider.providerId !== 'openrouter' && extProvider.providerId !== 'cloudflare') {
+                    if ((extProvider.providerId === 'gemini' || (!extProvider.baseUrl && extProvider.providerId !== 'openrouter' && extProvider.providerId !== 'cloudflare' && extProvider.providerId !== 'chatgpt-android')) && extProvider.providerId !== 'openrouter' && extProvider.providerId !== 'cloudflare' && extProvider.providerId !== 'chatgpt-android') {
                         // Gemini native with JSON mode
                         const genAI = new GoogleGenerativeAI(extKey);
                         const modelJSON = genAI.getGenerativeModel({ model: extModelId });
@@ -384,7 +501,7 @@ Arabic Text (Excerpt):
                         const responseExt = await resultExt.response;
                         jsonText = responseExt.text().trim();
                     } else {
-                        // OpenAI-compatible or Cloudflare LLM
+                        // OpenAI-compatible or Cloudflare LLM or ChatGPT Android
                         const extPrompt = extractionInput + "\n\nRETURN ONLY JSON.";
                         jsonText = await callTranslationProvider(extProvider, extModelId, extKey, extPrompt);
                     }
