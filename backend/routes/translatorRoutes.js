@@ -89,7 +89,7 @@ function findLLMModel(provider) {
     return provider.models.find(m => !isTranslationOnlyModel(m.modelId)) || null;
 }
 
-// 🔥 NEW: Helper to detect if a provider is ChatGPT Android (by name or model)
+// 🔥 Helper to detect if a provider is ChatGPT Android (by name or model)
 function isChatGPTAndroidProvider(provider) {
     const name = (provider.name || '').toLowerCase();
     const model = (provider.selectedModel || '').toLowerCase();
@@ -98,13 +98,31 @@ function isChatGPTAndroidProvider(provider) {
     return name.includes('chatgpt') || name.includes('gpt') || model === 'auto' || hasAutoModel;
 }
 
+// 🔥 Helper to truncate prompt if too long (to avoid 413 error)
+function truncatePromptIfNeeded(prompt, maxLength = 10000) {
+    if (prompt.length <= maxLength) return prompt;
+    // Keep first 8000 chars and last 2000 chars
+    const firstPart = prompt.substring(0, 8000);
+    const lastPart = prompt.substring(prompt.length - 2000);
+    return `${firstPart}\n\n...[تم اقتطاع النص بسبب طوله، ثم استئناف من النهاية]...\n\n${lastPart}`;
+}
+
 // 🔥 Unified provider caller supporting Gemini, OpenRouter, Cloudflare, custom APIs, and ChatGPT Android
 async function callTranslationProvider(provider, modelName, apiKey, prompt, options = {}) {
     const providerId = (provider.providerId || 'gemini').toLowerCase();
     const isCloudflare = (providerId === 'cloudflare');
     const isChatGPT = isChatGPTAndroidProvider(provider);
 
-    // ---- ChatGPT Android API (Auto-detect by name or model) ----
+    // ---- Gemini native ----
+    if (providerId === 'gemini' && !provider.baseUrl) {
+        const genAI = new GoogleGenerativeAI(apiKey);
+        const model = genAI.getGenerativeModel({ model: modelName });
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        return response.text();
+    }
+
+    // ---- ChatGPT Android API (Reverse Engineered) ----
     if (isChatGPT || providerId === 'chatgpt-android') {
         // Helper function to get conduit token
         async function getConduitToken() {
@@ -150,6 +168,9 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
             }
         }
 
+        // 🔥 FIX: Truncate prompt if too large to avoid 413 error
+        const finalPrompt = truncatePromptIfNeeded(prompt, 10000);
+        
         // Get conduit token
         const conduitToken = await getConduitToken();
         
@@ -181,7 +202,7 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
             messages: [{
                 id: messageId,
                 author: { role: "user" },
-                content: { content_type: "text", parts: [prompt] },
+                content: { content_type: "text", parts: [finalPrompt] },
                 status: "finished_successfully"
             }],
             model: modelName || "auto",
@@ -218,15 +239,6 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
         
         if (!fullResponse) throw new Error("ChatGPT Android: empty response");
         return fullResponse;
-    }
-
-    // ---- Gemini native ----
-    if (providerId === 'gemini' && !provider.baseUrl) {
-        const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: modelName });
-        const result = await model.generateContent(prompt);
-        const response = await result.response;
-        return response.text();
     }
 
     // ---- Cloudflare Workers AI ----
@@ -415,27 +427,25 @@ ${sourceContent}
                     if (translationSuccess) break;
                     const providerName = provider.name || provider.providerId;
                     const modelToUse = provider.selectedModel || (provider.models && provider.models[0]?.modelId) || 'gemini-2.5-flash';
-                    const keys = provider.apiKeys || [];
+                    let keys = provider.apiKeys || [];
                     
-                    // 🔥🔥 FIX: Allow ChatGPT Android provider to have empty keys
                     const isChatGPT = isChatGPTAndroidProvider(provider);
                     
                     if (keys.length === 0 && !isChatGPT) {
                         await pushLog(jobId, `⚠️ المزوّد ${providerName} ليس لديه مفاتيح – تخطيه`, 'warning');
                         continue;
                     }
-
-                    // For non-ChatGPT providers, we need at least one key. For ChatGPT, we create a dummy key if empty
-                    let effectiveKeys = keys;
+                    
+                    // For ChatGPT with empty keys, create a dummy key
                     if (isChatGPT && keys.length === 0) {
-                        effectiveKeys = ['dummy-key-for-chatgpt-android'];
+                        keys = ['dummy-key-for-chatgpt-android'];
                         await pushLog(jobId, `🔑 مزوّد ChatGPT Android: سيتم استخدام مفتاح وهمي (لا يحتاج مفتاح حقيقي)`, 'info');
                     }
 
-                    for (let keyIdx = 0; keyIdx < effectiveKeys.length; keyIdx++) {
-                        const key = effectiveKeys[keyIdx];
+                    for (let keyIdx = 0; keyIdx < keys.length; keyIdx++) {
+                        const key = keys[keyIdx];
                         try {
-                            await pushLog(jobId, `1️⃣ مزوّد: ${providerName} | نموذج: ${modelToUse} | مفتاح ${keyIdx + 1}/${effectiveKeys.length}`, 'info');
+                            await pushLog(jobId, `1️⃣ مزوّد: ${providerName} | نموذج: ${modelToUse} | مفتاح ${keyIdx + 1}/${keys.length}`, 'info');
                             translatedText = await callTranslationProvider(provider, modelToUse, key, translationInput);
                             translationSuccess = true;
                             usedProvider = provider; // remember which provider worked
@@ -444,7 +454,7 @@ ${sourceContent}
                         } catch (err) {
                             console.error(`❌ فشل ${providerName} مفتاح ${keyIdx+1}: ${err.message}`);
                             await pushLog(jobId, `❌ فشل: ${err.message}`, 'warning');
-                            if (keyIdx < effectiveKeys.length - 1) {
+                            if (keyIdx < keys.length - 1) {
                                 await delay(3000);
                             }
                         }
