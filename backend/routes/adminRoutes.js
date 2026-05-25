@@ -61,10 +61,20 @@ function findLLMModel(provider) {
     return provider.models.find(m => !isTranslationOnlyModel(m.modelId)) || null;
 }
 
+// 🔥 Helper to detect if a provider is ChatGPT Android (by name or model)
+function isChatGPTAndroidProvider(provider) {
+    const name = (provider.name || '').toLowerCase();
+    const model = (provider.selectedModel || '').toLowerCase();
+    // Check if any model has modelId 'auto' or contains 'chatgpt'
+    const hasAutoModel = provider.models && provider.models.some(m => (m.modelId || '').toLowerCase() === 'auto');
+    return name.includes('chatgpt') || name.includes('gpt') || model === 'auto' || hasAutoModel;
+}
+
 // 🔥 NEW: Unified provider caller (same as translatorRoutes) – now with Cloudflare support
 async function callTranslationProvider(provider, modelName, apiKey, prompt, options = {}) {
     const providerId = (provider.providerId || 'gemini').toLowerCase();
     const isCloudflare = (providerId === 'cloudflare');
+    const isChatGPT = isChatGPTAndroidProvider(provider);
 
     // ---- Gemini native ----
     if (providerId === 'gemini' && !provider.baseUrl) {
@@ -76,7 +86,7 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
     }
 
     // ---- ChatGPT Android API (Reverse Engineered) ----
-    if (providerId === 'chatgpt-android') {
+    if (isChatGPT || providerId === 'chatgpt-android') {
         // Helper function to get conduit token
         async function getConduitToken() {
             const prepareUrl = "https://android.chat.openai.com/backend-api/f/conversation/prepare";
@@ -363,11 +373,19 @@ async function translateNovelMetadata(novelId, originalData, jobId = null) {
                 if (parsed) break;
                 const providerName = provider.name || provider.providerId;
                 const modelToUse = provider.selectedModel || (provider.models && provider.models[0]?.modelId) || 'gemini-1.5-flash';
-                const keys = provider.apiKeys || [];
-
-                if (keys.length === 0) {
+                let keys = provider.apiKeys || [];
+                
+                // 🔥 Allow ChatGPT Android provider to have empty keys
+                const isChatGPT = isChatGPTAndroidProvider(provider);
+                if (keys.length === 0 && !isChatGPT) {
                     await logScraper(`⚠️ المزوّد ${providerName} ليس لديه مفاتيح – تخطيه`, 'warning');
                     continue;
+                }
+                
+                // For ChatGPT with empty keys, create a dummy key
+                if (isChatGPT && keys.length === 0) {
+                    keys = ['dummy-key-for-chatgpt-android'];
+                    await logScraper(`🔑 مزوّد ChatGPT Android: سيتم استخدام مفتاح وهمي (لا يحتاج مفتاح حقيقي)`, 'info');
                 }
 
                 for (let keyIdx = 0; keyIdx < keys.length; keyIdx++) {
