@@ -89,22 +89,23 @@ function findLLMModel(provider) {
     return provider.models.find(m => !isTranslationOnlyModel(m.modelId)) || null;
 }
 
+// 🔥 NEW: Helper to detect if a provider is ChatGPT Android (by name or model)
+function isChatGPTAndroidProvider(provider) {
+    const name = (provider.name || '').toLowerCase();
+    const model = (provider.selectedModel || '').toLowerCase();
+    // Check if any model has modelId 'auto' or contains 'chatgpt'
+    const hasAutoModel = provider.models && provider.models.some(m => (m.modelId || '').toLowerCase() === 'auto');
+    return name.includes('chatgpt') || name.includes('gpt') || model === 'auto' || hasAutoModel;
+}
+
 // 🔥 Unified provider caller supporting Gemini, OpenRouter, Cloudflare, custom APIs, and ChatGPT Android
 async function callTranslationProvider(provider, modelName, apiKey, prompt, options = {}) {
     const providerId = (provider.providerId || 'gemini').toLowerCase();
     const isCloudflare = (providerId === 'cloudflare');
+    const isChatGPT = isChatGPTAndroidProvider(provider);
 
-    // ---- Gemini native ----
-    if (providerId === 'gemini' && !provider.baseUrl) {
-        const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: modelName });
-        const result = await model.generateContent(prompt);
-        const response = await result.response;
-        return response.text();
-    }
-
-    // ---- ChatGPT Android API (Reverse Engineered) ----
-    if (providerId === 'chatgpt-android') {
+    // ---- ChatGPT Android API (Auto-detect by name or model) ----
+    if (isChatGPT || providerId === 'chatgpt-android') {
         // Helper function to get conduit token
         async function getConduitToken() {
             const prepareUrl = "https://android.chat.openai.com/backend-api/f/conversation/prepare";
@@ -217,6 +218,15 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
         
         if (!fullResponse) throw new Error("ChatGPT Android: empty response");
         return fullResponse;
+    }
+
+    // ---- Gemini native ----
+    if (providerId === 'gemini' && !provider.baseUrl) {
+        const genAI = new GoogleGenerativeAI(apiKey);
+        const model = genAI.getGenerativeModel({ model: modelName });
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        return response.text();
     }
 
     // ---- Cloudflare Workers AI ----
@@ -407,15 +417,25 @@ ${sourceContent}
                     const modelToUse = provider.selectedModel || (provider.models && provider.models[0]?.modelId) || 'gemini-2.5-flash';
                     const keys = provider.apiKeys || [];
                     
-                    if (keys.length === 0) {
+                    // 🔥🔥 FIX: Allow ChatGPT Android provider to have empty keys
+                    const isChatGPT = isChatGPTAndroidProvider(provider);
+                    
+                    if (keys.length === 0 && !isChatGPT) {
                         await pushLog(jobId, `⚠️ المزوّد ${providerName} ليس لديه مفاتيح – تخطيه`, 'warning');
                         continue;
                     }
 
-                    for (let keyIdx = 0; keyIdx < keys.length; keyIdx++) {
-                        const key = keys[keyIdx];
+                    // For non-ChatGPT providers, we need at least one key. For ChatGPT, we create a dummy key if empty
+                    let effectiveKeys = keys;
+                    if (isChatGPT && keys.length === 0) {
+                        effectiveKeys = ['dummy-key-for-chatgpt-android'];
+                        await pushLog(jobId, `🔑 مزوّد ChatGPT Android: سيتم استخدام مفتاح وهمي (لا يحتاج مفتاح حقيقي)`, 'info');
+                    }
+
+                    for (let keyIdx = 0; keyIdx < effectiveKeys.length; keyIdx++) {
+                        const key = effectiveKeys[keyIdx];
                         try {
-                            await pushLog(jobId, `1️⃣ مزوّد: ${providerName} | نموذج: ${modelToUse} | مفتاح ${keyIdx + 1}/${keys.length}`, 'info');
+                            await pushLog(jobId, `1️⃣ مزوّد: ${providerName} | نموذج: ${modelToUse} | مفتاح ${keyIdx + 1}/${effectiveKeys.length}`, 'info');
                             translatedText = await callTranslationProvider(provider, modelToUse, key, translationInput);
                             translationSuccess = true;
                             usedProvider = provider; // remember which provider worked
@@ -424,7 +444,7 @@ ${sourceContent}
                         } catch (err) {
                             console.error(`❌ فشل ${providerName} مفتاح ${keyIdx+1}: ${err.message}`);
                             await pushLog(jobId, `❌ فشل: ${err.message}`, 'warning');
-                            if (keyIdx < keys.length - 1) {
+                            if (keyIdx < effectiveKeys.length - 1) {
                                 await delay(3000);
                             }
                         }
@@ -492,7 +512,7 @@ Arabic Text (Excerpt):
 """${translatedText.substring(0, 8000)}"""
 `;
                     let jsonText;
-                    if ((extProvider.providerId === 'gemini' || (!extProvider.baseUrl && extProvider.providerId !== 'openrouter' && extProvider.providerId !== 'cloudflare' && extProvider.providerId !== 'chatgpt-android')) && extProvider.providerId !== 'openrouter' && extProvider.providerId !== 'cloudflare' && extProvider.providerId !== 'chatgpt-android') {
+                    if ((extProvider.providerId === 'gemini' || (!extProvider.baseUrl && extProvider.providerId !== 'openrouter' && extProvider.providerId !== 'cloudflare' && !isChatGPTAndroidProvider(extProvider))) && extProvider.providerId !== 'openrouter' && extProvider.providerId !== 'cloudflare' && !isChatGPTAndroidProvider(extProvider)) {
                         // Gemini native with JSON mode
                         const genAI = new GoogleGenerativeAI(extKey);
                         const modelJSON = genAI.getGenerativeModel({ model: extModelId });
@@ -535,7 +555,8 @@ Arabic Text (Excerpt):
                     const providerId = usedProvider.providerId;
                     // If the model used for translation is an LLM (not translation-only), use it directly
                     if (!isTranslationOnlyModel(usedProvider.selectedModel)) {
-                        const keys = usedProvider.apiKeys || [];
+                        let keys = usedProvider.apiKeys || [];
+                        if (isChatGPTAndroidProvider(usedProvider) && keys.length === 0) keys = ['dummy-key-for-chatgpt-android'];
                         for (const key of keys) {
                             try {
                                 const terms = await tryExtraction(usedProvider, usedProvider.selectedModel, key);
@@ -577,7 +598,8 @@ Arabic Text (Excerpt):
                         // Translation-only model – try to find an LLM model in the same provider
                         const llmModel = findLLMModel(usedProvider);
                         if (llmModel) {
-                            const keys = usedProvider.apiKeys || [];
+                            let keys = usedProvider.apiKeys || [];
+                            if (isChatGPTAndroidProvider(usedProvider) && keys.length === 0) keys = ['dummy-key-for-chatgpt-android'];
                             for (const key of keys) {
                                 try {
                                     const terms = await tryExtraction(usedProvider, llmModel.modelId, key);
@@ -624,7 +646,8 @@ Arabic Text (Excerpt):
                         if (extractionDone) break;
                         const llmModel = findLLMModel(provider);
                         if (!llmModel) continue;
-                        const keys = provider.apiKeys || [];
+                        let keys = provider.apiKeys || [];
+                        if (isChatGPTAndroidProvider(provider) && keys.length === 0) keys = ['dummy-key-for-chatgpt-android'];
                         for (const key of keys) {
                             try {
                                 const terms = await tryExtraction(provider, llmModel.modelId, key);
