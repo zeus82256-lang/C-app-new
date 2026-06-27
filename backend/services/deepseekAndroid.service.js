@@ -55,15 +55,21 @@ async function getFreshPow(powUrl) {
 async function createChatSession(token) {
     const response = await axios.post('https://chat.deepseek.com/api/v0/chat_session/create', {}, {
         headers: {
-            'x-client-bundle-id': 'com.deepseek.chat',
-            'x-client-platform': 'web',
-            'x-client-version': '2.0.0',
-            'x-client-locale': 'en_US',
-            'x-client-timezone-offset': getTzOffset(),
-            'x-app-version': '2.0.0',
-            'Authorization': `Bearer ${token}`,
+            'User-Agent': 'DeepSeek/2.1.1 Android/36',
+            'Accept': 'application/json',
+            'Accept-Encoding': 'gzip',
             'Content-Type': 'application/json',
-            'Accept': '*/*'
+            'x-client-platform': 'android',
+            'x-client-version': '2.1.1',
+            'x-client-locale': 'ar',
+            'x-client-bundle-id': 'com.deepseek.chat',
+            'x-rangers-id': generateRangersId(),
+            'x-client-timezone-offset': getTzOffset(),
+            'x-device-id': generateDeviceId(),
+            'x-os-version': '30',
+            'x-app-version': '2.1.1',
+            'Authorization': `Bearer ${token}`,
+            'accept-charset': 'UTF-8'
         },
         timeout: 60000
     });
