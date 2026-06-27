@@ -99,20 +99,6 @@ function isDeepSeekProvider(provider) {
     return providerId === 'deepseek' || name.includes('deepseek') || model.includes('deepseek') || hasDeepSeekModel;
 }
 
-
-function getDeepSeekChaptersPerSession(provider) {
-    const configured = Number(provider?.deepSeekChaptersPerSession || process.env.DEEPSEEK_CHAPTERS_PER_SESSION || 100);
-    if (!Number.isFinite(configured) || configured < 1) return 100;
-    return Math.floor(configured);
-}
-
-function getDeepSeekSessionKey(provider, purpose, chapterNum) {
-    const chaptersPerSession = getDeepSeekChaptersPerSession(provider);
-    const safeChapterNum = Number(chapterNum) || 1;
-    const bucket = Math.floor((Math.max(safeChapterNum, 1) - 1) / chaptersPerSession) + 1;
-    return `${purpose}:chapters-${((bucket - 1) * chaptersPerSession) + 1}-${bucket * chaptersPerSession}`;
-}
-
 function isChatGPTAndroidProvider(provider) {
     const name = (provider.name || '').toLowerCase();
     const model = (provider.selectedModel || '').toLowerCase();
@@ -139,28 +125,16 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
 
     // ---- DeepSeek Android/Web API (same flow as the standalone DeepSeek app) ----
     if (isDeepSeek) {
-        const purpose = options.deepSeekPurpose || 'translation';
-        const sessionKey = options.deepSeekSessionKey || purpose;
-        if (!provider._deepSeekSessions) provider._deepSeekSessions = {};
-        if (!provider._deepSeekSessions[sessionKey]) provider._deepSeekSessions[sessionKey] = {};
-        const sessionState = provider._deepSeekSessions[sessionKey];
-
         const deepSeekOptions = {
             // DeepSeek هنا هو مزوّد تطبيق المحادثة وليس واجهة API الرسمية.
             // لذلك لا نمرر مفاتيح OpenAI-compatible مثل sk-* كـ Bearer token لأنها تسبب
             // Authorization Failed، ونستخدم رمز التطبيق الافتراضي مثل التطبيق المستقل.
             token: provider.deepSeekToken || undefined,
-            sessionId: sessionState.sessionId,
-            parentMessageId: sessionState.parentMessageId,
             thinkingEnabled: Boolean(provider.thinkingEnabled),
             searchEnabled: provider.searchEnabled !== false,
-            timeout: options.timeout || 500000,
-            returnMeta: true
+            timeout: options.timeout || 500000
         };
-        const deepSeekResult = await askDeepSeek(prompt, deepSeekOptions);
-        sessionState.sessionId = deepSeekResult.sessionId;
-        sessionState.parentMessageId = deepSeekResult.responseMessageId || sessionState.parentMessageId;
-        return deepSeekResult.text;
+        return askDeepSeek(prompt, deepSeekOptions);
     }
 
     // ---- Gemini native ----
@@ -380,7 +354,7 @@ async function processTranslationJob(jobId) {
         
         // 🔥🔥 NEW: Read providers from new system; fallback to old keys if empty
         let providers = settings.translationProviders && settings.translationProviders.length > 0
-            ? settings.translationProviders.map(provider => provider.toObject ? provider.toObject() : provider)
+            ? settings.translationProviders.slice()
             : [];
 
         // Fallback: if no new providers, build one from legacy settings
@@ -501,10 +475,7 @@ ${sourceContent}
                         const key = keys[keyIdx];
                         try {
                             await pushLog(jobId, `1️⃣ مزوّد: ${providerName} | نموذج: ${modelToUse} | مفتاح ${keyIdx + 1}/${keys.length}`, 'info');
-                            translatedText = await callTranslationProvider(provider, modelToUse, key, translationInput, {
-                                deepSeekPurpose: 'translation',
-                                deepSeekSessionKey: getDeepSeekSessionKey(provider, 'translation', chapterNum)
-                            });
+                            translatedText = await callTranslationProvider(provider, modelToUse, key, translationInput);
                             translationSuccess = true;
                             usedProvider = provider; // remember which provider worked
                             await pushLog(jobId, `✅ نجحت الترجمة باستخدام ${providerName}`, 'success');
@@ -591,10 +562,7 @@ Arabic Text (Excerpt):
                     } else {
                         // OpenAI-compatible or Cloudflare LLM or ChatGPT Android
                         const extPrompt = extractionInput + "\n\nRETURN ONLY JSON.";
-                        jsonText = await callTranslationProvider(extProvider, extModelId, extKey, extPrompt, {
-                            deepSeekPurpose: 'extraction',
-                            deepSeekSessionKey: getDeepSeekSessionKey(extProvider, 'extraction', chapterNum)
-                        });
+                        jsonText = await callTranslationProvider(extProvider, extModelId, extKey, extPrompt);
                     }
                     
                     // Cleanup JSON string
