@@ -8,6 +8,25 @@ const TranslationJob = require('../models/translationJob.model.js');
 const Settings = require('../models/settings.model.js');
 const { askDeepSeek } = require('../services/deepseekAndroid.service.js');
 
+const DEEPSEEK_CHAPTERS_PER_CONVERSATION = 100;
+
+function getDeepSeekConversationContext(contextStore, purpose, batchKey) {
+    if (!contextStore || !purpose || batchKey === undefined || batchKey === null) return undefined;
+    if (!contextStore[purpose]) contextStore[purpose] = new Map();
+    const scopedStore = contextStore[purpose];
+    if (!scopedStore.has(batchKey)) {
+        scopedStore.set(batchKey, {
+            purpose,
+            batchKey,
+            sessionId: null,
+            parentMessageId: null,
+            requestMessageId: null,
+            lastUpdated: null
+        });
+    }
+    return scopedStore.get(batchKey);
+}
+
 // --- Firestore Setup (MANDATORY) ---
 let firestore;
 try {
@@ -132,7 +151,12 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
             token: provider.deepSeekToken || undefined,
             thinkingEnabled: Boolean(provider.thinkingEnabled),
             searchEnabled: provider.searchEnabled !== false,
-            timeout: options.timeout || 500000
+            timeout: options.timeout || 500000,
+            context: getDeepSeekConversationContext(
+                options.deepSeekContexts,
+                options.deepSeekPurpose,
+                options.deepSeekBatchKey
+            )
         };
         return askDeepSeek(prompt, deepSeekOptions);
     }
@@ -388,8 +412,9 @@ async function processTranslationJob(jobId) {
         const extractPrompt = settings?.translatorExtractPrompt || DEFAULT_EXTRACT_PROMPT;
 
         const chaptersToProcess = job.targetChapters.sort((a, b) => a - b);
+        const deepSeekContexts = { chapters: new Map(), glossary: new Map() };
 
-        for (const chapterNum of chaptersToProcess) {
+        for (const [chapterIndex, chapterNum] of chaptersToProcess.entries()) {
             const freshJob = await TranslationJob.findById(jobId);
             // 🔥 Check for pause or stop
             if (!freshJob || freshJob.status !== 'active') {
@@ -397,6 +422,12 @@ async function processTranslationJob(jobId) {
                     await pushLog(jobId, `⏸️ تم إيقاف المهمة مؤقتاً عند الفصل ${chapterNum}`, 'warning');
                 }
                 break;
+            }
+
+            const deepSeekBatchKey = Math.floor(chapterIndex / DEEPSEEK_CHAPTERS_PER_CONVERSATION);
+            const isFirstChapterInDeepSeekBatch = chapterIndex % DEEPSEEK_CHAPTERS_PER_CONVERSATION === 0;
+            if (isFirstChapterInDeepSeekBatch) {
+                await pushLog(jobId, `💬 DeepSeek: بدء محادثتين جديدتين للفصول ${chapterIndex + 1}-${Math.min(chapterIndex + DEEPSEEK_CHAPTERS_PER_CONVERSATION, chaptersToProcess.length)} (الفصول + المصطلحات)`, 'info');
             }
 
             const freshNovel = await Novel.findById(job.novelId);
@@ -475,7 +506,11 @@ ${sourceContent}
                         const key = keys[keyIdx];
                         try {
                             await pushLog(jobId, `1️⃣ مزوّد: ${providerName} | نموذج: ${modelToUse} | مفتاح ${keyIdx + 1}/${keys.length}`, 'info');
-                            translatedText = await callTranslationProvider(provider, modelToUse, key, translationInput);
+                            translatedText = await callTranslationProvider(provider, modelToUse, key, translationInput, {
+                                deepSeekContexts,
+                                deepSeekPurpose: 'chapters',
+                                deepSeekBatchKey
+                            });
                             translationSuccess = true;
                             usedProvider = provider; // remember which provider worked
                             await pushLog(jobId, `✅ نجحت الترجمة باستخدام ${providerName}`, 'success');
@@ -562,7 +597,11 @@ Arabic Text (Excerpt):
                     } else {
                         // OpenAI-compatible or Cloudflare LLM or ChatGPT Android
                         const extPrompt = extractionInput + "\n\nRETURN ONLY JSON.";
-                        jsonText = await callTranslationProvider(extProvider, extModelId, extKey, extPrompt);
+                        jsonText = await callTranslationProvider(extProvider, extModelId, extKey, extPrompt, {
+                            deepSeekContexts,
+                            deepSeekPurpose: 'glossary',
+                            deepSeekBatchKey
+                        });
                     }
                     
                     // Cleanup JSON string
@@ -964,7 +1003,7 @@ module.exports = function(app, verifyToken, verifyAdmin) {
             
             // 🔥 CHECK providers instead of legacy keys
             const providers = userSettings?.translationProviders || [];
-            const anyKeys = providers.some(p => p.apiKeys && p.apiKeys.length > 0);
+            const anyKeys = providers.some(p => (p.apiKeys && p.apiKeys.length > 0) || isChatGPTAndroidProvider(p) || isDeepSeekProvider(p));
             const legacyKeys = userSettings?.translatorApiKeys || [];
             
             if (!anyKeys && legacyKeys.length === 0) {
