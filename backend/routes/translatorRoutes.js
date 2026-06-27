@@ -6,6 +6,7 @@ const Novel = require('../models/novel.model.js');
 const Glossary = require('../models/glossary.model.js');
 const TranslationJob = require('../models/translationJob.model.js');
 const Settings = require('../models/settings.model.js');
+const { askDeepSeek } = require('../services/deepseekAndroid.service.js');
 
 // --- Firestore Setup (MANDATORY) ---
 let firestore;
@@ -90,6 +91,14 @@ function findLLMModel(provider) {
 }
 
 // 🔥 Helper to detect if a provider is ChatGPT Android (by name or model)
+function isDeepSeekProvider(provider) {
+    const providerId = (provider.providerId || '').toLowerCase();
+    const name = (provider.name || '').toLowerCase();
+    const model = (provider.selectedModel || '').toLowerCase();
+    const hasDeepSeekModel = provider.models && provider.models.some(m => (m.modelId || '').toLowerCase().includes('deepseek'));
+    return providerId === 'deepseek' || name.includes('deepseek') || model.includes('deepseek') || hasDeepSeekModel;
+}
+
 function isChatGPTAndroidProvider(provider) {
     const name = (provider.name || '').toLowerCase();
     const model = (provider.selectedModel || '').toLowerCase();
@@ -111,7 +120,19 @@ function truncatePromptIfNeeded(prompt, maxLength = 10000) {
 async function callTranslationProvider(provider, modelName, apiKey, prompt, options = {}) {
     const providerId = (provider.providerId || 'gemini').toLowerCase();
     const isCloudflare = (providerId === 'cloudflare');
+    const isDeepSeek = isDeepSeekProvider(provider);
     const isChatGPT = isChatGPTAndroidProvider(provider);
+
+    // ---- DeepSeek Android/Web API (same flow as the standalone DeepSeek app) ----
+    if (isDeepSeek) {
+        const deepSeekOptions = {
+            token: apiKey && apiKey !== 'dummy-key-for-deepseek' ? apiKey : undefined,
+            thinkingEnabled: Boolean(provider.thinkingEnabled),
+            searchEnabled: provider.searchEnabled !== false,
+            timeout: options.timeout || 500000
+        };
+        return askDeepSeek(prompt, deepSeekOptions);
+    }
 
     // ---- Gemini native ----
     if (providerId === 'gemini' && !provider.baseUrl) {
@@ -430,8 +451,9 @@ ${sourceContent}
                     let keys = provider.apiKeys || [];
                     
                     const isChatGPT = isChatGPTAndroidProvider(provider);
+                    const isDeepSeek = isDeepSeekProvider(provider);
                     
-                    if (keys.length === 0 && !isChatGPT) {
+                    if (keys.length === 0 && !isChatGPT && !isDeepSeek) {
                         await pushLog(jobId, `⚠️ المزوّد ${providerName} ليس لديه مفاتيح – تخطيه`, 'warning');
                         continue;
                     }
@@ -440,6 +462,10 @@ ${sourceContent}
                     if (isChatGPT && keys.length === 0) {
                         keys = ['dummy-key-for-chatgpt-android'];
                         await pushLog(jobId, `🔑 مزوّد ChatGPT Android: سيتم استخدام مفتاح وهمي (لا يحتاج مفتاح حقيقي)`, 'info');
+                    }
+                    if (isDeepSeek && keys.length === 0) {
+                        keys = ['dummy-key-for-deepseek'];
+                        await pushLog(jobId, `🔑 مزوّد DeepSeek: سيتم استخدام الرمز الافتراضي من تطبيق DeepSeek`, 'info');
                     }
 
                     for (let keyIdx = 0; keyIdx < keys.length; keyIdx++) {
@@ -522,7 +548,7 @@ Arabic Text (Excerpt):
 """${translatedText.substring(0, 8000)}"""
 `;
                     let jsonText;
-                    if ((extProvider.providerId === 'gemini' || (!extProvider.baseUrl && extProvider.providerId !== 'openrouter' && extProvider.providerId !== 'cloudflare' && !isChatGPTAndroidProvider(extProvider))) && extProvider.providerId !== 'openrouter' && extProvider.providerId !== 'cloudflare' && !isChatGPTAndroidProvider(extProvider)) {
+                    if ((extProvider.providerId === 'gemini' || (!extProvider.baseUrl && extProvider.providerId !== 'openrouter' && extProvider.providerId !== 'cloudflare' && !isChatGPTAndroidProvider(extProvider) && !isDeepSeekProvider(extProvider))) && extProvider.providerId !== 'openrouter' && extProvider.providerId !== 'cloudflare' && !isChatGPTAndroidProvider(extProvider) && !isDeepSeekProvider(extProvider)) {
                         // Gemini native with JSON mode
                         const genAI = new GoogleGenerativeAI(extKey);
                         const modelJSON = genAI.getGenerativeModel({ model: extModelId });
@@ -567,6 +593,7 @@ Arabic Text (Excerpt):
                     if (!isTranslationOnlyModel(usedProvider.selectedModel)) {
                         let keys = usedProvider.apiKeys || [];
                         if (isChatGPTAndroidProvider(usedProvider) && keys.length === 0) keys = ['dummy-key-for-chatgpt-android'];
+                        if (isDeepSeekProvider(usedProvider) && keys.length === 0) keys = ['dummy-key-for-deepseek'];
                         for (const key of keys) {
                             try {
                                 const terms = await tryExtraction(usedProvider, usedProvider.selectedModel, key);
@@ -610,6 +637,7 @@ Arabic Text (Excerpt):
                         if (llmModel) {
                             let keys = usedProvider.apiKeys || [];
                             if (isChatGPTAndroidProvider(usedProvider) && keys.length === 0) keys = ['dummy-key-for-chatgpt-android'];
+                            if (isDeepSeekProvider(usedProvider) && keys.length === 0) keys = ['dummy-key-for-deepseek'];
                             for (const key of keys) {
                                 try {
                                     const terms = await tryExtraction(usedProvider, llmModel.modelId, key);
@@ -658,6 +686,7 @@ Arabic Text (Excerpt):
                         if (!llmModel) continue;
                         let keys = provider.apiKeys || [];
                         if (isChatGPTAndroidProvider(provider) && keys.length === 0) keys = ['dummy-key-for-chatgpt-android'];
+                        if (isDeepSeekProvider(provider) && keys.length === 0) keys = ['dummy-key-for-deepseek'];
                         for (const key of keys) {
                             try {
                                 const terms = await tryExtraction(provider, llmModel.modelId, key);
