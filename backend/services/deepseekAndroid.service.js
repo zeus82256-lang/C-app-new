@@ -78,6 +78,9 @@ function parseDeepSeekLine(line, state) {
     let item;
     try { item = JSON.parse(rawChunk); } catch (_) { return; }
 
+    if (item?.request_message_id) state.requestMessageId = item.request_message_id;
+    if (item?.response_message_id) state.responseMessageId = item.response_message_id;
+
     if (item?.v) {
         if (typeof item.v === 'string') {
             state.text += item.v;
@@ -97,12 +100,14 @@ function parseDeepSeekLine(line, state) {
 async function askDeepSeek(prompt, options = {}) {
     const token = options.token || DEFAULT_DEEPSEEK_TOKEN;
     const powUrl = options.powUrl || DEFAULT_POW_URL;
-    const sessionId = await createChatSession(token);
+    const context = options.context || {};
+    const sessionId = context.sessionId || options.sessionId || await createChatSession(token);
+    const parentMessageId = context.parentMessageId || options.parentMessageId || null;
     const { powResponse, powData } = await getFreshPow(powUrl);
 
     const response = await axios.post('https://chat.deepseek.com/api/v0/chat/completion', {
         chat_session_id: sessionId,
-        parent_message_id: null,
+        parent_message_id: parentMessageId,
         prompt,
         ref_file_ids: [],
         thinking_enabled: Boolean(options.thinkingEnabled),
@@ -128,6 +133,14 @@ async function askDeepSeek(prompt, options = {}) {
     });
 
     if (!state.text.trim()) throw new Error('DeepSeek returned an empty response');
+
+    if (options.context) {
+        options.context.sessionId = sessionId;
+        if (state.responseMessageId) options.context.parentMessageId = state.responseMessageId;
+        if (state.requestMessageId) options.context.requestMessageId = state.requestMessageId;
+        options.context.lastUpdated = new Date();
+    }
+
     return state.text;
 }
 
