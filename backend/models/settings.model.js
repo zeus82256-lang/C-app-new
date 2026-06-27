@@ -77,7 +77,9 @@ RETURN ONLY JSON:` },
         }],
         apiKeys: [{ type: String }], // API keys for this provider (for ChatGPT Android, can be empty or placeholder)
         selectedModel: { type: String }, // the currently active model for this provider
-        priority: { type: Number, default: 0 } // order in fallback sequence
+        priority: { type: Number, default: 0 }, // order in fallback sequence
+        thinkingEnabled: { type: Boolean, default: false }, // DeepSeek: enable reasoning fragments
+        searchEnabled: { type: Boolean, default: true } // DeepSeek: enable web search
     }],
 
     // 🔥 Title Generator Specific Settings
