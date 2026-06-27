@@ -79,7 +79,8 @@ RETURN ONLY JSON:` },
         selectedModel: { type: String }, // the currently active model for this provider
         priority: { type: Number, default: 0 }, // order in fallback sequence
         thinkingEnabled: { type: Boolean, default: false }, // DeepSeek: enable reasoning fragments
-        searchEnabled: { type: Boolean, default: true } // DeepSeek: enable web search
+        searchEnabled: { type: Boolean, default: true }, // DeepSeek: enable web search
+        deepSeekChaptersPerSession: { type: Number, default: 100 } // DeepSeek: start fresh chats after this many chapters
     }],
 
     // 🔥 Title Generator Specific Settings
