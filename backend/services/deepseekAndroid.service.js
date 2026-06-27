@@ -1,7 +1,7 @@
 const axios = require('axios');
 
-const DEFAULT_DEEPSEEK_TOKEN = 'IVlSFv6JwO2TttyAhMW6Cu9/eMCDQhcfY0uHWu000SDnAyEwsYxtR8rFADgo22LM';
-const DEFAULT_POW_URL = 'https://web-production-c09dc.up.railway.app/pow';
+const DEFAULT_DEEPSEEK_TOKEN = process.env.DEEPSEEK_APP_TOKEN || 'IVlSFv6JwO2TttyAhMW6Cu9/eMCDQhcfY0uHWu000SDnAyEwsYxtR8rFADgo22LM';
+const DEFAULT_POW_URL = process.env.DEEPSEEK_POW_URL || 'https://web-production-c09dc.up.railway.app/pow';
 
 function generateDeviceId() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
@@ -55,21 +55,15 @@ async function getFreshPow(powUrl) {
 async function createChatSession(token) {
     const response = await axios.post('https://chat.deepseek.com/api/v0/chat_session/create', {}, {
         headers: {
-            'User-Agent': 'DeepSeek/2.1.1 Android/36',
-            'Accept': 'application/json',
-            'Accept-Encoding': 'gzip',
-            'Content-Type': 'application/json',
-            'x-client-platform': 'android',
-            'x-client-version': '2.1.1',
-            'x-client-locale': 'ar',
             'x-client-bundle-id': 'com.deepseek.chat',
-            'x-rangers-id': generateRangersId(),
+            'x-client-platform': 'web',
+            'x-client-version': '2.0.0',
+            'x-client-locale': 'en_US',
             'x-client-timezone-offset': getTzOffset(),
-            'x-device-id': generateDeviceId(),
-            'x-os-version': '30',
-            'x-app-version': '2.1.1',
+            'x-app-version': '2.0.0',
             'Authorization': `Bearer ${token}`,
-            'accept-charset': 'UTF-8'
+            'Content-Type': 'application/json',
+            'Accept': '*/*'
         },
         timeout: 60000
     });
