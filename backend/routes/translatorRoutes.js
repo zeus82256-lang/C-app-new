@@ -9,6 +9,8 @@ const Settings = require('../models/settings.model.js');
 const { askDeepSeek } = require('../services/deepseekAndroid.service.js');
 
 const DEEPSEEK_CHAPTERS_PER_CONVERSATION = 100;
+const deepSeekTokenAssignments = new Map();
+let deepSeekNextTokenIndex = 0;
 
 function getDeepSeekConversationContext(contextStore, purpose, batchKey) {
     if (!contextStore || !purpose || batchKey === undefined || batchKey === null) return undefined;
@@ -25,6 +27,32 @@ function getDeepSeekConversationContext(contextStore, purpose, batchKey) {
         });
     }
     return scopedStore.get(batchKey);
+}
+
+function hashStringToIndex(value, size) {
+    if (!value || size <= 0) return 0;
+    let hash = 0;
+    for (let i = 0; i < value.length; i++) {
+        hash = ((hash << 5) - hash) + value.charCodeAt(i);
+        hash |= 0;
+    }
+    return Math.abs(hash) % size;
+}
+
+function pickDeepSeekToken(provider, options = {}) {
+    const tokens = Array.isArray(provider.deepSeekTokens)
+        ? provider.deepSeekTokens.map(t => (t || '').trim()).filter(Boolean)
+        : [];
+    if (tokens.length === 0) return provider.deepSeekToken || undefined;
+    const stickyKey = `${options.deepSeekJobId || ''}:${provider.providerId || provider.name || 'deepseek'}`;
+    if (options.deepSeekJobId) {
+        if (!deepSeekTokenAssignments.has(stickyKey)) {
+            deepSeekTokenAssignments.set(stickyKey, deepSeekNextTokenIndex % tokens.length);
+            deepSeekNextTokenIndex++;
+        }
+        return tokens[deepSeekTokenAssignments.get(stickyKey) % tokens.length];
+    }
+    return tokens[hashStringToIndex(stickyKey, tokens.length)];
 }
 
 // --- Firestore Setup (MANDATORY) ---
@@ -148,7 +176,7 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
             // DeepSeek هنا هو مزوّد تطبيق المحادثة وليس واجهة API الرسمية.
             // لذلك لا نمرر مفاتيح OpenAI-compatible مثل sk-* كـ Bearer token لأنها تسبب
             // Authorization Failed، ونستخدم رمز التطبيق الافتراضي مثل التطبيق المستقل.
-            token: provider.deepSeekToken || undefined,
+            token: pickDeepSeekToken(provider, options),
             thinkingEnabled: Boolean(provider.thinkingEnabled),
             searchEnabled: provider.searchEnabled !== false,
             modelType: provider.deepSeekModelType === 'expert' ? 'expert' : 'instant',
@@ -508,6 +536,7 @@ ${sourceContent}
                         try {
                             await pushLog(jobId, `1️⃣ مزوّد: ${providerName} | نموذج: ${modelToUse} | مفتاح ${keyIdx + 1}/${keys.length}`, 'info');
                             translatedText = await callTranslationProvider(provider, modelToUse, key, translationInput, {
+                                deepSeekJobId: jobId.toString(),
                                 deepSeekContexts,
                                 deepSeekPurpose: 'chapters',
                                 deepSeekBatchKey
@@ -599,6 +628,7 @@ Arabic Text (Excerpt):
                         // OpenAI-compatible or Cloudflare LLM or ChatGPT Android
                         const extPrompt = extractionInput + "\n\nRETURN ONLY JSON.";
                         jsonText = await callTranslationProvider(extProvider, extModelId, extKey, extPrompt, {
+                            deepSeekJobId: jobId.toString(),
                             deepSeekContexts,
                             deepSeekPurpose: 'glossary',
                             deepSeekBatchKey
