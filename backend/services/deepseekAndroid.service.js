@@ -112,6 +112,7 @@ async function askDeepSeek(prompt, options = {}) {
         ref_file_ids: [],
         thinking_enabled: Boolean(options.thinkingEnabled),
         search_enabled: Boolean(options.searchEnabled),
+        model_type: options.modelType === 'expert' ? 'expert' : 'instant',
         action: null,
         preempt: false,
         pow: powData,
