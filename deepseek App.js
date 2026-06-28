@@ -578,6 +578,7 @@ export default function App() {
   // حالات الأوضاع العامة
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [globalSearchEnabled, setGlobalSearchEnabled] = useState(true);
+  const [selectedModelType, setSelectedModelType] = useState('instant'); // 'instant' أو 'expert'
 
   const sidebarAnim = useRef(new Animated.Value(SIDEBAR_WIDTH)).current;
   const flatListRef = useRef();
@@ -783,6 +784,8 @@ export default function App() {
     refFileIds = [],
     searchEnabled = true,
     thinkingEnabled = false,
+    modelType = 'instant', // جديد: نوع النموذج
+    onThinkingChunk = null, // موجود مسبقاً
   }) {
     let activeSessionId = sessionId;
     if (!activeSessionId) {
@@ -799,6 +802,7 @@ export default function App() {
       ref_file_ids: refFileIds,
       thinking_enabled: thinkingEnabled,
       search_enabled: searchEnabled,
+      model_type: modelType, // إرسال نوع النموذج (instant أو expert)
       action: null,
       preempt: false,
       pow: powData,
@@ -1185,6 +1189,7 @@ export default function App() {
         refFileIds: refFileIds,
         searchEnabled: effectiveSearchEnabled,
         thinkingEnabled: thinkingEnabled,
+        modelType: selectedModelType, // تمرير نوع النموذج المختار
         onThinkingChunk: onThinkingChunk,
         onChunk: (chunkText) => {
           setStreamingText(chunkText);
@@ -1317,6 +1322,7 @@ export default function App() {
     };
     setChats(prev => [newChatObj, ...prev]);
     setCurrentChatId(newId);
+    setSelectedModelType('instant'); // إعادة تعيين الوضع الافتراضي للمحادثة الجديدة
     if (isSidebarOpen) toggleSidebar();
   };
 
@@ -1444,6 +1450,7 @@ export default function App() {
         refFileIds: [],
         searchEnabled: globalSearchEnabled,
         thinkingEnabled: thinkingEnabled,
+        modelType: selectedModelType, // استخدام نفس النموذج المختار حالياً
         onThinkingChunk: onThinkingChunk,
         onChunk: (chunkText) => {
           setStreamingText(chunkText);
@@ -1591,8 +1598,39 @@ export default function App() {
           }}
           ListEmptyComponent={() => (
             <View style={styles.emptyContainer}>
-              <MaterialCommunityIcons name="lightning-bolt-outline" size={54} color="#ffffff" style={{ marginBottom: 12 }} />
-              <Text style={styles.emptyText}>كيف يمكنني مساعدتك اليوم؟</Text>
+              {/* عنوان الوضع الحالي كبير وواضح */}
+              <Text style={styles.currentModeTitle}>
+                {selectedModelType === 'instant' ? 'الوضع السريع' : 'الوضع الخبير'}
+              </Text>
+
+              {/* المستطيل المقسوم لاختيار الوضع */}
+              <View style={styles.modeSelectorCard}>
+                <TouchableOpacity
+                  style={[
+                    styles.modeOptionButton,
+                    selectedModelType === 'instant' ? styles.modeOptionActive : styles.modeOptionInactive
+                  ]}
+                  onPress={() => setSelectedModelType('instant')}
+                >
+                  <Ionicons name="flash-outline" size={20} color={selectedModelType === 'instant' ? '#000000' : '#ffffff'} />
+                  <Text style={[styles.modeOptionText, selectedModelType === 'instant' ? styles.modeOptionTextActive : styles.modeOptionTextInactive]}>
+                    سريع (Instant)
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[
+                    styles.modeOptionButton,
+                    selectedModelType === 'expert' ? styles.modeOptionActive : styles.modeOptionInactive
+                  ]}
+                  onPress={() => setSelectedModelType('expert')}
+                >
+                  <Ionicons name="sparkles-outline" size={20} color={selectedModelType === 'expert' ? '#000000' : '#ffffff'} />
+                  <Text style={[styles.modeOptionText, selectedModelType === 'expert' ? styles.modeOptionTextActive : styles.modeOptionTextInactive]}>
+                    خبير (Expert)
+                  </Text>
+                </TouchableOpacity>
+              </View>
             </View>
           )}
         />
@@ -2240,11 +2278,51 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginTop: 180,
   },
-  emptyText: {
+  // عنوان الوضع الحالي الكبير
+  currentModeTitle: {
     color: '#ffffff',
-    fontSize: 17,
-    fontWeight: '500',
+    fontSize: 22,
+    fontWeight: 'bold',
     textAlign: 'center',
+    marginBottom: 24,
+  },
+  // بطاقة اختيار الوضع
+  modeSelectorCard: {
+    flexDirection: 'row-reverse',
+    backgroundColor: '#111111',
+    borderRadius: 20,
+    borderWidth: 0.5,
+    borderColor: '#222222',
+    padding: 6,
+    width: '85%',
+    alignItems: 'center',
+  },
+  modeOptionButton: {
+    flex: 1,
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 14,
+    borderRadius: 16,
+    marginHorizontal: 3,
+  },
+  modeOptionActive: {
+    backgroundColor: '#ffffff',
+  },
+  modeOptionInactive: {
+    backgroundColor: 'transparent',
+  },
+  modeOptionText: {
+    fontSize: 15,
+    fontWeight: '600',
+    marginRight: 8,
+    textAlign: 'right',
+  },
+  modeOptionTextActive: {
+    color: '#000000',
+  },
+  modeOptionTextInactive: {
+    color: '#ffffff',
   },
   inputWrapper: {
     backgroundColor: '#000000',
