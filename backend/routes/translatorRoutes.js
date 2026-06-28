@@ -151,6 +151,7 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
             token: provider.deepSeekToken || undefined,
             thinkingEnabled: Boolean(provider.thinkingEnabled),
             searchEnabled: provider.searchEnabled !== false,
+            modelType: provider.deepSeekModelType === 'expert' ? 'expert' : 'instant',
             timeout: options.timeout || 500000,
             context: getDeepSeekConversationContext(
                 options.deepSeekContexts,
