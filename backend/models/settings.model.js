@@ -79,7 +79,8 @@ RETURN ONLY JSON:` },
         selectedModel: { type: String }, // the currently active model for this provider
         priority: { type: Number, default: 0 }, // order in fallback sequence
         thinkingEnabled: { type: Boolean, default: false }, // DeepSeek: enable reasoning fragments
-        searchEnabled: { type: Boolean, default: true } // DeepSeek: enable web search
+        searchEnabled: { type: Boolean, default: true }, // DeepSeek: enable web search
+        deepSeekModelType: { type: String, enum: ['instant', 'expert'], default: 'instant' } // DeepSeek: Instant or Expert mode
     }],
 
     // 🔥 Title Generator Specific Settings
