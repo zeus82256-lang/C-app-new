@@ -52,12 +52,15 @@ function buildPowRequestUrl(powUrl, token) {
 
 async function getFreshPow(powUrl, token) {
     const response = await axios.get(buildPowRequestUrl(powUrl, token), { timeout: 60000 });
-    if (!response.data?.pow_response || !response.data?.solved_json) {
+    const powResponse = response.data?.pow_response || response.data?.x_ds_pow_response;
+    const powData = response.data?.solved_json;
+
+    if (!powResponse || !powData) {
         throw new Error(`DeepSeek POW response is incomplete: ${JSON.stringify(response.data)}`);
     }
     return {
-        powResponse: response.data.pow_response,
-        powData: response.data.solved_json
+        powResponse,
+        powData
     };
 }
 
