@@ -81,7 +81,13 @@ RETURN ONLY JSON:` },
         thinkingEnabled: { type: Boolean, default: false }, // DeepSeek: enable reasoning fragments
         searchEnabled: { type: Boolean, default: true }, // DeepSeek: enable web search
         deepSeekModelType: { type: String, enum: ['instant', 'expert'], default: 'instant' }, // DeepSeek: Instant or Expert mode
-        deepSeekTokens: [{ type: String }] // DeepSeek account tokens; falls back to default app token when empty
+        deepSeekTokens: [{ type: String }], // DeepSeek account tokens; falls back to default app token when empty
+        powProviders: [{
+            id: { type: String, required: true },
+            name: { type: String, required: true },
+            url: { type: String, required: true }
+        }], // DeepSeek POW service providers
+        selectedPowProviderId: { type: String } // Active DeepSeek POW service provider
     }],
 
     // 🔥 Title Generator Specific Settings
