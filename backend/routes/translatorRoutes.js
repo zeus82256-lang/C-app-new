@@ -190,11 +190,12 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
 
     // ---- DeepSeek Android/Web API (same flow as the standalone DeepSeek app) ----
     if (isDeepSeek) {
+        const deepSeekToken = pickDeepSeekToken(provider, options);
         const deepSeekOptions = {
             // DeepSeek هنا هو مزوّد تطبيق المحادثة وليس واجهة API الرسمية.
             // لذلك لا نمرر مفاتيح OpenAI-compatible مثل sk-* كـ Bearer token لأنها تسبب
             // Authorization Failed، ونستخدم رمز التطبيق الافتراضي مثل التطبيق المستقل.
-            token: pickDeepSeekToken(provider, options),
+            token: deepSeekToken,
             thinkingEnabled: Boolean(provider.thinkingEnabled),
             searchEnabled: provider.searchEnabled !== false,
             modelType: provider.deepSeekModelType === 'expert' ? 'expert' : 'instant',
