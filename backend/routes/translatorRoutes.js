@@ -11,18 +11,23 @@ const { askDeepSeek } = require('../services/deepseekAndroid.service.js');
 const DEEPSEEK_CHAPTERS_PER_CONVERSATION = 100;
 const DEFAULT_DEEPSEEK_POW_PROVIDERS = [
     { id: 'railway', name: 'Railway', url: 'https://web-production-c09dc.up.railway.app/pow' },
-    { id: 'ngrok', name: 'Ngrok', url: 'https://immunize-quintet-trimmer.ngrok-free.dev/get_pow?authorization=Bearer_YourToken' }
+    { id: 'ngrok', name: 'Ngrok', url: 'https://immunize-quintet-trimmer.ngrok-free.dev/get_pow' }
 ];
 const deepSeekTokenAssignments = new Map();
 let deepSeekNextTokenIndex = 0;
 
+
+function normalizePowProviderUrl(url) {
+    const value = url || '';
+    return value.includes('/get_pow') ? value.split('?')[0] : value;
+}
 
 function resolveDeepSeekPowUrl(provider) {
     const powProviders = Array.isArray(provider.powProviders) && provider.powProviders.length > 0
         ? provider.powProviders
         : DEFAULT_DEEPSEEK_POW_PROVIDERS;
     const selected = powProviders.find(p => p.id === provider.selectedPowProviderId) || powProviders[0];
-    return selected?.url;
+    return normalizePowProviderUrl(selected?.url);
 }
 
 function getDeepSeekConversationContext(contextStore, purpose, batchKey) {
