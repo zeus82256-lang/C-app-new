@@ -9,8 +9,21 @@ const Settings = require('../models/settings.model.js');
 const { askDeepSeek } = require('../services/deepseekAndroid.service.js');
 
 const DEEPSEEK_CHAPTERS_PER_CONVERSATION = 100;
+const DEFAULT_DEEPSEEK_POW_PROVIDERS = [
+    { id: 'railway', name: 'Railway', url: 'https://web-production-c09dc.up.railway.app/pow' },
+    { id: 'ngrok', name: 'Ngrok', url: 'https://immunize-quintet-trimmer.ngrok-free.dev/get_pow?authorization=Bearer_YourToken' }
+];
 const deepSeekTokenAssignments = new Map();
 let deepSeekNextTokenIndex = 0;
+
+
+function resolveDeepSeekPowUrl(provider) {
+    const powProviders = Array.isArray(provider.powProviders) && provider.powProviders.length > 0
+        ? provider.powProviders
+        : DEFAULT_DEEPSEEK_POW_PROVIDERS;
+    const selected = powProviders.find(p => p.id === provider.selectedPowProviderId) || powProviders[0];
+    return selected?.url;
+}
 
 function getDeepSeekConversationContext(contextStore, purpose, batchKey) {
     if (!contextStore || !purpose || batchKey === undefined || batchKey === null) return undefined;
@@ -180,6 +193,7 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
             thinkingEnabled: Boolean(provider.thinkingEnabled),
             searchEnabled: provider.searchEnabled !== false,
             modelType: provider.deepSeekModelType === 'expert' ? 'expert' : 'instant',
+            powUrl: resolveDeepSeekPowUrl(provider),
             timeout: options.timeout || 500000,
             context: getDeepSeekConversationContext(
                 options.deepSeekContexts,
