@@ -41,8 +41,17 @@ function buildFullHeaders(token, powResponse) {
     };
 }
 
-async function getFreshPow(powUrl) {
-    const response = await axios.get(powUrl, { timeout: 60000 });
+function buildPowRequestUrl(powUrl, token) {
+    const value = powUrl || DEFAULT_POW_URL;
+    const cleanUrl = value.includes('/get_pow') ? value.split('?')[0] : value;
+    if (!cleanUrl.includes('/get_pow')) return cleanUrl;
+
+    const separator = cleanUrl.includes('?') ? '&' : '?';
+    return `${cleanUrl}${separator}authorization=${encodeURIComponent(`Bearer ${token}`)}`;
+}
+
+async function getFreshPow(powUrl, token) {
+    const response = await axios.get(buildPowRequestUrl(powUrl, token), { timeout: 60000 });
     if (!response.data?.pow_response || !response.data?.solved_json) {
         throw new Error(`DeepSeek POW response is incomplete: ${JSON.stringify(response.data)}`);
     }
@@ -103,7 +112,7 @@ async function askDeepSeek(prompt, options = {}) {
     const context = options.context || {};
     const sessionId = context.sessionId || options.sessionId || await createChatSession(token);
     const parentMessageId = context.parentMessageId || options.parentMessageId || null;
-    const { powResponse, powData } = await getFreshPow(powUrl);
+    const { powResponse, powData } = await getFreshPow(powUrl, token);
 
     const response = await axios.post('https://chat.deepseek.com/api/v0/chat/completion', {
         chat_session_id: sessionId,
