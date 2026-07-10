@@ -655,12 +655,27 @@ Arabic Text (Excerpt):
                         });
                     }
                     
-                    // Cleanup JSON string
-                    if (jsonText.startsWith("```json")) {
-                        jsonText = jsonText.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-                    } else if (jsonText.startsWith("```")) {
-                        jsonText = jsonText.replace(/^```\s*/, "").replace(/\s*```$/, "");
-                    }
+                    // Cleanup JSON string - ROBUST VERSION
+jsonText = jsonText.trim();
+
+// Remove markdown code blocks (with or without backticks)
+if (jsonText.startsWith("```json")) {
+    jsonText = jsonText.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+} else if (jsonText.startsWith("```")) {
+    jsonText = jsonText.replace(/^```\s*/, "").replace(/\s*```$/, "");
+}
+
+// 🔥 FIX: DeepSeek يُرجع "json\n[...]" بدون backticks
+if (/^json\s*[\n\r]/i.test(jsonText)) {
+    jsonText = jsonText.replace(/^json\s*[\n\r]+/i, "");
+}
+
+// 🔥 الأقوى: استخرج أول [ ] أو { } مباشرة
+const jsonMatch = jsonText.match(/(\[[\s\S]*\]|\{[\s\S]*\})/);
+if (jsonMatch) {
+    jsonText = jsonMatch[1];
+}
+
 
                     let parsedTerms = [];
                     try {
