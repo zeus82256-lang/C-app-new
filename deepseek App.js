@@ -27,9 +27,18 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 
 // ================= البيانات الأساسية الثابتة =================
-const TOKEN = "IVlSFv6JwO2TttyAhMW6Cu9/eMCDQhcfY0uHWu000SDnAyEwsYxtR8rFADgo22LM";
+const DEFAULT_TOKEN_VALUE = "IVlSFv6JwO2TttyAhMW6Cu9/eMCDQhcfY0uHWu000SDnAyEwsYxtR8rFADgo22LM";
+const DEFAULT_TOKEN_ID = 'builtin_default';
+
+// ✅ التوكن الثابت الجديد
+const SECONDARY_TOKEN_VALUE = "IObC1siEVWVU1u9jByDE6HjouP9yvj6l%2F1D%2Fz7VduSqhvDZL59KRy%2FUPbFHfGjvz";
+const SECONDARY_TOKEN_ID = 'builtin_secondary';
+
 const RAILWAY_SERVER_URL = "https://web-production-c09dc.up.railway.app";
-const POW_API_URL = `${RAILWAY_SERVER_URL}/pow`;
+
+// روابط مزود خدمة POW
+const RAILWAY_POW_BASE = "https://web-production-c09dc.up.railway.app/pow";
+const NGROK_POW_BASE = "https://immunize-quintet-trimmer.ngrok-free.dev/get_pow";
 
 const { width } = Dimensions.get('window');
 const SIDEBAR_WIDTH = width * 0.80;
@@ -550,8 +559,25 @@ function CollapsibleMessage({ item, isStreaming, isLoading, hasSources, openSour
 
 // ================= التطبيق الرئيسي =================
 export default function App() {
+  const defaultTokenObject = {
+    id: DEFAULT_TOKEN_ID,
+    name: 'الحساب الافتراضي',
+    token: DEFAULT_TOKEN_VALUE,
+    isBuiltIn: true,
+    isValid: true,
+  };
+
+  // ✅ كائن التوكن الثانوي الجديد
+  const secondaryTokenObject = {
+    id: SECONDARY_TOKEN_ID,
+    name: 'الحساب الثانوي',
+    token: SECONDARY_TOKEN_VALUE,
+    isBuiltIn: true,
+    isValid: true,
+  };
+
   const [chats, setChats] = useState([
-    { id: 'default', title: 'محادثة جديدة', session_id: null, messages: [], parent_message_id: null, request_message_id: null, pinned: false }
+    { id: 'default', title: 'محادثة جديدة', session_id: null, messages: [], parent_message_id: null, request_message_id: null, pinned: false, tokenId: DEFAULT_TOKEN_ID }
   ]);
   const [currentChatId, setCurrentChatId] = useState('default');
   const [inputText, setInputText] = useState('');
@@ -578,7 +604,19 @@ export default function App() {
   // حالات الأوضاع العامة
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [globalSearchEnabled, setGlobalSearchEnabled] = useState(true);
-  const [selectedModelType, setSelectedModelType] = useState('instant'); // 'instant' أو 'expert'
+  const [selectedModelType, setSelectedModelType] = useState('default'); // تم التغيير من 'instant' إلى 'default'
+
+  // حالات إدارة التوكنات - الآن تحتوي على التوكنين الثابتين
+  const [tokens, setTokens] = useState([defaultTokenObject, secondaryTokenObject]);
+  const [activeTokenId, setActiveTokenId] = useState(DEFAULT_TOKEN_ID);
+  const [tokenManagerVisible, setTokenManagerVisible] = useState(false);
+
+  // حالات مؤقتة لإضافة التوكن
+  const [newTokenValue, setNewTokenValue] = useState('');
+  const [newTokenName, setNewTokenName] = useState('');
+
+  // ✅ حالة مزود خدمة POW (جديد)
+  const [powProvider, setPowProvider] = useState('railway'); // 'railway' أو 'ngrok'
 
   const sidebarAnim = useRef(new Animated.Value(SIDEBAR_WIDTH)).current;
   const flatListRef = useRef();
@@ -592,6 +630,16 @@ export default function App() {
   const currentChat = chats.find(c => c.id === currentChatId) || chats[0];
   const sortedChats = [...chats].sort((a, b) => (b.pinned === true) - (a.pinned === true));
 
+  // دالة مساعدة للحصول على توكن حسب معرفه
+  const getTokenById = useCallback((id) => {
+    return tokens.find(t => t.id === id) || tokens.find(t => t.id === DEFAULT_TOKEN_ID) || defaultTokenObject;
+  }, [tokens]);
+
+  // دالة الحصول على التوكن النشط
+  const getActiveToken = useCallback(() => {
+    return getTokenById(activeTokenId);
+  }, [activeTokenId, getTokenById]);
+
   // ================= استعادة وحفظ البيانات تلقائياً =================
   useEffect(() => {
     loadChatsFromStorage();
@@ -602,18 +650,54 @@ export default function App() {
   }, [chats]);
 
   useEffect(() => {
+    saveTokensToStorage();
+  }, [tokens]);
+
+  useEffect(() => {
     saveSettingsToStorage();
-  }, [bubbleFontSize, longMessageCollapseEnabled, longMessageCollapseTarget, thinkingEnabled, globalSearchEnabled]);
+  }, [bubbleFontSize, longMessageCollapseEnabled, longMessageCollapseTarget, thinkingEnabled, globalSearchEnabled, activeTokenId, selectedModelType, powProvider]);
 
   const loadChatsFromStorage = async () => {
     try {
       const savedChats = await AsyncStorage.getItem('@deepseek_premium_chats');
       const savedChatId = await AsyncStorage.getItem('@deepseek_premium_current_id');
+      const savedTokens = await AsyncStorage.getItem('@deepseek_premium_tokens');
+      const savedActiveTokenId = await AsyncStorage.getItem('@deepseek_premium_active_token_id');
       const savedBubbleFontSize = await AsyncStorage.getItem('@deepseek_premium_bubble_font_size');
       const savedLongMessageCollapseEnabled = await AsyncStorage.getItem('@deepseek_premium_long_collapse_enabled');
       const savedLongMessageCollapseTarget = await AsyncStorage.getItem('@deepseek_premium_long_collapse_target');
       const savedThinkingEnabled = await AsyncStorage.getItem('@deepseek_premium_thinking_enabled');
       const savedSearchEnabled = await AsyncStorage.getItem('@deepseek_premium_search_enabled');
+      const savedModelType = await AsyncStorage.getItem('@deepseek_premium_model_type');
+      const savedPowProvider = await AsyncStorage.getItem('@deepseek_premium_pow_provider');
+
+      // تحميل التوكنات
+      if (savedTokens) {
+        const parsedTokens = JSON.parse(savedTokens);
+        if (Array.isArray(parsedTokens) && parsedTokens.length > 0) {
+          const hasDefault = parsedTokens.some(t => t.id === DEFAULT_TOKEN_ID);
+          if (!hasDefault) {
+            parsedTokens.unshift(defaultTokenObject);
+          }
+          // ✅ تأكد من وجود التوكن الثانوي
+          const hasSecondary = parsedTokens.some(t => t.id === SECONDARY_TOKEN_ID);
+          if (!hasSecondary) {
+            parsedTokens.push(secondaryTokenObject);
+          }
+          setTokens(parsedTokens);
+        } else {
+          setTokens([defaultTokenObject, secondaryTokenObject]);
+        }
+      } else {
+        setTokens([defaultTokenObject, secondaryTokenObject]);
+      }
+
+      // تحميل معرف التوكن النشط
+      if (savedActiveTokenId) {
+        setActiveTokenId(savedActiveTokenId);
+      } else {
+        setActiveTokenId(DEFAULT_TOKEN_ID);
+      }
 
       if (savedBubbleFontSize) {
         setBubbleFontSize(Number(savedBubbleFontSize));
@@ -630,11 +714,22 @@ export default function App() {
       if (savedSearchEnabled !== null) {
         setGlobalSearchEnabled(savedSearchEnabled === 'true');
       }
+      if (savedModelType) {
+        setSelectedModelType(savedModelType);
+      } else {
+        setSelectedModelType('default');
+      }
+      if (savedPowProvider) {
+        setPowProvider(savedPowProvider);
+      } else {
+        setPowProvider('railway');
+      }
 
       if (savedChats) {
         const parsedChats = JSON.parse(savedChats).map(chat => ({
           pinned: false,
           request_message_id: null,
+          tokenId: chat.tokenId || DEFAULT_TOKEN_ID,
           ...chat,
         }));
         setChats(parsedChats);
@@ -658,6 +753,15 @@ export default function App() {
     }
   };
 
+  const saveTokensToStorage = async () => {
+    try {
+      await AsyncStorage.setItem('@deepseek_premium_tokens', JSON.stringify(tokens));
+      await AsyncStorage.setItem('@deepseek_premium_active_token_id', activeTokenId);
+    } catch (e) {
+      console.error("⚠️ فشل حفظ التوكنات:", e);
+    }
+  };
+
   const saveSettingsToStorage = async () => {
     try {
       await AsyncStorage.setItem('@deepseek_premium_bubble_font_size', String(bubbleFontSize));
@@ -665,6 +769,9 @@ export default function App() {
       await AsyncStorage.setItem('@deepseek_premium_long_collapse_target', longMessageCollapseTarget);
       await AsyncStorage.setItem('@deepseek_premium_thinking_enabled', String(thinkingEnabled));
       await AsyncStorage.setItem('@deepseek_premium_search_enabled', String(globalSearchEnabled));
+      await AsyncStorage.setItem('@deepseek_premium_active_token_id', activeTokenId);
+      await AsyncStorage.setItem('@deepseek_premium_model_type', selectedModelType);
+      await AsyncStorage.setItem('@deepseek_premium_pow_provider', powProvider);
     } catch (e) {
       console.error("⚠️ فشل حفظ الإعدادات:", e);
     }
@@ -672,7 +779,7 @@ export default function App() {
 
   const clearAllChats = async () => {
     try {
-      const defaultChat = [{ id: 'default', title: 'محادثة جديدة', session_id: null, messages: [], parent_message_id: null, request_message_id: null, pinned: false }];
+      const defaultChat = [{ id: 'default', title: 'محادثة جديدة', session_id: null, messages: [], parent_message_id: null, request_message_id: null, pinned: false, tokenId: activeTokenId }];
       setChats(defaultChat);
       setCurrentChatId('default');
       await AsyncStorage.setItem('@deepseek_premium_chats', JSON.stringify(defaultChat));
@@ -703,7 +810,7 @@ export default function App() {
     return (new Date().getTimezoneOffset() * -60).toString();
   }
 
-  function buildFullHeaders(powResponse) {
+  function buildFullHeaders(powResponse, token) {
     return {
       'User-Agent': 'DeepSeek/2.1.1 Android/36',
       'Accept': 'application/json',
@@ -718,24 +825,40 @@ export default function App() {
       'x-device-id': generateDeviceId(),
       'x-os-version': '30',
       'x-app-version': '2.1.1',
-      'Authorization': `Bearer ${TOKEN}`,
+      'Authorization': `Bearer ${token}`,
       'X-DS-PoW-Response': powResponse,
       'accept-charset': 'UTF-8',
     };
   }
 
-  async function getFreshPow() {
+  // ✅ دالة getFreshPow المعدلة لدعم مزودي الخدمة
+  async function getFreshPow(token) {
     try {
-      const response = await fetch(POW_API_URL);
+      const base = powProvider === 'ngrok' ? NGROK_POW_BASE : RAILWAY_POW_BASE;
+      const url = `${base}?authorization=${encodeURIComponent(token)}`;
+      const response = await fetch(url);
       if (response.status !== 200) {
-        throw new Error(`فشل الحصول على POW: ${response.status}`);
+        // إذا فشل، جرب بدون توكن (للحفاظ على التوافق مع السيرفر القديم)
+        const fallbackUrl = powProvider === 'ngrok' ? NGROK_POW_BASE : RAILWAY_POW_BASE;
+        const fallbackResponse = await fetch(fallbackUrl);
+        if (fallbackResponse.status !== 200) {
+          throw new Error(`فشل الحصول على POW: ${fallbackResponse.status}`);
+        }
+        const data = await fallbackResponse.json();
+        if (!data.pow_response && !data.x_ds_pow_response) {
+          throw new Error(`استجابة POW غير مكتملة: ${JSON.stringify(data)}`);
+        }
+        return {
+          powResponse: data.x_ds_pow_response || data.pow_response,
+          powData: data.solved_json
+        };
       }
       const data = await response.json();
-      if (!data.pow_response || !data.solved_json) {
+      if (!data.pow_response && !data.x_ds_pow_response) {
         throw new Error(`استجابة POW غير مكتملة: ${JSON.stringify(data)}`);
       }
       return {
-        powResponse: data.pow_response,
+        powResponse: data.x_ds_pow_response || data.pow_response,
         powData: data.solved_json
       };
     } catch (error) {
@@ -744,7 +867,7 @@ export default function App() {
     }
   }
 
-  async function createChatSession() {
+  async function createChatSession(token) {
     const url = "https://chat.deepseek.com/api/v0/chat_session/create";
     const headers = {
       'x-client-bundle-id': 'com.deepseek.chat',
@@ -753,7 +876,7 @@ export default function App() {
       'x-client-locale': 'en_US',
       'x-client-timezone-offset': getTzOffset(),
       'x-app-version': '2.0.0',
-      'Authorization': `Bearer ${TOKEN}`,
+      'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/json',
       'Accept': '*/*'
     };
@@ -764,7 +887,12 @@ export default function App() {
         body: JSON.stringify({})
       });
       const data = await response.json();
-      return data.data.biz_data.chat_session.id;
+      // التحقق من وجود البيانات المطلوبة
+      if (data && data.data && data.data.biz_data && data.data.biz_data.chat_session) {
+        return data.data.biz_data.chat_session.id;
+      } else {
+        throw new Error('استجابة غير صالحة من الخادم: ' + JSON.stringify(data));
+      }
     } catch (error) {
       console.error("⚠️ خطأ عند إنشاء الجلسة:", error);
       throw error;
@@ -784,16 +912,27 @@ export default function App() {
     refFileIds = [],
     searchEnabled = true,
     thinkingEnabled = false,
-    modelType = 'instant', // جديد: نوع النموذج
-    onThinkingChunk = null, // موجود مسبقاً
+    modelType = 'default', // تغيير القيمة الافتراضية إلى 'default'
+    onThinkingChunk = null,
+    token,
   }) {
-    let activeSessionId = sessionId;
-    if (!activeSessionId) {
-      activeSessionId = await createChatSession();
+    if (!token) {
+      onError(new Error('لا يوجد توكن API صالح للاستخدام'));
+      return;
     }
 
-    const { powResponse, powData } = await getFreshPow();
-    const headers = buildFullHeaders(powResponse);
+    let activeSessionId = sessionId;
+    if (!activeSessionId) {
+      try {
+        activeSessionId = await createChatSession(token);
+      } catch (err) {
+        onError(new Error('فشل إنشاء جلسة: ' + err.message));
+        return;
+      }
+    }
+
+    const { powResponse, powData } = await getFreshPow(token);
+    const headers = buildFullHeaders(powResponse, token);
 
     const payload = {
       chat_session_id: activeSessionId,
@@ -802,7 +941,7 @@ export default function App() {
       ref_file_ids: refFileIds,
       thinking_enabled: thinkingEnabled,
       search_enabled: searchEnabled,
-      model_type: modelType, // إرسال نوع النموذج (instant أو expert)
+      model_type: modelType, // القيمة الصحيحة: 'default' أو 'expert' أو 'vision'
       action: null,
       preempt: false,
       pow: powData,
@@ -875,7 +1014,6 @@ export default function App() {
                     }
                   } else if (frag.type === "THINKING") {
                     thinkingAccumulated += frag.content || '';
-                    // استدعاء callback خاص بالتفكير إذا وجد
                     if (onThinkingChunk) onThinkingChunk(thinkingAccumulated);
                   } else if (frag.type === "RESPONSE") {
                     accumulatedText += frag.content || "";
@@ -983,7 +1121,7 @@ export default function App() {
           requestMessageId: currentRequestMsgId,
           responseMessageId: currentResponseMsgId,
           searchResults: searchResults,
-          thinkingText: thinkingAccumulated // إرجاع نص التفكير النهائي
+          thinkingText: thinkingAccumulated
         });
       } else {
         onError(new Error(`خطأ ${xhr.status}: ${xhr.responseText}`));
@@ -1109,6 +1247,91 @@ export default function App() {
     setFullImageUri(uri);
   };
 
+  // --- دوال إدارة التوكنات ---
+  const handleAddToken = async () => {
+    const trimmedValue = newTokenValue.trim();
+    if (!trimmedValue) {
+      Alert.alert('خطأ', 'يرجى إدخال قيمة التوكن.');
+      return;
+    }
+
+    // تحقق بسيط من عدم وجود التوكن مسبقاً
+    if (tokens.some(t => t.token === trimmedValue)) {
+      Alert.alert('تنبيه', 'هذا التوكن مضاف بالفعل.');
+      return;
+    }
+
+    const name = newTokenName.trim() || `توكن ${tokens.length}`;
+    const newToken = {
+      id: Date.now().toString(),
+      name,
+      token: trimmedValue,
+      isBuiltIn: false,
+      isValid: true,
+    };
+
+    setTokens(prev => [...prev, newToken]);
+    setNewTokenValue('');
+    setNewTokenName('');
+
+    // اختبار صلاحية التوكن المضاف حديثاً (اختياري)
+    try {
+      await testTokenValidity(newToken);
+    } catch (e) {
+      // فشل الاختبار لا يمنع الإضافة، لكن يمكن تحديث الحالة
+    }
+  };
+
+  const testTokenValidity = async (tokenObj) => {
+    try {
+      const response = await fetch('https://chat.deepseek.com/api/v0/chat_session/create', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${tokenObj.token}`,
+          'Content-Type': 'application/json',
+          'x-client-platform': 'web',
+          'x-client-version': '2.0.0',
+          'x-app-version': '2.0.0',
+        },
+        body: JSON.stringify({}),
+      });
+      const isValid = response.status === 200;
+      setTokens(prev => prev.map(t => t.id === tokenObj.id ? { ...t, isValid } : t));
+      return isValid;
+    } catch (error) {
+      setTokens(prev => prev.map(t => t.id === tokenObj.id ? { ...t, isValid: false } : t));
+      return false;
+    }
+  };
+
+  const handleDeleteToken = (tokenId) => {
+    const tokenToDelete = tokens.find(t => t.id === tokenId);
+    if (!tokenToDelete || tokenToDelete.isBuiltIn) return;
+
+    Alert.alert(
+      'حذف التوكن',
+      `هل تريد بالتأكيد حذف "${tokenToDelete.name}"؟`,
+      [
+        { text: 'إلغاء', style: 'cancel' },
+        {
+          text: 'حذف',
+          style: 'destructive',
+          onPress: () => {
+            setTokens(prev => prev.filter(t => t.id !== tokenId));
+            // إذا كان التوكن المحذوف هو النشط، ننتقل للتوكن الافتراضي
+            if (activeTokenId === tokenId) {
+              setActiveTokenId(DEFAULT_TOKEN_ID);
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const handleSetActiveToken = (tokenId) => {
+    setActiveTokenId(tokenId);
+  };
+
   // --- إرسال الرسالة من الواجهة ---
   async function handleSendMessage() {
     if (!inputText.trim() && pendingFiles.length === 0) return;
@@ -1158,14 +1381,14 @@ export default function App() {
     setStreamingMessageId(tempAiId);
     setStreamingText('');
 
-    // تجهيز معرّفات الملفات
     const refFileIds = pendingFiles.map(f => f.fileId);
-    // البحث يكون حسب الإعداد العام (لا تعطيل)
     const effectiveSearchEnabled = globalSearchEnabled;
-    // مسح الملفات بعد الإرسال
     setPendingFiles([]);
 
-    // دالة معالجة تدفق التفكير
+    // الحصول على التوكن الخاص بالمحادثة الحالية
+    const chatTokenId = currentChat.tokenId || activeTokenId;
+    const chatToken = getTokenById(chatTokenId);
+
     const onThinkingChunk = (thinkingText) => {
       setChats(prev =>
         prev.map(c =>
@@ -1189,8 +1412,9 @@ export default function App() {
         refFileIds: refFileIds,
         searchEnabled: effectiveSearchEnabled,
         thinkingEnabled: thinkingEnabled,
-        modelType: selectedModelType, // تمرير نوع النموذج المختار
+        modelType: selectedModelType,
         onThinkingChunk: onThinkingChunk,
+        token: chatToken.token,
         onChunk: (chunkText) => {
           setStreamingText(chunkText);
           setChats(prev =>
@@ -1318,11 +1542,12 @@ export default function App() {
       messages: [],
       parent_message_id: null,
       request_message_id: null,
-      pinned: false
+      pinned: false,
+      tokenId: activeTokenId,
     };
     setChats(prev => [newChatObj, ...prev]);
     setCurrentChatId(newId);
-    setSelectedModelType('instant'); // إعادة تعيين الوضع الافتراضي للمحادثة الجديدة
+    // لا نعيد تعيين الوضع، يبقى كما هو
     if (isSidebarOpen) toggleSidebar();
   };
 
@@ -1391,7 +1616,7 @@ export default function App() {
             setChats(prev => {
               const remaining = prev.filter(chat => chat.id !== chatId);
               if (remaining.length === 0) {
-                const defaultChat = { id: 'default', title: 'محادثة جديدة', session_id: null, messages: [], parent_message_id: null, request_message_id: null, pinned: false };
+                const defaultChat = { id: 'default', title: 'محادثة جديدة', session_id: null, messages: [], parent_message_id: null, request_message_id: null, pinned: false, tokenId: activeTokenId };
                 setCurrentChatId('default');
                 return [defaultChat];
               }
@@ -1427,6 +1652,9 @@ export default function App() {
       messages: chat.messages.map(message => message.id === aiMessageId ? { ...message, text: '', sources: [], thinkingText: null } : message)
     } : chat));
 
+    const chatTokenId = targetChat.tokenId || activeTokenId;
+    const chatToken = getTokenById(chatTokenId);
+
     const onThinkingChunk = (thinkingText) => {
       setChats(prev =>
         prev.map(c =>
@@ -1450,8 +1678,9 @@ export default function App() {
         refFileIds: [],
         searchEnabled: globalSearchEnabled,
         thinkingEnabled: thinkingEnabled,
-        modelType: selectedModelType, // استخدام نفس النموذج المختار حالياً
+        modelType: selectedModelType,
         onThinkingChunk: onThinkingChunk,
+        token: chatToken.token,
         onChunk: (chunkText) => {
           setStreamingText(chunkText);
           setChats(prev => prev.map(chat => chat.id === currentChatId ? {
@@ -1546,12 +1775,25 @@ export default function App() {
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#000000" />
 
-      {/* شريط العناوين العالمي - تصميم نظيف وخفيف */}
+      {/* شريط العناوين مع عرض الوضع والأيقونة */}
       <View style={styles.header}>
         <TouchableOpacity onPress={toggleSidebar} style={styles.iconButton}>
           <Ionicons name="menu-outline" size={26} color="#ffffff" />
         </TouchableOpacity>
-        <Text style={styles.headerTitle} numberOfLines={1}>{currentChat.title}</Text>
+        <View style={{ flex: 1, flexDirection: 'row-reverse', alignItems: 'center', justifyContent: 'center', marginHorizontal: 12 }}>
+          <Text style={styles.headerTitle} numberOfLines={1}>{currentChat.title}</Text>
+          <View style={styles.modeIndicator}>
+            <Ionicons
+              name={selectedModelType === 'expert' ? 'sparkles-outline' : 'flash-outline'}
+              size={14}
+              color="#ffffff"
+              style={{ marginLeft: 4 }}
+            />
+            <Text style={styles.modeIndicatorText}>
+              {selectedModelType === 'expert' ? 'خبير' : 'افتراضي'}
+            </Text>
+          </View>
+        </View>
         <TouchableOpacity onPress={createNewChat} style={styles.iconButton}>
           <Ionicons name="create-outline" size={24} color="#ffffff" />
         </TouchableOpacity>
@@ -1600,7 +1842,7 @@ export default function App() {
             <View style={styles.emptyContainer}>
               {/* عنوان الوضع الحالي كبير وواضح */}
               <Text style={styles.currentModeTitle}>
-                {selectedModelType === 'instant' ? 'الوضع السريع' : 'الوضع الخبير'}
+                {selectedModelType === 'expert' ? 'الوضع الخبير' : 'الوضع الافتراضي'}
               </Text>
 
               {/* المستطيل المقسوم لاختيار الوضع */}
@@ -1608,13 +1850,13 @@ export default function App() {
                 <TouchableOpacity
                   style={[
                     styles.modeOptionButton,
-                    selectedModelType === 'instant' ? styles.modeOptionActive : styles.modeOptionInactive
+                    selectedModelType === 'default' ? styles.modeOptionActive : styles.modeOptionInactive
                   ]}
-                  onPress={() => setSelectedModelType('instant')}
+                  onPress={() => setSelectedModelType('default')}
                 >
-                  <Ionicons name="flash-outline" size={20} color={selectedModelType === 'instant' ? '#000000' : '#ffffff'} />
-                  <Text style={[styles.modeOptionText, selectedModelType === 'instant' ? styles.modeOptionTextActive : styles.modeOptionTextInactive]}>
-                    سريع (Instant)
+                  <Ionicons name="flash-outline" size={20} color={selectedModelType === 'default' ? '#000000' : '#ffffff'} />
+                  <Text style={[styles.modeOptionText, selectedModelType === 'default' ? styles.modeOptionTextActive : styles.modeOptionTextInactive]}>
+                    افتراضي
                   </Text>
                 </TouchableOpacity>
 
@@ -1627,7 +1869,7 @@ export default function App() {
                 >
                   <Ionicons name="sparkles-outline" size={20} color={selectedModelType === 'expert' ? '#000000' : '#ffffff'} />
                   <Text style={[styles.modeOptionText, selectedModelType === 'expert' ? styles.modeOptionTextActive : styles.modeOptionTextInactive]}>
-                    خبير (Expert)
+                    خبير
                   </Text>
                 </TouchableOpacity>
               </View>
@@ -1783,7 +2025,7 @@ export default function App() {
         </View>
       </Modal>
 
-      {/* شاشة الإعدادات العالمية الممتازة */}
+      {/* شاشة الإعدادات العالمية */}
       <Modal
         visible={settingsModalVisible}
         transparent={true}
@@ -1798,7 +2040,7 @@ export default function App() {
                 <Ionicons name="close" size={26} color="#ffffff" />
               </TouchableOpacity>
             </View>
-            <View style={styles.modalBody}>
+            <ScrollView style={styles.modalBody}>
               <View style={styles.settingsGroup}>
                 <Text style={styles.settingsLabel}>الواجهة والتجربة</Text>
                 <View style={styles.settingsRow}>
@@ -1858,11 +2100,154 @@ export default function App() {
                 )}
               </View>
 
+              {/* ✅ قسم مزود خدمة POW الجديد (فوق قسم التوكنات) */}
+              <View style={styles.settingsGroup}>
+                <Text style={styles.settingsLabel}>مزود خدمة POW</Text>
+                <TouchableOpacity
+                  style={[styles.powProviderOption, powProvider === 'railway' && styles.powProviderOptionActive]}
+                  onPress={() => setPowProvider('railway')}
+                >
+                  <View style={{ flexDirection: 'row-reverse', alignItems: 'center' }}>
+                    <Ionicons name={powProvider === 'railway' ? 'radio-button-on' : 'radio-button-off'} size={20} color={powProvider === 'railway' ? '#ffffff' : '#666666'} style={{ marginLeft: 10 }} />
+                    <Text style={[styles.powProviderText, powProvider === 'railway' && styles.powProviderTextActive]}>
+                      Railway (الافتراضي)
+                    </Text>
+                  </View>
+                  <Text style={styles.powProviderUrl}>web-production-c09dc.up.railway.app</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.powProviderOption, powProvider === 'ngrok' && styles.powProviderOptionActive]}
+                  onPress={() => setPowProvider('ngrok')}
+                >
+                  <View style={{ flexDirection: 'row-reverse', alignItems: 'center' }}>
+                    <Ionicons name={powProvider === 'ngrok' ? 'radio-button-on' : 'radio-button-off'} size={20} color={powProvider === 'ngrok' ? '#ffffff' : '#666666'} style={{ marginLeft: 10 }} />
+                    <Text style={[styles.powProviderText, powProvider === 'ngrok' && styles.powProviderTextActive]}>
+                      Ngrok (بديل)
+                    </Text>
+                  </View>
+                  <Text style={styles.powProviderUrl}>immunize-quintet-trimmer.ngrok-free.dev</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* قسم إدارة التوكنات */}
+              <View style={styles.settingsGroup}>
+                <Text style={styles.settingsLabel}>إدارة التوكنات (API Keys)</Text>
+                <TouchableOpacity
+                  style={styles.tokenManagerButton}
+                  onPress={() => {
+                    setSettingsModalVisible(false);
+                    setTimeout(() => setTokenManagerVisible(true), 300);
+                  }}
+                >
+                  <Ionicons name="key-outline" size={20} color="#ffffff" style={{ marginLeft: 8 }} />
+                  <Text style={styles.tokenManagerButtonText}>فتح مدير التوكنات</Text>
+                  <Ionicons name="chevron-back-outline" size={16} color="#666666" style={{ marginRight: 'auto' }} />
+                </TouchableOpacity>
+                <View style={{ marginTop: 8, alignItems: 'flex-end' }}>
+                  <Text style={{ color: '#666666', fontSize: 12 }}>
+                    النشط حالياً: {getActiveToken()?.name || 'غير محدد'}
+                  </Text>
+                </View>
+              </View>
+
               <TouchableOpacity style={styles.dangerButton} onPress={clearAllChats}>
                 <Ionicons name="trash-outline" size={20} color="#ff3b30" style={{ marginLeft: 8 }} />
                 <Text style={styles.dangerButtonText}>حذف جميع سجلات المحادثات</Text>
               </TouchableOpacity>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* مودال إدارة التوكنات */}
+      <Modal
+        visible={tokenManagerVisible}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setTokenManagerVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>إدارة التوكنات</Text>
+              <TouchableOpacity onPress={() => setTokenManagerVisible(false)}>
+                <Ionicons name="close" size={26} color="#ffffff" />
+              </TouchableOpacity>
             </View>
+            <ScrollView style={styles.modalBody}>
+              <Text style={styles.settingsLabel}>التوكنات المضافة</Text>
+              {tokens.map((t) => (
+                <View key={t.id} style={styles.tokenItem}>
+                  <View style={styles.tokenInfo}>
+                    <View style={{ flexDirection: 'row-reverse', alignItems: 'center' }}>
+                      {t.isBuiltIn && <Ionicons name="lock-closed-outline" size={14} color="#666666" style={{ marginLeft: 6 }} />}
+                      <Text style={styles.tokenName}>{t.name}</Text>
+                    </View>
+                    <Text style={styles.tokenValue} numberOfLines={1}>{t.token.substring(0, 20)}...</Text>
+                    <View style={{ flexDirection: 'row-reverse', alignItems: 'center', marginTop: 4 }}>
+                      <View style={[styles.tokenStatusDot, { backgroundColor: t.isValid ? '#4ade80' : '#ef4444' }]} />
+                      <Text style={styles.tokenStatusText}>{t.isValid ? 'صالح' : 'غير صالح'}</Text>
+                    </View>
+                  </View>
+                  <View style={styles.tokenActions}>
+                    {!t.isBuiltIn && (
+                      <>
+                        <TouchableOpacity
+                          style={[styles.tokenActionButton, activeTokenId === t.id && styles.tokenActiveAction]}
+                          onPress={() => handleSetActiveToken(t.id)}
+                        >
+                          <Ionicons name="radio-button-on-outline" size={18} color={activeTokenId === t.id ? '#ffffff' : '#666666'} />
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={styles.tokenActionButton}
+                          onPress={() => testTokenValidity(t)}
+                        >
+                          <Ionicons name="refresh-outline" size={18} color="#666666" />
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={styles.tokenActionButton}
+                          onPress={() => handleDeleteToken(t.id)}
+                        >
+                          <Ionicons name="trash-outline" size={18} color="#ef4444" />
+                        </TouchableOpacity>
+                      </>
+                    )}
+                    {t.isBuiltIn && (
+                      <TouchableOpacity
+                        style={[styles.tokenActionButton, activeTokenId === t.id && styles.tokenActiveAction]}
+                        onPress={() => handleSetActiveToken(t.id)}
+                      >
+                        <Ionicons name="radio-button-on-outline" size={18} color={activeTokenId === t.id ? '#ffffff' : '#666666'} />
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                </View>
+              ))}
+
+              <View style={{ marginTop: 20 }}>
+                <Text style={styles.settingsLabel}>إضافة توكن جديد</Text>
+                <TextInput
+                  style={styles.tokenInput}
+                  placeholder="الصق قيمة التوكن هنا..."
+                  placeholderTextColor="#666666"
+                  value={newTokenValue}
+                  onChangeText={setNewTokenValue}
+                  textAlign="right"
+                />
+                <TextInput
+                  style={styles.tokenInput}
+                  placeholder="اسم اختياري (مثال: حساب العمل)"
+                  placeholderTextColor="#666666"
+                  value={newTokenName}
+                  onChangeText={setNewTokenName}
+                  textAlign="right"
+                />
+                <TouchableOpacity style={styles.addTokenButton} onPress={handleAddToken}>
+                  <Ionicons name="add-circle-outline" size={20} color="#000000" style={{ marginLeft: 6 }} />
+                  <Text style={styles.addTokenButtonText}>إضافة التوكن</Text>
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
           </View>
         </View>
       </Modal>
@@ -2015,8 +2400,21 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '600',
     textAlign: 'center',
-    flex: 1,
-    marginHorizontal: 12,
+    flexShrink: 1,
+  },
+  modeIndicator: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    backgroundColor: '#1a1a1a',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginLeft: 8,
+  },
+  modeIndicatorText: {
+    color: '#ffffff',
+    fontSize: 11,
+    fontWeight: '500',
   },
   iconButton: {
     padding: 6,
@@ -2532,7 +2930,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#050505',
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
-    maxHeight: '80%',
+    maxHeight: '85%',
     paddingBottom: 30,
     borderWidth: 0.5,
     borderColor: '#111111',
@@ -2786,5 +3184,122 @@ const styles = StyleSheet.create({
     color: '#ff3b30',
     fontSize: 14,
     fontWeight: '700',
+  },
+  // أنماط إدارة التوكنات
+  tokenManagerButton: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    backgroundColor: '#1a1a1a',
+    padding: 14,
+    borderRadius: 14,
+    borderWidth: 0.5,
+    borderColor: '#333333',
+  },
+  tokenManagerButtonText: {
+    color: '#ffffff',
+    fontSize: 15,
+    fontWeight: '600',
+    textAlign: 'right',
+  },
+  tokenItem: {
+    flexDirection: 'row-reverse',
+    backgroundColor: '#1a1a1a',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 8,
+    borderWidth: 0.5,
+    borderColor: '#333333',
+    alignItems: 'center',
+  },
+  tokenInfo: {
+    flex: 1,
+    marginRight: 10,
+  },
+  tokenName: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
+    textAlign: 'right',
+  },
+  tokenValue: {
+    color: '#666666',
+    fontSize: 12,
+    textAlign: 'right',
+    marginTop: 4,
+  },
+  tokenStatusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginLeft: 6,
+  },
+  tokenStatusText: {
+    color: '#666666',
+    fontSize: 11,
+  },
+  tokenActions: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+  },
+  tokenActionButton: {
+    padding: 6,
+    marginLeft: 6,
+  },
+  tokenActiveAction: {
+    backgroundColor: '#333333',
+    borderRadius: 12,
+  },
+  tokenInput: {
+    backgroundColor: '#1a1a1a',
+    color: '#ffffff',
+    borderRadius: 12,
+    padding: 12,
+    fontSize: 14,
+    textAlign: 'right',
+    marginBottom: 10,
+    borderWidth: 0.5,
+    borderColor: '#333333',
+  },
+  addTokenButton: {
+    flexDirection: 'row-reverse',
+    backgroundColor: '#ffffff',
+    padding: 14,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 6,
+  },
+  addTokenButtonText: {
+    color: '#000000',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  // ✅ أنماط قسم مزود خدمة POW الجديدة
+  powProviderOption: {
+    backgroundColor: '#1a1a1a',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 10,
+    borderWidth: 0.5,
+    borderColor: '#333333',
+  },
+  powProviderOptionActive: {
+    borderColor: '#ffffff',
+    backgroundColor: '#222222',
+  },
+  powProviderText: {
+    color: '#ffffff',
+    fontSize: 15,
+    fontWeight: '600',
+    textAlign: 'right',
+  },
+  powProviderTextActive: {
+    color: '#ffffff',
+  },
+  powProviderUrl: {
+    color: '#666666',
+    fontSize: 12,
+    textAlign: 'right',
+    marginTop: 4,
   },
 });
