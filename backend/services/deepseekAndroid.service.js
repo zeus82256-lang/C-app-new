@@ -3,6 +3,10 @@ const axios = require('axios');
 const DEFAULT_DEEPSEEK_TOKEN = process.env.DEEPSEEK_APP_TOKEN || 'IVlSFv6JwO2TttyAhMW6Cu9/eMCDQhcfY0uHWu000SDnAyEwsYxtR8rFADgo22LM';
 const DEFAULT_POW_URL = process.env.DEEPSEEK_POW_URL || 'https://web-production-c09dc.up.railway.app/pow';
 
+function removeDeepSeekFinishedMarker(text) {
+    return (text || '').replace(/(?:\r?\n|\s)*FINISHED\s*$/i, '').trim();
+}
+
 function generateDeviceId() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
     let result = '';
@@ -144,6 +148,8 @@ async function askDeepSeek(prompt, options = {}) {
         response.data.on('end', resolve);
         response.data.on('error', reject);
     });
+
+    state.text = removeDeepSeekFinishedMarker(state.text);
 
     if (!state.text.trim()) throw new Error('DeepSeek returned an empty response');
 
