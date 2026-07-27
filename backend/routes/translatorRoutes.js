@@ -195,6 +195,8 @@ function truncatePromptIfNeeded(prompt, maxLength = 10000) {
 
 
 const ARABIC_FULL_CHAPTER_WORD_THRESHOLD = 800;
+const SHORT_CHAPTER_SOURCE_WORD_THRESHOLD = 900;
+const MIN_ARABIC_TO_ENGLISH_WORD_RATIO = 0.35;
 
 function stripCodeBlocks(text) {
     return (text || '').replace(/```[\s\S]*?```/g, ' ');
@@ -210,6 +212,10 @@ function getArabicLetterCount(text) {
 
 function getArabicWordCount(text) {
     return ((text || '').match(/[\u0600-\u06FF]+/g) || []).length;
+}
+
+function getEnglishWordCount(text) {
+    return ((text || '').match(/\b[A-Za-z][A-Za-z'’\-]*\b/g) || []).length;
 }
 
 function escapeRegex(value) {
@@ -278,17 +284,20 @@ function validateTranslatedChapter(translatedText, sourceContent) {
     const reasons = [];
     const englishResidues = extractEnglishResidues(text);
     const arabicWords = getArabicWordCount(text);
+    const sourceWords = getEnglishWordCount(source);
+    const wordRatio = sourceWords > 0 ? arabicWords / sourceWords : 0;
+    const sourceLooksShort = sourceWords > 0 && sourceWords < SHORT_CHAPTER_SOURCE_WORD_THRESHOLD;
 
-    if (text.length < 80) reasons.push('الناتج قصير جداً ولا يبدو فصلاً مترجماً كاملاً');
-    if (source.length >= 500 && text.length < source.length * 0.20) reasons.push('الناتج أقصر بكثير من الفصل الأصلي');
+    if (text.length < 80 && source.length >= 200) reasons.push('الناتج قصير جداً ولا يبدو فصلاً مترجماً كاملاً');
+    if (!sourceLooksShort && source.length >= 500 && text.length < source.length * 0.20) reasons.push('الناتج أقصر بكثير من الفصل الأصلي');
     if (getArabicLetterCount(text) < 50) reasons.push('الناتج لا يحتوي على نص عربي كافٍ');
     if (englishResidues.length > 0) reasons.push(`الناتج يحتوي على كلمات إنجليزية غير مترجمة: ${englishResidues.slice(0, 12).join(', ')}`);
     if (isLikelyAiRefusalOrMeta(text)) reasons.push('الناتج يبدو كرسالة من الذكاء الاصطناعي أو تعليمات وليس فصلاً مترجماً');
-    if (englishResidues.length === 0 && arabicWords > 0 && arabicWords < ARABIC_FULL_CHAPTER_WORD_THRESHOLD) {
-        reasons.push(`الناتج عربي لكنه أقصر من ${ARABIC_FULL_CHAPTER_WORD_THRESHOLD} كلمة ويحتاج مراجعة اكتمال`);
+    if (!sourceLooksShort && sourceWords >= SHORT_CHAPTER_SOURCE_WORD_THRESHOLD && arabicWords > 0 && arabicWords < ARABIC_FULL_CHAPTER_WORD_THRESHOLD && wordRatio < MIN_ARABIC_TO_ENGLISH_WORD_RATIO) {
+        reasons.push(`الناتج العربي قصير مقارنة بالأصل: ${arabicWords} كلمة عربية مقابل ${sourceWords} كلمة إنجليزية تقريباً`);
     }
 
-    return { ok: reasons.length === 0, reasons, englishResidues, arabicWords };
+    return { ok: reasons.length === 0, reasons, englishResidues, arabicWords, sourceWords, wordRatio };
 }
 
 async function translateEnglishResiduesOnly(provider, modelToUse, key, translatedText, residues, options) {
@@ -326,23 +335,29 @@ ${JSON.stringify(contexts, null, 2)}
 async function reviewQuestionableChapter(provider, modelToUse, key, translatedText, sourceContent, validation, options) {
     const prompt = `
 أنت مراجع جودة لترجمة فصول روايات من الإنجليزية إلى العربية.
-افحص هل النص العربي الناتج فصل مترجم مقبول أم أنه ناقص/مقصوص/رسالة ذكاء اصطناعي/لا يزال يحتوي كلمات إنجليزية غير مترجمة.
-ملاحظات الفحص الآلي:
+قارن النص الإنجليزي الأصلي بالنص العربي الناتج، ولا تعتمد على عدد كلمات عربي ثابت وحده.
+
+مؤشرات آلية:
+- كلمات الأصل الإنجليزية تقريباً: ${validation.sourceWords}
+- كلمات النص العربي تقريباً: ${validation.arabicWords}
+- نسبة العربي إلى الإنجليزي تقريباً: ${validation.wordRatio.toFixed(2)}
+- الملاحظات:
 - ${validation.reasons.join('\n- ')}
 
-القواعد:
-1. الكلمات اللاتينية من حرف واحد مثل A أو B مسموحة إذا كانت رتبة/تصنيفاً.
-2. أي كلمة إنجليزية أطول من حرف واحد داخل السرد تعني غالباً أن الترجمة غير مكتملة.
-3. إذا كان النص العربي أقل من ${ARABIC_FULL_CHAPTER_WORD_THRESHOLD} كلمة، اقبله فقط إذا كان يبدو فصلاً كاملاً قصيراً وليس مقصوصاً.
-4. أعد JSON فقط بدون شرح.
+القواعد النهائية:
+1. إذا كان الأصل نفسه قصيراً والعربي يغطي نفس الأحداث وبحجم منطقي، القرار accept حتى لو كان أقل من ${ARABIC_FULL_CHAPTER_WORD_THRESHOLD} كلمة.
+2. إذا كان العربي مختصراً/ناقصاً مقارنة بالأصل أو رسالة ذكاء اصطناعي أو تعليمات، القرار retranslate.
+3. الكلمات اللاتينية المفردة مثل A أو S أو B مسموحة إذا كانت رتباً/تصنيفات ولا تجعل الفصل يفشل.
+4. الكلمات الإنجليزية الكاملة داخل النص العربي يجب أن تكون قد تُرجمت واستُبدلت فقط، ولا تطلب إعادة ترجمة فصل كامل بسببها إلا إذا بقيت كثيرة أو أثبتت أن الفصل غير مترجم.
+5. أعد JSON فقط بدون شرح زائد.
 
 الشكل المطلوب:
-{"decision":"accept" أو "retranslate", "reason":"سبب عربي قصير"}
+{"decision":"accept" أو "retranslate", "reason":"سبب عربي قصير يوضح المقارنة مع الأصل"}
 
-مقتطف من النص الأصلي:
-"""${sourceContent.substring(0, 4000)}"""
+النص الإنجليزي الأصلي للمقارنة:
+"""${sourceContent.substring(0, 7000)}"""
 
-النص المترجم للمراجعة:
+النص العربي للمراجعة:
 """${translatedText.substring(0, 9000)}"""
 `;
     const response = await callTranslationProvider(provider, modelToUse, key, prompt, options);
@@ -404,9 +419,9 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
             powUrl: resolveDeepSeekPowUrl(provider),
             timeout: options.timeout || 500000,
             context: getDeepSeekConversationContext(
-                options.deepSeekContexts,
-                options.deepSeekPurpose,
-                options.deepSeekBatchKey
+                options.conversationContexts,
+                options.conversationPurpose,
+                options.conversationBatchKey
             )
         };
         return askDeepSeek(prompt, deepSeekOptions);
@@ -488,13 +503,15 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
             'chatgpt-residency-region': "no_constraint",
             'Cookie': "__cflb=04dTod5Jcx9DYJeMeKbyj32ve2B3i9pLVRxJxEAaKD; _cfuvid=PXu6q36jhfgxnsdFkDmqwLzCfHOSgG588liApL0856A-1777834828.2542033-1.0.1.1-JFC10kaoqt9_IXzxrixI6zZuAm.TzRPF14QfJiD43MQ; oai-ll=; oai-sc=0gAAAAABp959mEmk6Qr5JsnqYMpWx1-15EJhCVV2EV6SQpet7Z7SjNuAT0x2cVScJu_g_TE9_NXidYfi68DtZfl4ImOQIRkr8PF-R-v9PUl7IPGtYiF1rwqdVm0NjapKV1lROdrmNGkiuNgcVMGYXMrP45hfmmQKiCQ5MBQLjfI7XI2tKSLvHT3WkjFEnmDZIRtVz85lyV9pxK181GJRARSxM53m06IfD3jEDjVbSR5QDQbL6Nxl4l7c; __cf_bm=y_lpbPz3viZYHSAd8nCLtIlm2JBCYWvEwOz8xvvwFow-1777835878.3854406-1.0.1.1-Muu0UxZKqufJhSVDELNGz2fO12Xcqc.oJ3hINoXkGIc2tGinJqVnmBTM7EAKDRfqdl1WdKtZ06fuCJ3y5DddxeMPVlBNX_r7daQReYa59qkFBwXOF3p4W3lwU.tdPN9A",
             'Conduit-Token': conduitToken,
-            'x-oai-convo-session-id': uuidv4(),
+            'x-oai-convo-session-id': getDeepSeekConversationContext(options.conversationContexts, options.conversationPurpose, options.conversationBatchKey)?.sessionId || uuidv4(),
             'x-oai-turn-trace-id': uuidv4(),
             'x-openai-target-path': '/backend-api/f/conversation'
         };
         
         const messageId = uuidv4();
-        const parentMessageId = uuidv4();
+        const chatContext = getDeepSeekConversationContext(options.conversationContexts, options.conversationPurpose, options.conversationBatchKey);
+        if (chatContext && !chatContext.sessionId) chatContext.sessionId = chatHeaders['x-oai-convo-session-id'];
+        const parentMessageId = chatContext?.parentMessageId || uuidv4();
         
         const payload = {
             action: "next",
@@ -516,6 +533,7 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
         
         // Collect full response from stream
         let fullResponse = "";
+        let responseMessageId = null;
         await new Promise((resolve, reject) => {
             response.data.on('data', (chunk) => {
                 const lines = chunk.toString().split('\n');
@@ -525,6 +543,7 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
                         if (data === '[DONE]') continue;
                         try {
                             const event = JSON.parse(data);
+                            if (event.message?.id) responseMessageId = event.message.id;
                             if (event.message && event.message.content && event.message.content.parts && event.message.content.parts[0]) {
                                 fullResponse = event.message.content.parts[0];
                             }
@@ -537,6 +556,10 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
         });
         
         if (!fullResponse) throw new Error("ChatGPT Android: empty response");
+        if (chatContext) {
+            if (responseMessageId) chatContext.parentMessageId = responseMessageId;
+            chatContext.lastUpdated = new Date();
+        }
         return fullResponse;
     }
 
@@ -663,7 +686,7 @@ async function processTranslationJob(jobId) {
         const extractPrompt = settings?.translatorExtractPrompt || DEFAULT_EXTRACT_PROMPT;
 
         const chaptersToProcess = job.targetChapters.sort((a, b) => a - b);
-        const deepSeekContexts = { chapters: new Map(), glossary: new Map() };
+        const conversationContexts = { chapters: new Map(), glossary: new Map(), chapter_review: new Map() };
 
         for (const [chapterIndex, chapterNum] of chaptersToProcess.entries()) {
             const freshJob = await TranslationJob.findById(jobId);
@@ -675,10 +698,10 @@ async function processTranslationJob(jobId) {
                 break;
             }
 
-            const deepSeekBatchKey = Math.floor(chapterIndex / DEEPSEEK_CHAPTERS_PER_CONVERSATION);
+            const conversationBatchKey = Math.floor(chapterIndex / DEEPSEEK_CHAPTERS_PER_CONVERSATION);
             const isFirstChapterInDeepSeekBatch = chapterIndex % DEEPSEEK_CHAPTERS_PER_CONVERSATION === 0;
             if (isFirstChapterInDeepSeekBatch) {
-                await pushLog(jobId, `💬 DeepSeek: بدء محادثتين جديدتين للفصول ${chapterIndex + 1}-${Math.min(chapterIndex + DEEPSEEK_CHAPTERS_PER_CONVERSATION, chaptersToProcess.length)} (الفصول + المصطلحات)`, 'info');
+                await pushLog(jobId, `💬 بدء 3 محادثات جديدة للفصول ${chapterIndex + 1}-${Math.min(chapterIndex + DEEPSEEK_CHAPTERS_PER_CONVERSATION, chaptersToProcess.length)} (ترجمة الفصول + المراجعة/إصلاح الكلمات + المصطلحات)`, 'info');
             }
 
             const freshNovel = await Novel.findById(job.novelId);
@@ -766,9 +789,9 @@ ${sourceContent}
                             await pushLog(jobId, `1️⃣ مزوّد: ${providerName} | نموذج: ${modelToUse} | مفتاح ${keyIdx + 1}/${keys.length} | محاولة ${attempt}`, 'info');
                             const candidateText = await callTranslationProvider(provider, modelToUse, key, promptForAttempt, {
                                 deepSeekJobId: jobId.toString(),
-                                deepSeekContexts,
-                                deepSeekPurpose: 'chapters',
-                                deepSeekBatchKey
+                                conversationContexts,
+                                conversationPurpose: 'chapters',
+                                conversationBatchKey
                             });
                             let candidateTextForReview = removeDeepSeekFinishedMarker(candidateText);
                             if (candidateTextForReview !== (candidateText || '').trim()) {
@@ -781,9 +804,9 @@ ${sourceContent}
                                 try {
                                     candidateTextForReview = await translateEnglishResiduesOnly(provider, modelToUse, key, candidateTextForReview, validation.englishResidues, {
                                         deepSeekJobId: jobId.toString(),
-                                        deepSeekContexts,
-                                        deepSeekPurpose: 'chapter_review',
-                                        deepSeekBatchKey
+                                        conversationContexts,
+                                        conversationPurpose: 'chapter_review',
+                                        conversationBatchKey
                                     });
                                     validation = validateTranslatedChapter(candidateTextForReview, sourceContent);
                                 } catch (replaceErr) {
@@ -794,9 +817,9 @@ ${sourceContent}
                             if (!validation.ok) {
                                 const review = await reviewQuestionableChapter(provider, modelToUse, key, candidateTextForReview, sourceContent, validation, {
                                     deepSeekJobId: jobId.toString(),
-                                    deepSeekContexts,
-                                    deepSeekPurpose: 'chapter_review',
-                                    deepSeekBatchKey
+                                    conversationContexts,
+                                    conversationPurpose: 'chapter_review',
+                                    conversationBatchKey
                                 });
 
                                 if (review.decision !== 'accept') {
@@ -895,9 +918,9 @@ Arabic Text (Excerpt):
                         const extPrompt = extractionInput + "\n\nRETURN ONLY JSON.";
                         jsonText = await callTranslationProvider(extProvider, extModelId, extKey, extPrompt, {
                             deepSeekJobId: jobId.toString(),
-                            deepSeekContexts,
-                            deepSeekPurpose: 'glossary',
-                            deepSeekBatchKey
+                            conversationContexts,
+                            conversationPurpose: 'glossary',
+                            conversationBatchKey
                         });
                     }
                     
