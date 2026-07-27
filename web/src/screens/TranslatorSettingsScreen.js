@@ -75,7 +75,7 @@ export default function TranslatorSettingsScreen({ navigation }) {
                   name: p.name || 'مزوّد جديد',
                   baseUrl: p.baseUrl || '',
                   models: p.models && p.models.length ? p.models : [{ modelId: 'gemini-2.5-flash', modelName: 'Gemini 2.5 Flash' }],
-                  apiKeys: p.apiKeys || [],
+                  apiKeys: (p.apiKeys && p.apiKeys.length ? p.apiKeys : (p.deepSeekTokens || [])),
                   selectedModel: p.selectedModel || (p.models && p.models[0]?.modelId) || 'gemini-2.5-flash',
                   priority: p.priority !== undefined ? p.priority : idx,
                   thinkingEnabled: Boolean(p.thinkingEnabled),
@@ -211,7 +211,7 @@ export default function TranslatorSettingsScreen({ navigation }) {
               thinkingEnabled: p.thinkingEnabled,
               searchEnabled: p.searchEnabled,
               deepSeekModelType: p.deepSeekModelType,
-              deepSeekTokens: p.deepSeekTokens,
+              deepSeekTokens: isDeepSeekProvider(p) ? p.apiKeys : p.deepSeekTokens,
               powProviders: normalizePowProviders(p.powProviders).filter(pow => pow.url.trim() !== '').map(pow => ({
                   id: pow.id,
                   name: pow.name,
@@ -381,12 +381,12 @@ export default function TranslatorSettingsScreen({ navigation }) {
                                 ))}
 
                                 {/* المفاتيح */}
-                                <Text style={styles.miniLabel}>مفاتيح API (كل مفتاح في سطر)</Text>
-                                <Text style={styles.hintSmall}>🔑 بالنسبة لـ ChatGPT Android: اترك الحقل فارغاً أو اكتب أي نص (لا يحتاج مفتاح حقيقي)</Text>
+                                <Text style={styles.miniLabel}>{isDeepSeekProvider(provider) ? 'توكنات DeepSeek (كل توكن في سطر)' : 'مفاتيح API (كل مفتاح في سطر)'}</Text>
+                                <Text style={styles.hintSmall}>{isDeepSeekProvider(provider) ? '🔑 بالنسبة لـ DeepSeek: ضع توكنات الحساب هنا؛ سيتم استخدامها فعلياً بدل التوكن الافتراضي.' : '🔑 بالنسبة لـ ChatGPT Android: اترك الحقل فارغاً أو اكتب أي نص (لا يحتاج مفتاح حقيقي)'}</Text>
                                 <TextInput
                                     style={styles.keysInputSmall}
                                     multiline
-                                    placeholder="AIzaSy...\nsk-..."
+                                    placeholder={isDeepSeekProvider(provider) ? "DeepSeek token 1\nDeepSeek token 2" : "AIzaSy...\nsk-..."}
                                     placeholderTextColor="#666"
                                     value={provider._keysText || provider.apiKeys.join('\n')}
                                     onChangeText={(text) => updateProviderKeys(provider.providerId, text)}
