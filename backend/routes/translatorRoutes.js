@@ -181,6 +181,191 @@ function truncatePromptIfNeeded(prompt, maxLength = 10000) {
     return `${firstPart}\n\n...[تم اقتطاع النص بسبب طوله، ثم استئناف من النهاية]...\n\n${lastPart}`;
 }
 
+
+const ARABIC_FULL_CHAPTER_WORD_THRESHOLD = 1000;
+
+function stripCodeBlocks(text) {
+    return (text || '').replace(/```[\s\S]*?```/g, ' ');
+}
+
+function getArabicLetterCount(text) {
+    return (text || '').match(/[\u0600-\u06FF]/g)?.length || 0;
+}
+
+function getArabicWordCount(text) {
+    return ((text || '').match(/[\u0600-\u06FF]+/g) || []).length;
+}
+
+function escapeRegex(value) {
+    return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function extractEnglishResidues(text) {
+    const cleaned = stripCodeBlocks(text);
+    const matches = cleaned.match(/\b[A-Za-z][A-Za-z'’\-]*\b/g) || [];
+    const seen = new Set();
+    const residues = [];
+
+    for (const word of matches) {
+        const normalized = word.trim();
+        // السماح بحرف لاتيني واحد لأنه قد يكون رتبة/تصنيفاً مثل A أو B.
+        if (normalized.length <= 1) continue;
+        const key = normalized.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        residues.push(normalized);
+    }
+
+    return residues;
+}
+
+function getEnglishResidueContexts(text, residues, contextChars = 45) {
+    const value = text || '';
+    return residues.slice(0, 80).map(word => {
+        const match = new RegExp(`\\b${escapeRegex(word)}\\b`, 'i').exec(value);
+        if (!match) return { word, context: word };
+        const start = Math.max(0, match.index - contextChars);
+        const end = Math.min(value.length, match.index + word.length + contextChars);
+        return { word, context: value.substring(start, end).replace(/\s+/g, ' ').trim() };
+    });
+}
+
+function parseJsonFromAiText(text) {
+    let jsonText = (text || '').trim();
+    if (jsonText.startsWith('```json')) jsonText = jsonText.replace(/^```json\s*/i, '').replace(/\s*```$/, '');
+    else if (jsonText.startsWith('```')) jsonText = jsonText.replace(/^```\s*/, '').replace(/\s*```$/, '');
+    if (/^json\s*[\n\r]/i.test(jsonText)) jsonText = jsonText.replace(/^json\s*[\n\r]+/i, '');
+    const jsonMatch = jsonText.match(/(\[[\s\S]*\]|\{[\s\S]*\})/);
+    if (jsonMatch) jsonText = jsonMatch[1];
+    return JSON.parse(jsonText);
+}
+
+function isLikelyAiRefusalOrMeta(text) {
+    const lower = (text || '').toLowerCase();
+    const patterns = [
+        /\bas an ai\b/,
+        /\bi (?:can'?t|cannot|am unable to)\b/,
+        /\bi need (?:the )?(?:chapter|text|content)\b/,
+        /\bplease provide\b/,
+        /\btranslation\s+instructions?\b/,
+        /\bglossary\b[\s\S]{0,120}\bjson\b/,
+        /\benglish text to translate\b/,
+        /\boutput only\b/
+    ];
+    return patterns.some(pattern => pattern.test(lower));
+}
+
+function validateTranslatedChapter(translatedText, sourceContent) {
+    const text = (translatedText || '').trim();
+    const source = (sourceContent || '').trim();
+    const reasons = [];
+    const englishResidues = extractEnglishResidues(text);
+    const arabicWords = getArabicWordCount(text);
+
+    if (text.length < 80) reasons.push('الناتج قصير جداً ولا يبدو فصلاً مترجماً كاملاً');
+    if (source.length >= 500 && text.length < source.length * 0.20) reasons.push('الناتج أقصر بكثير من الفصل الأصلي');
+    if (getArabicLetterCount(text) < 50) reasons.push('الناتج لا يحتوي على نص عربي كافٍ');
+    if (englishResidues.length > 0) reasons.push(`الناتج يحتوي على كلمات إنجليزية غير مترجمة: ${englishResidues.slice(0, 12).join(', ')}`);
+    if (isLikelyAiRefusalOrMeta(text)) reasons.push('الناتج يبدو كرسالة من الذكاء الاصطناعي أو تعليمات وليس فصلاً مترجماً');
+    if (englishResidues.length === 0 && arabicWords > 0 && arabicWords < ARABIC_FULL_CHAPTER_WORD_THRESHOLD) {
+        reasons.push(`الناتج عربي لكنه أقصر من ${ARABIC_FULL_CHAPTER_WORD_THRESHOLD} كلمة ويحتاج مراجعة اكتمال`);
+    }
+
+    return { ok: reasons.length === 0, reasons, englishResidues, arabicWords };
+}
+
+async function translateEnglishResiduesOnly(provider, modelToUse, key, translatedText, residues, options) {
+    if (!residues.length) return translatedText;
+    const contexts = getEnglishResidueContexts(translatedText, residues);
+    const prompt = `
+أنت مدقق ترجمة عربية. توجد كلمات إنجليزية متبقية داخل فصل عربي.
+المطلوب: ترجم كل كلمة إنجليزية فقط اعتماداً على السياق المجاور، ولا تترجم الجملة كاملة.
+إذا كانت الكلمة حرفاً واحداً يمثل رتبة/تصنيفاً مثل A أو B فلا تُرجعها أصلاً.
+أعد JSON فقط بالشكل:
+[{"word":"EnglishWord","translation":"الترجمة العربية"}]
+
+الكلمات والسياقات:
+${JSON.stringify(contexts, null, 2)}
+`;
+    const response = await callTranslationProvider(provider, modelToUse, key, prompt, options);
+    let replacements = [];
+    try {
+        const parsed = parseJsonFromAiText(response);
+        replacements = Array.isArray(parsed) ? parsed : (parsed.replacements || []);
+    } catch (e) {
+        throw new Error(`فشل تحليل بدائل الكلمات الإنجليزية: ${e.message}`);
+    }
+
+    let fixedText = translatedText;
+    for (const item of replacements) {
+        const word = (item.word || '').trim();
+        const translation = (item.translation || '').trim();
+        if (!word || !translation || word.length <= 1) continue;
+        fixedText = fixedText.replace(new RegExp(`\\b${escapeRegex(word)}\\b`, 'g'), translation);
+    }
+    return fixedText;
+}
+
+async function reviewQuestionableChapter(provider, modelToUse, key, translatedText, sourceContent, validation, options) {
+    const prompt = `
+أنت مراجع جودة لترجمة فصول روايات من الإنجليزية إلى العربية.
+افحص هل النص العربي الناتج فصل مترجم مقبول أم أنه ناقص/مقصوص/رسالة ذكاء اصطناعي/لا يزال يحتوي كلمات إنجليزية غير مترجمة.
+ملاحظات الفحص الآلي:
+- ${validation.reasons.join('\n- ')}
+
+القواعد:
+1. الكلمات اللاتينية من حرف واحد مثل A أو B مسموحة إذا كانت رتبة/تصنيفاً.
+2. أي كلمة إنجليزية أطول من حرف واحد داخل السرد تعني غالباً أن الترجمة غير مكتملة.
+3. إذا كان النص العربي أقل من ${ARABIC_FULL_CHAPTER_WORD_THRESHOLD} كلمة، اقبله فقط إذا كان يبدو فصلاً كاملاً قصيراً وليس مقصوصاً.
+4. أعد JSON فقط بدون شرح.
+
+الشكل المطلوب:
+{"decision":"accept" أو "retranslate", "reason":"سبب عربي قصير"}
+
+مقتطف من النص الأصلي:
+"""${sourceContent.substring(0, 4000)}"""
+
+النص المترجم للمراجعة:
+"""${translatedText.substring(0, 9000)}"""
+`;
+    const response = await callTranslationProvider(provider, modelToUse, key, prompt, options);
+    try {
+        const parsed = parseJsonFromAiText(response);
+        return {
+            decision: parsed.decision === 'accept' ? 'accept' : 'retranslate',
+            reason: parsed.reason || 'قرار المراجع الآلي'
+        };
+    } catch (e) {
+        return { decision: 'retranslate', reason: `تعذر تحليل رد المراجعة: ${e.message}` };
+    }
+}
+
+function buildRepairTranslationPrompt(basePrompt, glossaryText, sourceContent, previousTranslation, reasons) {
+    return `
+${basePrompt}
+
+مراجعة صارمة: الترجمة السابقة فشلت للأسباب التالية:
+- ${reasons.join('\n- ')}
+
+أعد ترجمة الفصل كاملاً من النص الإنجليزي الأصلي أدناه إلى العربية فقط.
+مسموح فقط بحروف لاتينية مفردة للرتب/التصنيفات مثل A أو B عند الحاجة.
+ممنوع ترك أي كلمة إنجليزية كاملة داخل السرد. ممنوع الاعتذار أو شرح ما فعلته. ممنوع إخراج JSON أو مصطلحات فقط.
+أخرج الفصل المترجم كاملاً فقط.
+
+--- GLOSSARY (Use these strictly) ---
+${glossaryText}
+-------------------------------------
+
+--- PREVIOUS FAILED OUTPUT (Do not copy its English/meta errors) ---
+${(previousTranslation || '').substring(0, 5000)}
+-------------------------------------
+
+--- ENGLISH Text TO TRANSLATE ---
+${sourceContent}
+---------------------------------
+`;
+}
+
 // 🔥 Unified provider caller supporting Gemini, OpenRouter, Cloudflare, custom APIs, and ChatGPT Android
 async function callTranslationProvider(provider, modelName, apiKey, prompt, options = {}) {
     const providerId = (provider.providerId || 'gemini').toLowerCase();
@@ -198,7 +383,7 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
             token: deepSeekToken,
             thinkingEnabled: Boolean(provider.thinkingEnabled),
             searchEnabled: provider.searchEnabled !== false,
-            modelType: provider.deepSeekModelType === 'expert' ? 'expert' : 'instant',
+            modelType: provider.deepSeekModelType === 'expert' ? 'expert' : 'default',
             powUrl: resolveDeepSeekPowUrl(provider),
             timeout: options.timeout || 500000,
             context: getDeepSeekConversationContext(
@@ -517,31 +702,36 @@ ${sourceContent}
             let translationSuccess = false;
             let usedProvider = null; // track which provider succeeded
 
-            // ========== Multi-provider with double cycle ==========
-            const MAX_CYCLES = 2;
-            let cycle = 0;
-            
-            while (!translationSuccess && cycle < MAX_CYCLES) {
-                cycle++;
-                if (cycle > 1) {
-                    await pushLog(jobId, `🔄 دورة ${cycle}: محاولة إضافية عبر جميع المزوّدين`, 'info');
+            // ========== Multi-provider translation with strict validation ==========
+            const RETRY_DELAY_MS = 30 * 60 * 1000;
+            let attempt = 0;
+            let lastValidationReasons = [];
+
+            while (!translationSuccess) {
+                attempt++;
+                const freshAttemptJob = await TranslationJob.findById(jobId);
+                if (!freshAttemptJob || freshAttemptJob.status !== 'active') break;
+
+                if (attempt > 1) {
+                    await pushLog(jobId, `🔄 محاولة ${attempt}: إعادة ترجمة الفصل ${chapterNum} حتى ينجح ولا يبقى إنجليزياً`, 'info');
                 }
-                
+
+                const promptForAttempt = lastValidationReasons.length > 0
+                    ? buildRepairTranslationPrompt(transPrompt, glossaryText, sourceContent, translatedText, lastValidationReasons)
+                    : translationInput;
+
                 for (const provider of providers) {
                     if (translationSuccess) break;
                     const providerName = provider.name || provider.providerId;
                     const modelToUse = provider.selectedModel || (provider.models && provider.models[0]?.modelId) || 'gemini-2.5-flash';
                     let keys = provider.apiKeys || [];
-                    
                     const isChatGPT = isChatGPTAndroidProvider(provider);
                     const isDeepSeek = isDeepSeekProvider(provider);
-                    
+
                     if (keys.length === 0 && !isChatGPT && !isDeepSeek) {
                         await pushLog(jobId, `⚠️ المزوّد ${providerName} ليس لديه مفاتيح – تخطيه`, 'warning');
                         continue;
                     }
-                    
-                    // For ChatGPT with empty keys, create a dummy key
                     if (isChatGPT && keys.length === 0) {
                         keys = ['dummy-key-for-chatgpt-android'];
                         await pushLog(jobId, `🔑 مزوّد ChatGPT Android: سيتم استخدام مفتاح وهمي (لا يحتاج مفتاح حقيقي)`, 'info');
@@ -554,41 +744,75 @@ ${sourceContent}
                     for (let keyIdx = 0; keyIdx < keys.length; keyIdx++) {
                         const key = keys[keyIdx];
                         try {
-                            await pushLog(jobId, `1️⃣ مزوّد: ${providerName} | نموذج: ${modelToUse} | مفتاح ${keyIdx + 1}/${keys.length}`, 'info');
-                            translatedText = await callTranslationProvider(provider, modelToUse, key, translationInput, {
+                            await pushLog(jobId, `1️⃣ مزوّد: ${providerName} | نموذج: ${modelToUse} | مفتاح ${keyIdx + 1}/${keys.length} | محاولة ${attempt}`, 'info');
+                            const candidateText = await callTranslationProvider(provider, modelToUse, key, promptForAttempt, {
                                 deepSeekJobId: jobId.toString(),
                                 deepSeekContexts,
                                 deepSeekPurpose: 'chapters',
                                 deepSeekBatchKey
                             });
+                            let candidateTextForReview = candidateText;
+                            let validation = validateTranslatedChapter(candidateTextForReview, sourceContent);
+
+                            if (validation.englishResidues.length > 0) {
+                                await pushLog(jobId, `🔎 وُجدت كلمات إنجليزية في الفصل ${chapterNum}: ${validation.englishResidues.slice(0, 8).join(', ')} — ترجمة الكلمات فقط ثم استبدالها`, 'warning');
+                                try {
+                                    candidateTextForReview = await translateEnglishResiduesOnly(provider, modelToUse, key, candidateTextForReview, validation.englishResidues, {
+                                        deepSeekJobId: jobId.toString(),
+                                        deepSeekContexts,
+                                        deepSeekPurpose: 'chapter_review',
+                                        deepSeekBatchKey
+                                    });
+                                    validation = validateTranslatedChapter(candidateTextForReview, sourceContent);
+                                } catch (replaceErr) {
+                                    await pushLog(jobId, `⚠️ فشل استبدال الكلمات الإنجليزية فقط: ${replaceErr.message}`, 'warning');
+                                }
+                            }
+
+                            if (!validation.ok) {
+                                const review = await reviewQuestionableChapter(provider, modelToUse, key, candidateTextForReview, sourceContent, validation, {
+                                    deepSeekJobId: jobId.toString(),
+                                    deepSeekContexts,
+                                    deepSeekPurpose: 'chapter_review',
+                                    deepSeekBatchKey
+                                });
+
+                                if (review.decision !== 'accept') {
+                                    translatedText = candidateTextForReview || '';
+                                    lastValidationReasons = [...validation.reasons, review.reason];
+                                    await pushLog(jobId, `🧪 فشلت مراجعة الفصل ${chapterNum}: ${lastValidationReasons.join('، ')} — ستتم إعادة الترجمة ولن ننتقل للفصل التالي`, 'warning');
+                                    continue;
+                                }
+
+                                await pushLog(jobId, `✅ قبل المراجع الآلي الفصل رغم تنبيه الفحص: ${review.reason}`, 'success');
+                            }
+
+                            translatedText = candidateTextForReview;
+                            lastValidationReasons = [];
                             translationSuccess = true;
-                            usedProvider = provider; // remember which provider worked
-                            await pushLog(jobId, `✅ نجحت الترجمة باستخدام ${providerName}`, 'success');
+                            usedProvider = provider;
+                            await pushLog(jobId, `✅ نجحت الترجمة والمراجعة باستخدام ${providerName}`, 'success');
                             break;
                         } catch (err) {
                             console.error(`❌ فشل ${providerName} مفتاح ${keyIdx+1}: ${err.message}`);
                             await pushLog(jobId, `❌ فشل: ${err.message}`, 'warning');
-                            if (keyIdx < keys.length - 1) {
-                                await delay(3000);
-                            }
+                            if (keyIdx < keys.length - 1) await delay(3000);
                         }
                     }
-                    
+
                     if (!translationSuccess) {
-                        await pushLog(jobId, `🚫 جميع مفاتيح ${providerName} فشلت`, 'warning');
+                        await pushLog(jobId, `🚫 جميع مفاتيح ${providerName} فشلت أو لم تجتز المراجعة`, 'warning');
                     }
                 }
-                
-                if (!translationSuccess && cycle < MAX_CYCLES) {
-                    await delay(10000); // wait before second cycle
+
+                if (!translationSuccess) {
+                    await pushLog(jobId, `⏳ لم ينجح الفصل ${chapterNum}. الانتظار 30 دقيقة ثم إعادة المحاولة على نفس الفصل بدون تخطيه.`, 'warning');
+                    await delay(RETRY_DELAY_MS);
                 }
             }
 
-            if (!translationSuccess) {
-                await pushLog(jobId, `❌ فشلت جميع المزوّدين بعد ${MAX_CYCLES} دورات – تخطي الفصل ${chapterNum}`, 'error');
-                continue;
-            }
-            // ========== End multi-provider translation ==========
+            if (!translationSuccess) break;
+            // ========== End multi-provider translation with strict validation ==========
 
             // 🔥🔥🔥 NEW: EXTRACT TITLE FROM TRANSLATED CONTENT 🔥🔥🔥
             let extractedTitle = `الفصل ${chapterNum}`;
