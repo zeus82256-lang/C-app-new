@@ -194,7 +194,7 @@ function truncatePromptIfNeeded(prompt, maxLength = 10000) {
 }
 
 
-const ARABIC_FULL_CHAPTER_WORD_THRESHOLD = 1000;
+const ARABIC_FULL_CHAPTER_WORD_THRESHOLD = 800;
 
 function stripCodeBlocks(text) {
     return (text || '').replace(/```[\s\S]*?```/g, ' ');
