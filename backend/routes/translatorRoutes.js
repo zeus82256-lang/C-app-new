@@ -57,7 +57,19 @@ function hashStringToIndex(value, size) {
     return Math.abs(hash) % size;
 }
 
-function pickDeepSeekToken(provider, options = {}) {
+function getProviderAuthKeys(provider) {
+    if (isDeepSeekProvider(provider)) {
+        const deepSeekTokens = Array.isArray(provider.deepSeekTokens)
+            ? provider.deepSeekTokens.map(t => (t || '').trim()).filter(Boolean)
+            : [];
+        if (deepSeekTokens.length > 0) return deepSeekTokens;
+    }
+    return Array.isArray(provider.apiKeys) ? provider.apiKeys.map(k => (k || '').trim()).filter(Boolean) : [];
+}
+
+function pickDeepSeekToken(provider, options = {}, explicitToken) {
+    const directToken = (explicitToken || '').trim();
+    if (directToken && !directToken.startsWith('dummy-key-for-')) return directToken;
     const tokens = Array.isArray(provider.deepSeekTokens)
         ? provider.deepSeekTokens.map(t => (t || '').trim()).filter(Boolean)
         : [];
@@ -380,7 +392,7 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
 
     // ---- DeepSeek Android/Web API (same flow as the standalone DeepSeek app) ----
     if (isDeepSeek) {
-        const deepSeekToken = pickDeepSeekToken(provider, options);
+        const deepSeekToken = pickDeepSeekToken(provider, options, apiKey);
         const deepSeekOptions = {
             // DeepSeek هنا هو مزوّد تطبيق المحادثة وليس واجهة API الرسمية.
             // لذلك لا نمرر مفاتيح OpenAI-compatible مثل sk-* كـ Bearer token لأنها تسبب
@@ -729,7 +741,7 @@ ${sourceContent}
                     if (translationSuccess) break;
                     const providerName = provider.name || provider.providerId;
                     const modelToUse = provider.selectedModel || (provider.models && provider.models[0]?.modelId) || 'gemini-2.5-flash';
-                    let keys = provider.apiKeys || [];
+                    let keys = getProviderAuthKeys(provider);
                     const isChatGPT = isChatGPTAndroidProvider(provider);
                     const isDeepSeek = isDeepSeekProvider(provider);
 
@@ -743,7 +755,9 @@ ${sourceContent}
                     }
                     if (isDeepSeek && keys.length === 0) {
                         keys = ['dummy-key-for-deepseek'];
-                        await pushLog(jobId, `🔑 مزوّد DeepSeek: سيتم استخدام الرمز الافتراضي من تطبيق DeepSeek`, 'info');
+                        await pushLog(jobId, `🔑 مزوّد DeepSeek: لا توجد توكنات محفوظة، سيتم استخدام الرمز الافتراضي من تطبيق DeepSeek`, 'info');
+                    } else if (isDeepSeek) {
+                        await pushLog(jobId, `🔑 مزوّد DeepSeek: سيتم استخدام ${keys.length} توكن محفوظ من حقل المفاتيح/التوكنات`, 'info');
                     }
 
                     for (let keyIdx = 0; keyIdx < keys.length; keyIdx++) {
@@ -931,7 +945,7 @@ if (jsonMatch) {
                     const providerId = usedProvider.providerId;
                     // If the model used for translation is an LLM (not translation-only), use it directly
                     if (!isTranslationOnlyModel(usedProvider.selectedModel)) {
-                        let keys = usedProvider.apiKeys || [];
+                        let keys = getProviderAuthKeys(usedProvider);
                         if (isChatGPTAndroidProvider(usedProvider) && keys.length === 0) keys = ['dummy-key-for-chatgpt-android'];
                         if (isDeepSeekProvider(usedProvider) && keys.length === 0) keys = ['dummy-key-for-deepseek'];
                         for (const key of keys) {
@@ -975,7 +989,7 @@ if (jsonMatch) {
                         // Translation-only model – try to find an LLM model in the same provider
                         const llmModel = findLLMModel(usedProvider);
                         if (llmModel) {
-                            let keys = usedProvider.apiKeys || [];
+                            let keys = getProviderAuthKeys(usedProvider);
                             if (isChatGPTAndroidProvider(usedProvider) && keys.length === 0) keys = ['dummy-key-for-chatgpt-android'];
                             if (isDeepSeekProvider(usedProvider) && keys.length === 0) keys = ['dummy-key-for-deepseek'];
                             for (const key of keys) {
@@ -1024,7 +1038,7 @@ if (jsonMatch) {
                         if (extractionDone) break;
                         const llmModel = findLLMModel(provider);
                         if (!llmModel) continue;
-                        let keys = provider.apiKeys || [];
+                        let keys = getProviderAuthKeys(provider);
                         if (isChatGPTAndroidProvider(provider) && keys.length === 0) keys = ['dummy-key-for-chatgpt-android'];
                         if (isDeepSeekProvider(provider) && keys.length === 0) keys = ['dummy-key-for-deepseek'];
                         for (const key of keys) {
