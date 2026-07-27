@@ -1,0 +1,107 @@
+name: Build Unsigned iOS IPA (Expo SDK 54)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    env:
+      APP_NAME: ZEUSNovels
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🛠️ Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22 
+
+      - name: 📦 Install dependencies
+        run: |
+          cd web
+          npm install
+
+      - name: ⚙️ Expo prebuild (iOS)
+        run: |
+          cd web
+          npx expo prebuild -p ios --non-interactive
+
+      - name: 🏗️ Build iOS app (NO SIGNING)
+        run: |
+          cd web/ios
+          
+          # 1. تعطيل التوقيع في ملف المشروع الرئيسي لـ Xcode
+          sed -i '' 's/CODE_SIGNING_ALLOWED = YES/CODE_SIGNING_ALLOWED = NO/g' ZEUSNovels.xcodeproj/project.pbxproj
+          sed -i '' 's/CODE_SIGNING_REQUIRED = YES/CODE_SIGNING_REQUIRED = NO/g' ZEUSNovels.xcodeproj/project.pbxproj
+          
+          # 2. تعديل الـ Podfile برمجياً ليتوافق مع SDK 54 وتعطيل التوقيع للمكتبات
+          python3 -c "
+          import os
+          path = 'Podfile'
+          with open(path, 'r') as f:
+              content = f.read()
+          
+          fix_code = '''
+                installer.pods_project.targets.each do |target|
+                  target.build_configurations.each do |config|
+                    config.build_settings['GCC_OPTIMIZATION_LEVEL'] = '0'
+                    config.build_settings['SWIFT_OPTIMIZATION_LEVEL'] = '-Onone'
+                    config.build_settings['CODE_SIGNING_ALLOWED'] = 'NO'
+                    config.build_settings['CODE_SIGNING_REQUIRED'] = 'NO'
+                    config.build_settings['ENABLE_BITCODE'] = 'NO'
+                  end
+                end
+          '''
+          if 'post_install do |installer|' in content:
+              new_content = content.replace('post_install do |installer|', 'post_install do |installer|' + fix_code)
+              with open(path, 'w') as f:
+                  f.write(new_content)
+          "
+
+          # 3. تحديث الـ Pods
+          pod install
+
+          # 4. بناء المشروع
+          xcodebuild build \
+            -workspace ZEUSNovels.xcworkspace \
+            -scheme ZEUSNovels \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build_output \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            COMPILER_INDEX_STORE_ENABLE=NO
+
+      - name: 📦 Create unsigned IPA
+        run: |
+          cd web/ios
+          # البحث بعمق عن ملف .app في كل مجلد build_output
+          APP_PATH=$(find build_output -name "*.app" -type d | head -n 1)
+
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ App not found anywhere in build_output. Checking full tree:"
+            find build_output
+            exit 1
+          fi
+
+          echo "✅ Found app at: $APP_PATH"
+          
+          # تجهيز مجلد الـ IPA
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          
+          # ضغط الملف وتسميته
+          zip -r ZEUSNovels-unsigned.ipa Payload
+          
+          echo "✅ IPA created successfully: $(pwd)/ZEUSNovels-unsigned.ipa"
+
+      - name: ⬆️ Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-unsigned-ipa
+          path: web/ios/*.ipa
