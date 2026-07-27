@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
@@ -119,6 +118,25 @@ export default function TranslatorHubScreen({ navigation }) {
             >
                 <Ionicons name="add-circle" size={28} color="#fff" />
                 <Text style={styles.newTranslationText}>بدء ترجمة جديدة</Text>
+            </TouchableOpacity>
+
+<TouchableOpacity 
+    style={[styles.newTranslationBtn, { marginTop: 10 }]}
+    onPress={() => navigation.navigate('MetadataTranslationHub')}
+    activeOpacity={0.8}
+>
+    <Ionicons name="list-outline" size={28} color="#fff" />
+    <Text style={styles.newTranslationText}>مهام ترجمة البيانات</Text>
+</TouchableOpacity>
+
+            {/* 🔥 NEW BUTTON: Translate existing novel metadata */}
+            <TouchableOpacity 
+                style={[styles.newTranslationBtn, { marginTop: 10 }]}
+                onPress={() => navigation.navigate('NovelMetadataTranslation')}
+                activeOpacity={0.8}
+            >
+                <Ionicons name="language" size={28} color="#fff" />
+                <Text style={styles.newTranslationText}>ترجمة بيانات رواية موجودة</Text>
             </TouchableOpacity>
 
             <Text style={styles.sectionTitle}>المهام الحالية</Text>
