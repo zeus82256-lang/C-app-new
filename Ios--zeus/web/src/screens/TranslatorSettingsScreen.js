@@ -17,6 +17,19 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useToast } from '../context/ToastContext';
 import api from '../services/api';
 
+const DEFAULT_POW_PROVIDERS = [
+  { id: 'railway', name: 'Railway', url: 'https://web-production-c09dc.up.railway.app/pow' },
+  { id: 'ngrok', name: 'Ngrok', url: 'https://immunize-quintet-trimmer.ngrok-free.dev/get_pow' }
+];
+
+const normalizePowProviderUrl = (url) => {
+  const value = url || '';
+  return value.includes('/get_pow') ? value.split('?')[0] : value;
+};
+
+const normalizePowProviders = (powProviders) => (powProviders && powProviders.length ? powProviders : DEFAULT_POW_PROVIDERS)
+  .map((pow) => ({ ...pow, url: normalizePowProviderUrl(pow.url) }));
+
 const GlassContainer = ({ children, style }) => (
     <View style={[styles.glassContainer, style]}>
         {children}
@@ -55,7 +68,13 @@ export default function TranslatorSettingsScreen({ navigation }) {
                   models: p.models && p.models.length ? p.models : [{ modelId: 'gemini-2.5-flash', modelName: 'Gemini 2.5 Flash' }],
                   apiKeys: p.apiKeys || [],
                   selectedModel: p.selectedModel || (p.models && p.models[0]?.modelId) || 'gemini-2.5-flash',
-                  priority: p.priority !== undefined ? p.priority : idx
+                  priority: p.priority !== undefined ? p.priority : idx,
+                  thinkingEnabled: Boolean(p.thinkingEnabled),
+                  searchEnabled: p.searchEnabled !== false,
+                  deepSeekModelType: p.deepSeekModelType || 'instant',
+                  deepSeekTokens: p.deepSeekTokens || [],
+                  powProviders: normalizePowProviders(p.powProviders),
+                  selectedPowProviderId: p.selectedPowProviderId || 'railway'
               }));
               setProviders(normalized);
           }
@@ -79,7 +98,9 @@ export default function TranslatorSettingsScreen({ navigation }) {
           ],
           apiKeys: [],
           selectedModel: 'gemini-2.5-flash',
-          priority: newPriority
+          priority: newPriority,
+          powProviders: normalizePowProviders(DEFAULT_POW_PROVIDERS),
+          selectedPowProviderId: 'railway'
       };
       setProviders([...providers, newProvider]);
       setExpandedProvider(newProvider.providerId);
@@ -104,6 +125,21 @@ export default function TranslatorSettingsScreen({ navigation }) {
   const updateProviderKeys = (providerId, text) => {
       const keys = text.split('\n').map(k => k.trim()).filter(k => k.length > 5);
       setProviders(providers.map(p => p.providerId === providerId ? { ...p, apiKeys: keys, _keysText: text } : p));
+  };
+
+  const selectPowProvider = (providerId, powProviderId) => {
+      setProviders(providers.map(p => p.providerId === providerId ? { ...p, selectedPowProviderId: powProviderId } : p));
+  };
+
+  const deletePowProvider = (providerId, powProviderId) => {
+      setProviders(providers.map(p => {
+          if (p.providerId !== providerId) return p;
+          const updatedPowProviders = normalizePowProviders(p.powProviders).filter(pow => pow.id !== powProviderId);
+          const selectedPowProviderId = p.selectedPowProviderId === powProviderId
+              ? (updatedPowProviders[0]?.id || '')
+              : p.selectedPowProviderId;
+          return { ...p, powProviders: updatedPowProviders, selectedPowProviderId };
+      }));
   };
 
   // إضافة نموذج لمزوّد
@@ -162,7 +198,17 @@ export default function TranslatorSettingsScreen({ navigation }) {
               models: p.models.filter(m => m.modelId.trim() !== '').map(m => ({ modelId: m.modelId.trim(), modelName: m.modelName.trim() || m.modelId.trim() })),
               apiKeys: p.apiKeys,
               selectedModel: p.selectedModel,
-              priority: p.priority
+              priority: p.priority,
+              thinkingEnabled: p.thinkingEnabled,
+              searchEnabled: p.searchEnabled,
+              deepSeekModelType: p.deepSeekModelType,
+              deepSeekTokens: p.deepSeekTokens,
+              powProviders: normalizePowProviders(p.powProviders).filter(pow => pow.url.trim() !== '').map(pow => ({
+                  id: pow.id,
+                  name: pow.name,
+                  url: normalizePowProviderUrl(pow.url)
+              })),
+              selectedPowProviderId: p.selectedPowProviderId || 'railway'
           }));
 
           await api.post('/api/translator/settings', {
@@ -214,7 +260,7 @@ export default function TranslatorSettingsScreen({ navigation }) {
             </TouchableOpacity>
 
             {/* عرض المزوّدين */}
-            {providers.sort((a, b) => a.priority - b.priority).map((provider, index) => {
+            {[...providers].sort((a, b) => a.priority - b.priority).map((provider, index) => {
                 const isExpanded = expandedProvider === provider.providerId;
                 return (
                     <GlassContainer key={provider.providerId} style={styles.providerCard}>
@@ -265,6 +311,34 @@ export default function TranslatorSettingsScreen({ navigation }) {
                                     placeholderTextColor="#666"
                                     autoCapitalize="none"
                                 />
+
+                                {/* مزودو POW */}
+                                <Text style={styles.miniLabel}>مزود POW</Text>
+                                <Text style={styles.hintSmall}>يبقى Railway هو الافتراضي، ويمكن التبديل إلى Ngrok عند الحاجة.</Text>
+                                {normalizePowProviders(provider.powProviders).map((pow) => (
+                                    <View key={pow.id} style={styles.powProviderRow}>
+                                        <TouchableOpacity
+                                            style={styles.removeModelBtn}
+                                            onPress={() => deletePowProvider(provider.providerId, pow.id)}
+                                        >
+                                            <Ionicons name="trash-outline" size={20} color="#ff6666" />
+                                        </TouchableOpacity>
+                                        <TouchableOpacity
+                                            style={styles.powProviderSelect}
+                                            onPress={() => selectPowProvider(provider.providerId, pow.id)}
+                                        >
+                                            <View style={{flex: 1}}>
+                                                <Text style={styles.powProviderName}>{pow.name}</Text>
+                                                <Text style={styles.powProviderUrl}>{pow.url}</Text>
+                                            </View>
+                                            <Ionicons
+                                                name={provider.selectedPowProviderId === pow.id ? "checkmark-circle" : "ellipse-outline"}
+                                                size={22}
+                                                color={provider.selectedPowProviderId === pow.id ? "#10b981" : "#888"}
+                                            />
+                                        </TouchableOpacity>
+                                    </View>
+                                ))}
 
                                 {/* المفاتيح */}
                                 <Text style={styles.miniLabel}>مفاتيح API (كل مفتاح في سطر)</Text>
@@ -421,6 +495,16 @@ const styles = StyleSheet.create({
   modelRow: {
       flexDirection: 'row-reverse', alignItems: 'center', marginBottom: 8, gap: 8
   },
+  powProviderRow: {
+      flexDirection: 'row-reverse', alignItems: 'center', marginBottom: 8, gap: 8
+  },
+  powProviderSelect: {
+      flex: 1, flexDirection: 'row-reverse', alignItems: 'center', gap: 8,
+      backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 8, padding: 10,
+      borderWidth: 1, borderColor: '#333'
+  },
+  powProviderName: { color: '#fff', fontSize: 13, fontWeight: 'bold', textAlign: 'right' },
+  powProviderUrl: { color: '#888', fontSize: 10, textAlign: 'right' },
   removeModelBtn: { padding: 4 },
   modelInput: {
       backgroundColor: 'rgba(0,0,0,0.5)', color: '#fff', borderRadius: 6, padding: 8,
