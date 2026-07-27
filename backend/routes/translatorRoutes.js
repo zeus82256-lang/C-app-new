@@ -188,6 +188,10 @@ function stripCodeBlocks(text) {
     return (text || '').replace(/```[\s\S]*?```/g, ' ');
 }
 
+function removeDeepSeekFinishedMarker(text) {
+    return (text || '').replace(/(?:\r?\n|\s)*FINISHED\s*$/i, '').trim();
+}
+
 function getArabicLetterCount(text) {
     return (text || '').match(/[\u0600-\u06FF]/g)?.length || 0;
 }
@@ -201,13 +205,14 @@ function escapeRegex(value) {
 }
 
 function extractEnglishResidues(text) {
-    const cleaned = stripCodeBlocks(text);
+    const cleaned = stripCodeBlocks(removeDeepSeekFinishedMarker(text));
     const matches = cleaned.match(/\b[A-Za-z][A-Za-z'’\-]*\b/g) || [];
     const seen = new Set();
     const residues = [];
 
     for (const word of matches) {
         const normalized = word.trim();
+        if (normalized.toUpperCase() === 'FINISHED') continue;
         // السماح بحرف لاتيني واحد لأنه قد يكون رتبة/تصنيفاً مثل A أو B.
         if (normalized.length <= 1) continue;
         const key = normalized.toLowerCase();
@@ -256,7 +261,7 @@ function isLikelyAiRefusalOrMeta(text) {
 }
 
 function validateTranslatedChapter(translatedText, sourceContent) {
-    const text = (translatedText || '').trim();
+    const text = removeDeepSeekFinishedMarker(translatedText);
     const source = (sourceContent || '').trim();
     const reasons = [];
     const englishResidues = extractEnglishResidues(text);
@@ -751,7 +756,10 @@ ${sourceContent}
                                 deepSeekPurpose: 'chapters',
                                 deepSeekBatchKey
                             });
-                            let candidateTextForReview = candidateText;
+                            let candidateTextForReview = removeDeepSeekFinishedMarker(candidateText);
+                            if (candidateTextForReview !== (candidateText || '').trim()) {
+                                await pushLog(jobId, `✂️ تم حذف علامة DeepSeek النهائية FINISHED من الفصل ${chapterNum} قبل المراجعة والحفظ`, 'info');
+                            }
                             let validation = validateTranslatedChapter(candidateTextForReview, sourceContent);
 
                             if (validation.englishResidues.length > 0) {
@@ -1205,6 +1213,8 @@ if (jsonMatch) {
 }
 
 async function pushLog(jobId, message, type) {
+    const prefix = type ? `[translator:${type}]` : '[translator]';
+    console.log(`${new Date().toISOString()} ${prefix} job=${jobId} ${message}`);
     await TranslationJob.findByIdAndUpdate(jobId, {
         $push: { logs: { message, type, timestamp: new Date() } }
     });
