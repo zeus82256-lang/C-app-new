@@ -231,8 +231,13 @@ function extractEnglishResidues(text) {
     for (const word of matches) {
         const normalized = word.trim();
         if (normalized.toUpperCase() === 'FINISHED') continue;
-        // السماح بحرف لاتيني واحد لأنه قد يكون رتبة/تصنيفاً مثل A أو B.
+
+        // السماح بحرف لاتيني واحد (مثل A، B)
         if (normalized.length <= 1) continue;
+
+        // السماح بسلاسل مكونة من تكرار نفس الحرف فقط، مثل SS، SSS، AAA (رتب/تصنيفات)
+        if (/^([a-zA-Z])\1+$/.test(normalized)) continue;
+
         const key = normalized.toLowerCase();
         if (seen.has(key)) continue;
         seen.add(key);
