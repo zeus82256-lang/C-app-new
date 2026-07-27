@@ -9,7 +9,8 @@ import {
   ActivityIndicator,
   StatusBar,
   ImageBackground,
-  Alert
+  Alert,
+  Switch
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -29,6 +30,14 @@ const normalizePowProviderUrl = (url) => {
 
 const normalizePowProviders = (powProviders) => (powProviders && powProviders.length ? powProviders : DEFAULT_POW_PROVIDERS)
   .map((pow) => ({ ...pow, url: normalizePowProviderUrl(pow.url) }));
+
+const isDeepSeekProvider = (provider) => {
+  const providerId = (provider.providerId || '').toLowerCase();
+  const name = (provider.name || '').toLowerCase();
+  const model = (provider.selectedModel || '').toLowerCase();
+  const hasDeepSeekModel = provider.models && provider.models.some(m => (m.modelId || '').toLowerCase().includes('deepseek'));
+  return providerId === 'deepseek' || name.includes('deepseek') || model.includes('deepseek') || hasDeepSeekModel;
+};
 
 const GlassContainer = ({ children, style }) => (
     <View style={[styles.glassContainer, style]}>
@@ -71,7 +80,7 @@ export default function TranslatorSettingsScreen({ navigation }) {
                   priority: p.priority !== undefined ? p.priority : idx,
                   thinkingEnabled: Boolean(p.thinkingEnabled),
                   searchEnabled: p.searchEnabled !== false,
-                  deepSeekModelType: p.deepSeekModelType || 'instant',
+                  deepSeekModelType: p.deepSeekModelType === 'expert' ? 'expert' : 'default',
                   deepSeekTokens: p.deepSeekTokens || [],
                   powProviders: normalizePowProviders(p.powProviders),
                   selectedPowProviderId: p.selectedPowProviderId || 'railway'
@@ -312,6 +321,37 @@ export default function TranslatorSettingsScreen({ navigation }) {
                                     autoCapitalize="none"
                                 />
 
+                                {isDeepSeekProvider(provider) && (
+                                  <View style={styles.deepSeekBox}>
+                                    <Text style={styles.miniLabel}>وضع DeepSeek للمحادثة</Text>
+                                    <Text style={styles.hintSmall}>مطابق لتطبيق DeepSeek: افتراضي للمحادثة الطبيعية أو خبير للإجابات الأقوى.</Text>
+                                    <View style={styles.modeSelectorRow}>
+                                      <TouchableOpacity
+                                        style={[styles.modeChoice, provider.deepSeekModelType === 'default' && styles.modeChoiceActive]}
+                                        onPress={() => updateProviderField(provider.providerId, 'deepSeekModelType', 'default')}
+                                      >
+                                        <Ionicons name="flash-outline" size={18} color={provider.deepSeekModelType === 'default' ? '#000' : '#fff'} />
+                                        <Text style={[styles.modeChoiceText, provider.deepSeekModelType === 'default' && styles.modeChoiceTextActive]}>افتراضي</Text>
+                                      </TouchableOpacity>
+                                      <TouchableOpacity
+                                        style={[styles.modeChoice, provider.deepSeekModelType === 'expert' && styles.modeChoiceActive]}
+                                        onPress={() => updateProviderField(provider.providerId, 'deepSeekModelType', 'expert')}
+                                      >
+                                        <Ionicons name="sparkles-outline" size={18} color={provider.deepSeekModelType === 'expert' ? '#000' : '#fff'} />
+                                        <Text style={[styles.modeChoiceText, provider.deepSeekModelType === 'expert' && styles.modeChoiceTextActive]}>خبير</Text>
+                                      </TouchableOpacity>
+                                    </View>
+                                    <View style={styles.switchRow}>
+                                      <Switch value={Boolean(provider.thinkingEnabled)} onValueChange={(value) => updateProviderField(provider.providerId, 'thinkingEnabled', value)} />
+                                      <Text style={styles.switchLabel}>تفعيل التفكير</Text>
+                                    </View>
+                                    <View style={styles.switchRow}>
+                                      <Switch value={provider.searchEnabled !== false} onValueChange={(value) => updateProviderField(provider.providerId, 'searchEnabled', value)} />
+                                      <Text style={styles.switchLabel}>تفعيل البحث</Text>
+                                    </View>
+                                  </View>
+                                )}
+
                                 {/* مزودو POW */}
                                 <Text style={styles.miniLabel}>مزود POW</Text>
                                 <Text style={styles.hintSmall}>يبقى Railway هو الافتراضي، ويمكن التبديل إلى Ngrok عند الحاجة.</Text>
@@ -480,6 +520,14 @@ const styles = StyleSheet.create({
   providerModel: { color: '#aaa', fontSize: 12, textAlign: 'right' },
 
   providerBody: { marginTop: 15, borderTopWidth: 1, borderColor: '#333', paddingTop: 15 },
+  deepSeekBox: { backgroundColor: 'rgba(255,255,255,0.06)', borderRadius: 12, padding: 10, marginTop: 10, borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)' },
+  modeSelectorRow: { flexDirection: 'row-reverse', gap: 8, marginTop: 8 },
+  modeChoice: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 10, borderRadius: 10, borderWidth: 1, borderColor: '#444', backgroundColor: 'rgba(0,0,0,0.35)' },
+  modeChoiceActive: { backgroundColor: '#fff', borderColor: '#fff' },
+  modeChoiceText: { color: '#fff', fontWeight: 'bold' },
+  modeChoiceTextActive: { color: '#000' },
+  switchRow: { flexDirection: 'row-reverse', alignItems: 'center', justifyContent: 'space-between', marginTop: 10 },
+  switchLabel: { color: '#ddd', fontSize: 12, textAlign: 'right' },
   
   miniLabel: { color: '#ccc', fontSize: 12, marginBottom: 4, marginTop: 8, textAlign: 'right' },
   miniInput: {
