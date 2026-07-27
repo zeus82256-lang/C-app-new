@@ -247,6 +247,11 @@ function escapeRegex(value) {
 function isAllowedShortLatinToken(word) {
     const normalized = (word || '').trim();
     if (normalized.length <= 1) return true;
+    
+    // ✅ جديد: السماح بأي سلسلة مكررة من نفس الحرف (SS, SSS, AAA, bb ...)
+    if (/^([a-zA-Z])\1+$/.test(normalized)) return true;
+    
+    // السلوك القديم: السماح باختصارات معينة بشرط عدم وجود حروف علة
     return ALLOWED_SHORT_LATIN_TOKEN_PATTERN.test(normalized) && !/[AEIOU]/.test(normalized);
 }
 
