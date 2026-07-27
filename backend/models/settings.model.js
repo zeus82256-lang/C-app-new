@@ -80,7 +80,7 @@ RETURN ONLY JSON:` },
         priority: { type: Number, default: 0 }, // order in fallback sequence
         thinkingEnabled: { type: Boolean, default: false }, // DeepSeek: enable reasoning fragments
         searchEnabled: { type: Boolean, default: true }, // DeepSeek: enable web search
-        deepSeekModelType: { type: String, enum: ['instant', 'expert'], default: 'instant' }, // DeepSeek: Instant or Expert mode
+        deepSeekModelType: { type: String, enum: ['default', 'expert'], default: 'default' }, // DeepSeek: Default or Expert mode
         deepSeekTokens: [{ type: String }], // DeepSeek account tokens; falls back to default app token when empty
         powProviders: [{
             id: { type: String, required: true },
