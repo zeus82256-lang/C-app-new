@@ -63,6 +63,16 @@ function resetConversationContextsForScope(contextStore, scopeKey, batchKey) {
     }
 }
 
+function resetConversationContextPurposeForScope(contextStore, purpose, scopeKey, batchKey) {
+    const scopedStore = contextStore?.[purpose];
+    if (!(scopedStore instanceof Map) || !scopeKey) return;
+    for (const [contextKey, context] of scopedStore.entries()) {
+        if (context?.scopeKey !== scopeKey) continue;
+        if (batchKey !== undefined && batchKey !== null && context.batchKey !== batchKey) continue;
+        scopedStore.delete(contextKey);
+    }
+}
+
 function getTokenConversationScope(provider, key, keyIdx) {
     const providerKey = provider.providerId || provider.name || 'provider';
     const tokenHash = hashStringToIndex(key || `key-${keyIdx}`, 1000000007);
@@ -384,7 +394,7 @@ ${JSON.stringify(contexts, null, 2)}
 async function reviewQuestionableChapter(provider, modelToUse, key, translatedText, sourceContent, validation, options) {
     const prompt = `
 أنت مراجع جودة لترجمة فصول روايات من الإنجليزية إلى العربية.
-قارن النص الإنجليزي الأصلي بالنص العربي الناتج، ولا تعتمد على عدد كلمات عربي ثابت وحده.
+قارن النص الإنجليزي الأصلي بالنص العربي الناتج.
 
 مؤشرات آلية:
 - كلمات الأصل الإنجليزية تقريباً: ${validation.sourceWords}
@@ -393,67 +403,42 @@ async function reviewQuestionableChapter(provider, modelToUse, key, translatedTe
 - الملاحظات:
 - ${validation.reasons.join('\n- ')}
 
-القواعد النهائية:
-1. إذا كان الأصل نفسه قصيراً والعربي يغطي نفس الأحداث وبحجم منطقي، القرار accept حتى لو كان أقل من ${ARABIC_FULL_CHAPTER_WORD_THRESHOLD} كلمة.
-2. إذا كان العربي مختصراً/ناقصاً مقارنة بالأصل أو رسالة ذكاء اصطناعي أو تعليمات، القرار retranslate.
-3. الرموز اللاتينية القصيرة مثل A أو S أو B أو LV أو HP مسموحة إذا كانت رتباً/تصنيفات/مستويات ولا تجعل الفصل يفشل.
-4. الكلمات الإنجليزية الكاملة داخل النص العربي يجب أن تكون قد تُرجمت واستُبدلت فقط، ولا تطلب إعادة ترجمة فصل كامل بسببها إلا إذا بقيت كثيرة أو أثبتت أن الفصل غير مترجم.
-5. أعد JSON فقط بدون شرح زائد.
-
-الشكل المطلوب:
-{"decision":"accept" أو "retranslate", "reason":"سبب عربي قصير يوضح المقارنة مع الأصل"}
+القرار المطلوب نهائي وحاسم:
+- أجب بكلمة واحدة فقط: نعم أو لا.
+- نعم = اقبل الترجمة واتركها كما هي.
+- لا = أعد ترجمة الفصل لأنه ناقص/مختصر/ليس فصلاً كاملاً.
+- إذا كان النص العربي يغطي أحداث الأصل فعلاً فالإجابة نعم حتى لو كان عدد الكلمات أقل.
+- إذا كان النص العربي مجرد سطرين أو جزء صغير من الفصل فالإجابة لا.
 
 النص الإنجليزي الأصلي للمقارنة:
 """${sourceContent.substring(0, 7000)}"""
 
 النص العربي للمراجعة:
-"""${translatedText.substring(0, 9000)}"""
+"""${translatedText.substring(0, 12000)}"""
 `;
     const response = await callTranslationProvider(provider, modelToUse, key, prompt, options);
+    const answer = String(response || '').trim().toLowerCase();
+    const firstToken = answer.replace(/["'`{}\[\]().،,:;!؟]/g, ' ').trim().split(/\s+/)[0] || '';
+
+    if (['نعم', 'yes', 'accept', 'accepted', 'ok', 'pass'].includes(firstToken) || /^نعم\b/i.test(answer)) {
+        return { decision: 'accept', reason: 'المراجع أجاب: نعم', rawResponse: response };
+    }
+    if (['لا', 'no', 'retranslate', 'retry', 'reject', 'rejected'].includes(firstToken) || /^لا\b/i.test(answer)) {
+        return { decision: 'retranslate', reason: 'المراجع أجاب: لا', rawResponse: response };
+    }
+
     try {
         const parsed = parseJsonFromAiText(response);
-        const rawDecision = String(parsed.decision || parsed.Decision || parsed.status || parsed.result || '').trim().toLowerCase();
-        const decision = ['accept', 'accepted', 'ok', 'pass', 'قبول', 'مقبول'].includes(rawDecision)
+        const rawDecision = String(parsed.decision || parsed.Decision || parsed.status || parsed.result || parsed.answer || '').trim().toLowerCase();
+        const decision = ['accept', 'accepted', 'ok', 'pass', 'yes', 'نعم', 'قبول', 'مقبول'].includes(rawDecision)
             ? 'accept'
             : 'retranslate';
-        return {
-            decision,
-            reason: parsed.reason || 'قرار المراجع الآلي',
-            rawResponse: response
-        };
+        return { decision, reason: parsed.reason || `قرار المراجع الآلي: ${rawDecision || 'غير واضح'}`, rawResponse: response };
     } catch (e) {
-        if (/"decision"\s*:\s*"accept"/i.test(response || '') || /\baccept(?:ed)?\b/i.test(response || '')) {
-            return { decision: 'accept', reason: 'تم قبول الفصل من رد المراجع النصي رغم تعذر تحليل JSON حرفياً', rawResponse: response };
-        }
-        return { decision: 'retranslate', reason: `تعذر تحليل رد المراجعة: ${e.message}`, rawResponse: response };
+        return { decision: 'retranslate', reason: `رد المراجع غير واضح ولم يكن نعم/لا: ${String(response || '').substring(0, 120)}`, rawResponse: response };
     }
 }
 
-function buildRepairTranslationPrompt(basePrompt, glossaryText, sourceContent, previousTranslation, reasons) {
-    return `
-${basePrompt}
-
-مراجعة صارمة: الترجمة السابقة فشلت للأسباب التالية:
-- ${reasons.join('\n- ')}
-
-أعد ترجمة الفصل كاملاً من النص الإنجليزي الأصلي أدناه إلى العربية فقط.
-مسموح فقط برموز لاتينية قصيرة للرتب/التصنيفات/المستويات مثل A أو S أو LV أو HP عند الحاجة.
-ممنوع ترك أي كلمة إنجليزية كاملة داخل السرد. ممنوع الاعتذار أو شرح ما فعلته. ممنوع إخراج JSON أو مصطلحات فقط.
-أخرج الفصل المترجم كاملاً فقط.
-
---- GLOSSARY (Use these strictly) ---
-${glossaryText}
--------------------------------------
-
---- PREVIOUS FAILED OUTPUT (Do not copy its English/meta errors) ---
-${(previousTranslation || '').substring(0, 5000)}
--------------------------------------
-
---- ENGLISH Text TO TRANSLATE ---
-${sourceContent}
----------------------------------
-`;
-}
 
 // 🔥 Unified provider caller supporting Gemini, OpenRouter, Cloudflare, custom APIs, and ChatGPT Android
 async function callTranslationProvider(provider, modelName, apiKey, prompt, options = {}) {
@@ -815,7 +800,7 @@ ${sourceContent}
                                     translatedText = candidateTextForReview || '';
                                     lastValidationReasons = [...validation.reasons, review.reason];
                                     await pushLog(jobId, `🧪 فشلت مراجعة الفصل ${chapterNum}: ${lastValidationReasons.join('، ')} — ستتم إعادة الترجمة ولن ننتقل للفصل التالي`, 'warning');
-                                    if (isStickyChat) resetConversationContextsForScope(conversationContexts, conversationScopeKey, conversationBatchKey);
+                                    if (isStickyChat) resetConversationContextPurposeForScope(conversationContexts, 'chapters', conversationScopeKey, conversationBatchKey);
                                     tokenFailed = true;
                                     continue;
                                 }
@@ -835,7 +820,7 @@ ${sourceContent}
                                 console.error(`❌ فشل ${providerName} مفتاح ${keyIdx+1}: ${err.message}`);
                                 await pushLog(jobId, `❌ فشل: ${err.message}`, 'warning');
                                 if (isStickyChat && tokenAttempt < tokenAttempts) {
-                                    resetConversationContextsForScope(conversationContexts, conversationScopeKey, conversationBatchKey);
+                                    resetConversationContextPurposeForScope(conversationContexts, 'chapters', conversationScopeKey, conversationBatchKey);
                                     await pushLog(jobId, `🔁 مزوّد المحادثة: سيتم إنشاء محادثات جديدة لنفس التوكن قبل إعادة المحاولة ${tokenAttempt + 1}/${tokenAttempts}`, 'warning');
                                     await delay(3000);
                                 }

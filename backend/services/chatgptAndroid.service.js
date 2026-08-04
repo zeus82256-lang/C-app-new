@@ -57,6 +57,24 @@ async function prepareConversation(model, options = {}) {
     return token;
 }
 
+function appendChunk(state, value) {
+    if (typeof value !== 'string' || !value) return;
+    state.chunks.push(value);
+}
+
+function rememberSnapshot(state, value) {
+    if (typeof value !== 'string' || !value) return;
+    if (!state.snapshot || value.length >= state.snapshot.length) state.snapshot = value;
+}
+
+function parsePatch(patch, state) {
+    if (!patch || typeof patch !== 'object') return;
+    const op = String(patch.o || patch.op || '').toLowerCase();
+    const path = patch.p || patch.path || '';
+    if (op === 'append' && path === '/message/content/parts/0') appendChunk(state, patch.v);
+    if ((op === 'replace' || op === 'add') && path === '/message/content/parts/0') rememberSnapshot(state, patch.v);
+}
+
 function parseChatGPTLine(line, state) {
     if (line.startsWith('event: ')) {
         state.currentEvent = line.slice(7).trim();
@@ -70,15 +88,12 @@ function parseChatGPTLine(line, state) {
 
     if (event.conversation_id) state.conversationId = event.conversation_id;
     if (event.message?.id) state.responseMessageId = event.message.id;
-    const setFull = event.message?.content?.parts?.[0];
-    if (typeof setFull === 'string') state.text = setFull;
+    rememberSnapshot(state, event.message?.content?.parts?.[0]);
 
-    const patches = Array.isArray(event.v) ? event.v : [event];
-    for (const patch of patches) {
-        if (patch?.o === 'append' && patch?.p === '/message/content/parts/0' && typeof patch.v === 'string') {
-            state.text += patch.v;
-        }
-    }
+    if (state.currentEvent === 'delta') parsePatch(event, state);
+    if (Array.isArray(event.v)) event.v.forEach(patch => parsePatch(patch, state));
+    if (event.o && event.p) parsePatch(event, state);
+    if (event.type === 'content_delta') appendChunk(state, event.delta || event.text || event.content);
 }
 
 async function askChatGPTAndroid(prompt, options = {}) {
@@ -122,14 +137,16 @@ async function askChatGPTAndroid(prompt, options = {}) {
         stream: true
     }, { headers, timeout: options.timeout || 500000, responseType: 'stream' });
 
-    const state = { text: '', currentEvent: null, conversationId: context.conversationId, responseMessageId: null };
+    const state = { chunks: [], snapshot: '', currentEvent: null, conversationId: context.conversationId, responseMessageId: null };
     await new Promise((resolve, reject) => {
         response.data.on('data', chunk => chunk.toString().split('\n').forEach(line => parseChatGPTLine(line.trim(), state)));
         response.data.on('end', resolve);
         response.data.on('error', reject);
     });
 
-    if (!state.text.trim()) throw new Error('ChatGPT Android returned an empty response');
+    const fullText = state.chunks.join('').trim().length >= (state.snapshot || '').trim().length ? state.chunks.join('') : state.snapshot;
+
+    if (!fullText.trim()) throw new Error('ChatGPT Android returned an empty response');
     if (options.context) {
         options.context.conduitToken = conduitToken;
         options.context.sessionId = convoSessionId;
@@ -137,7 +154,7 @@ async function askChatGPTAndroid(prompt, options = {}) {
         if (state.responseMessageId) options.context.parentMessageId = state.responseMessageId;
         options.context.lastUpdated = new Date();
     }
-    return state.text;
+    return fullText;
 }
 
 module.exports = { askChatGPTAndroid };
