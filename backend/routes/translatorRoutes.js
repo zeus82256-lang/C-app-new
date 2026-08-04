@@ -92,6 +92,12 @@ function getProviderAuthKeys(provider) {
             : [];
         if (qwenTokens.length > 0) return qwenTokens;
     }
+    if (isChatGPTAndroidProvider(provider)) {
+        const chatGptTokens = Array.isArray(provider.chatGptTokens)
+            ? provider.chatGptTokens.map(t => (t || '').trim()).filter(Boolean)
+            : [];
+        if (chatGptTokens.length > 0) return chatGptTokens;
+    }
     return Array.isArray(provider.apiKeys) ? provider.apiKeys.map(k => (k || '').trim()).filter(Boolean) : [];
 }
 
@@ -224,16 +230,6 @@ function isChatGPTAndroidProvider(provider) {
 function isStickyChatProvider(provider) {
     return isDeepSeekProvider(provider) || isQwenProvider(provider) || isChatGPTAndroidProvider(provider);
 }
-
-// 🔥 Helper to truncate prompt if too long (to avoid 413 error)
-function truncatePromptIfNeeded(prompt, maxLength = 10000) {
-    if (prompt.length <= maxLength) return prompt;
-    // Keep first 8000 chars and last 2000 chars
-    const firstPart = prompt.substring(0, 8000);
-    const lastPart = prompt.substring(prompt.length - 2000);
-    return `${firstPart}\n\n...[تم اقتطاع النص بسبب طوله، ثم استئناف من النهاية]...\n\n${lastPart}`;
-}
-
 
 const ARABIC_FULL_CHAPTER_WORD_THRESHOLD = 800;
 const SHORT_CHAPTER_SOURCE_WORD_THRESHOLD = 900;
@@ -517,7 +513,7 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
 
     // ---- ChatGPT Android API from root gpt.py (service-backed, no inline legacy code) ----
     if (isChatGPT || providerId === 'chatgpt-android') {
-        return askChatGPTAndroid(truncatePromptIfNeeded(prompt, 10000), {
+        return askChatGPTAndroid(prompt, {
             token: apiKey && !apiKey.startsWith('dummy-key-for-') ? apiKey : provider.chatgptToken,
             model: modelName || 'gpt-5-5',
             timeout: options.timeout || 500000,

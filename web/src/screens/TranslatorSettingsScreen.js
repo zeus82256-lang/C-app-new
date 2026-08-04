@@ -10,13 +10,42 @@ import {
   StatusBar,
   ImageBackground,
   Alert,
-  Switch
+  Switch,
+  Modal
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useToast } from '../context/ToastContext';
 import api from '../services/api';
+
+
+const PROVIDER_TEMPLATES = [
+  {
+    type: 'deepseek',
+    title: 'DeepSeek',
+    subtitle: 'وضع عادي/خبير + مزودي POW + توكنات متعددة',
+    icon: 'flash-outline'
+  },
+  {
+    type: 'qwen',
+    title: 'Qwen',
+    subtitle: 'نموذج + تفكير + بحث، بدون POW',
+    icon: 'sparkles-outline'
+  },
+  {
+    type: 'chatgpt-android',
+    title: 'GPT Android',
+    subtitle: 'توكنات متعددة + محادثة مستمرة، بدون تقطيع الفصل',
+    icon: 'chatbubble-ellipses-outline'
+  },
+  {
+    type: 'gemini',
+    title: 'Gemini / مخصص',
+    subtitle: 'مفاتيح API و Base URL اختياري',
+    icon: 'options-outline'
+  }
+];
 
 const DEFAULT_POW_PROVIDERS = [
   { id: 'railway', name: 'Railway', url: 'https://web-production-c09dc.up.railway.app/pow' },
@@ -47,6 +76,14 @@ const isQwenProvider = (provider) => {
   return providerId === 'qwen' || name.includes('qwen') || model.includes('qwen') || hasQwenModel;
 };
 
+const isChatGPTAndroidProvider = (provider) => {
+  const providerId = (provider.providerId || '').toLowerCase();
+  const name = (provider.name || '').toLowerCase();
+  const model = (provider.selectedModel || '').toLowerCase();
+  const hasGptModel = provider.models && provider.models.some(m => /(gpt|chatgpt)/i.test(m.modelId || ''));
+  return providerId === 'chatgpt-android' || name.includes('chatgpt') || model.includes('gpt') || hasGptModel;
+};
+
 const GlassContainer = ({ children, style }) => (
     <View style={[styles.glassContainer, style]}>
         {children}
@@ -64,6 +101,7 @@ export default function TranslatorSettingsScreen({ navigation }) {
   // المزوّدون
   const [providers, setProviders] = useState([]);
   const [expandedProvider, setExpandedProvider] = useState(null); // لمراقبة أي مزوّد مفعّل حالياً
+  const [showProviderPicker, setShowProviderPicker] = useState(false);
 
   useEffect(() => {
       fetchSettings();
@@ -83,7 +121,7 @@ export default function TranslatorSettingsScreen({ navigation }) {
                   name: p.name || 'مزوّد جديد',
                   baseUrl: p.baseUrl || '',
                   models: p.models && p.models.length ? p.models : [{ modelId: 'gemini-2.5-flash', modelName: 'Gemini 2.5 Flash' }],
-                  apiKeys: (p.apiKeys && p.apiKeys.length ? p.apiKeys : (p.deepSeekTokens && p.deepSeekTokens.length ? p.deepSeekTokens : (p.qwenTokens || []))),
+                  apiKeys: (p.apiKeys && p.apiKeys.length ? p.apiKeys : (p.deepSeekTokens && p.deepSeekTokens.length ? p.deepSeekTokens : (p.qwenTokens && p.qwenTokens.length ? p.qwenTokens : (p.chatGptTokens || [])))),
                   selectedModel: p.selectedModel || (p.models && p.models[0]?.modelId) || 'gemini-2.5-flash',
                   priority: p.priority !== undefined ? p.priority : idx,
                   thinkingEnabled: Boolean(p.thinkingEnabled),
@@ -91,6 +129,7 @@ export default function TranslatorSettingsScreen({ navigation }) {
                   deepSeekModelType: p.deepSeekModelType === 'expert' ? 'expert' : 'default',
                   deepSeekTokens: p.deepSeekTokens || [],
                   qwenTokens: p.qwenTokens || [],
+                  chatGptTokens: p.chatGptTokens || [],
                   powProviders: normalizePowProviders(p.powProviders),
                   selectedPowProviderId: p.selectedPowProviderId || 'railway'
               }));
@@ -103,26 +142,72 @@ export default function TranslatorSettingsScreen({ navigation }) {
       }
   };
 
-  // إضافة مزوّد جديد (معدل ليشمل نموذج ChatGPT Android)
-  const addProvider = () => {
+  const buildProviderByType = (type) => {
       const newPriority = providers.length > 0 ? Math.max(...providers.map(p => p.priority)) + 1 : 0;
-      const newProvider = {
-          providerId: `provider_${Date.now()}`,
+      const id = `${type}_${Date.now()}`;
+      const base = {
+          providerId: id,
           name: 'مزوّد جديد',
           baseUrl: '',
-          models: [
-              { modelId: 'gemini-2.5-flash', modelName: 'Gemini 2.5 Flash' },
-              { modelId: 'qwen3.8-max', modelName: 'Qwen 3.8 Max' },
-              { modelId: 'gpt-5-5', modelName: 'GPT Android' }
-          ],
+          models: [],
           apiKeys: [],
-          selectedModel: 'gemini-2.5-flash',
+          selectedModel: '',
           priority: newPriority,
-          powProviders: normalizePowProviders(DEFAULT_POW_PROVIDERS),
-          selectedPowProviderId: 'railway'
+          thinkingEnabled: false,
+          searchEnabled: true,
+          deepSeekModelType: 'default',
+          deepSeekTokens: [],
+          qwenTokens: [],
+          chatGptTokens: [],
+          powProviders: [],
+          selectedPowProviderId: ''
       };
+
+      if (type === 'deepseek') {
+          return {
+              ...base,
+              providerId: id,
+              name: 'DeepSeek',
+              models: [{ modelId: 'deepseek-chat', modelName: 'DeepSeek Chat' }],
+              selectedModel: 'deepseek-chat',
+              powProviders: normalizePowProviders(DEFAULT_POW_PROVIDERS),
+              selectedPowProviderId: 'railway'
+          };
+      }
+      if (type === 'qwen') {
+          return {
+              ...base,
+              providerId: id,
+              name: 'Qwen',
+              models: [{ modelId: 'qwen3.8-max', modelName: 'Qwen 3.8 Max' }],
+              selectedModel: 'qwen3.8-max',
+              thinkingEnabled: true,
+              searchEnabled: true
+          };
+      }
+      if (type === 'chatgpt-android') {
+          return {
+              ...base,
+              providerId: id,
+              name: 'GPT Android',
+              models: [{ modelId: 'gpt-5-5', modelName: 'GPT 5.5' }],
+              selectedModel: 'gpt-5-5'
+          };
+      }
+      return {
+          ...base,
+          providerId: id,
+          name: 'Gemini / مخصص',
+          models: [{ modelId: 'gemini-2.5-flash', modelName: 'Gemini 2.5 Flash' }],
+          selectedModel: 'gemini-2.5-flash'
+      };
+  };
+
+  const addProvider = (type) => {
+      const newProvider = buildProviderByType(type);
       setProviders([...providers, newProvider]);
       setExpandedProvider(newProvider.providerId);
+      setShowProviderPicker(false);
   };
 
   // حذف مزوّد
@@ -223,12 +308,13 @@ export default function TranslatorSettingsScreen({ navigation }) {
               deepSeekModelType: p.deepSeekModelType,
               deepSeekTokens: isDeepSeekProvider(p) ? p.apiKeys : p.deepSeekTokens,
               qwenTokens: isQwenProvider(p) ? p.apiKeys : p.qwenTokens,
-              powProviders: normalizePowProviders(p.powProviders).filter(pow => pow.url.trim() !== '').map(pow => ({
+              chatGptTokens: isChatGPTAndroidProvider(p) ? p.apiKeys : p.chatGptTokens,
+              powProviders: isDeepSeekProvider(p) ? normalizePowProviders(p.powProviders).filter(pow => pow.url.trim() !== '').map(pow => ({
                   id: pow.id,
                   name: pow.name,
                   url: normalizePowProviderUrl(pow.url)
-              })),
-              selectedPowProviderId: p.selectedPowProviderId || 'railway'
+              })) : [],
+              selectedPowProviderId: isDeepSeekProvider(p) ? (p.selectedPowProviderId || 'railway') : ''
           }));
 
           await api.post('/api/translator/settings', {
@@ -274,10 +360,32 @@ export default function TranslatorSettingsScreen({ navigation }) {
         <ScrollView contentContainerStyle={styles.content}>
             
             {/* إضافة مزوّد جديد */}
-            <TouchableOpacity style={styles.addProviderBtn} onPress={addProvider}>
+            <TouchableOpacity style={styles.addProviderBtn} onPress={() => setShowProviderPicker(true)}>
                 <Ionicons name="add-circle" size={24} color="#fff" />
                 <Text style={styles.addProviderText}>إضافة مزوّد جديد</Text>
             </TouchableOpacity>
+
+            <Modal visible={showProviderPicker} transparent animationType="fade" onRequestClose={() => setShowProviderPicker(false)}>
+              <View style={styles.modalOverlay}>
+                <View style={styles.providerPickerBox}>
+                  <Text style={styles.providerPickerTitle}>اختر نوع المزوّد</Text>
+                  <Text style={styles.providerPickerHint}>كل مزوّد سيُنشأ بإعداداته الخاصة فقط، بدون خلط إعدادات DeepSeek/Qwen/GPT.</Text>
+                  {PROVIDER_TEMPLATES.map((template) => (
+                    <TouchableOpacity key={template.type} style={styles.providerTemplateBtn} onPress={() => addProvider(template.type)}>
+                      <Ionicons name={template.icon} size={22} color="#fff" />
+                      <View style={{flex: 1, alignItems: 'flex-end'}}>
+                        <Text style={styles.providerTemplateTitle}>{template.title}</Text>
+                        <Text style={styles.providerTemplateSubtitle}>{template.subtitle}</Text>
+                      </View>
+                    </TouchableOpacity>
+                  ))}
+                  <TouchableOpacity style={styles.cancelPickerBtn} onPress={() => setShowProviderPicker(false)}>
+                    <Text style={styles.cancelPickerText}>إلغاء</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </Modal>
+
 
             {/* عرض المزوّدين */}
             {[...providers].sort((a, b) => a.priority - b.priority).map((provider, index) => {
@@ -322,20 +430,24 @@ export default function TranslatorSettingsScreen({ navigation }) {
                                     placeholder="مثل: Gemini, OpenRouter, ChatGPT Android"
                                     placeholderTextColor="#666"
                                 />
-                                <Text style={styles.miniLabel}>Base URL (اختياري)</Text>
-                                <TextInput
-                                    style={styles.miniInput}
-                                    value={provider.baseUrl}
-                                    onChangeText={(text) => updateProviderField(provider.providerId, 'baseUrl', text)}
-                                    placeholder="https://api.openai.com/v1"
-                                    placeholderTextColor="#666"
-                                    autoCapitalize="none"
-                                />
+                                {(!isDeepSeekProvider(provider) && !isQwenProvider(provider) && !isChatGPTAndroidProvider(provider)) && (
+                                  <>
+                                    <Text style={styles.miniLabel}>Base URL (اختياري)</Text>
+                                    <TextInput
+                                        style={styles.miniInput}
+                                        value={provider.baseUrl}
+                                        onChangeText={(text) => updateProviderField(provider.providerId, 'baseUrl', text)}
+                                        placeholder="https://api.openai.com/v1"
+                                        placeholderTextColor="#666"
+                                        autoCapitalize="none"
+                                    />
+                                  </>
+                                )}
 
-                                {(isDeepSeekProvider(provider) || isQwenProvider(provider)) && (
+                                {isDeepSeekProvider(provider) && (
                                   <View style={styles.deepSeekBox}>
                                     <Text style={styles.miniLabel}>وضع مزوّد المحادثة</Text>
-                                    <Text style={styles.hintSmall}>لـ DeepSeek و Qwen: محادثات مستقلة لكل توكن مع استمرار التوكن الناجح.</Text>
+                                    <Text style={styles.hintSmall}>خاص بـ DeepSeek: وضع عادي/خبير مع التفكير والبحث وخوادم POW.</Text>
                                     <View style={styles.modeSelectorRow}>
                                       <TouchableOpacity
                                         style={[styles.modeChoice, provider.deepSeekModelType === 'default' && styles.modeChoiceActive]}
@@ -363,8 +475,27 @@ export default function TranslatorSettingsScreen({ navigation }) {
                                   </View>
                                 )}
 
+
+
+                                {isQwenProvider(provider) && (
+                                  <View style={styles.deepSeekBox}>
+                                    <Text style={styles.miniLabel}>إعدادات Qwen</Text>
+                                    <Text style={styles.hintSmall}>مطابق لملف qwen.py: نموذج + تفكير + بحث، بدون خادم POW.</Text>
+                                    <View style={styles.switchRow}>
+                                      <Switch value={Boolean(provider.thinkingEnabled)} onValueChange={(value) => updateProviderField(provider.providerId, 'thinkingEnabled', value)} />
+                                      <Text style={styles.switchLabel}>تفعيل التفكير</Text>
+                                    </View>
+                                    <View style={styles.switchRow}>
+                                      <Switch value={provider.searchEnabled !== false} onValueChange={(value) => updateProviderField(provider.providerId, 'searchEnabled', value)} />
+                                      <Text style={styles.switchLabel}>تفعيل البحث</Text>
+                                    </View>
+                                  </View>
+                                )}
+
                                 {/* مزودو POW */}
-                                <Text style={styles.miniLabel}>مزود POW</Text>
+                                {isDeepSeekProvider(provider) && (
+                                  <>
+                                  <Text style={styles.miniLabel}>مزود POW</Text>
                                 <Text style={styles.hintSmall}>يبقى Railway هو الافتراضي، ويمكن التبديل إلى Ngrok عند الحاجة.</Text>
                                 {normalizePowProviders(provider.powProviders).map((pow) => (
                                     <View key={pow.id} style={styles.powProviderRow}>
@@ -390,14 +521,16 @@ export default function TranslatorSettingsScreen({ navigation }) {
                                         </TouchableOpacity>
                                     </View>
                                 ))}
+                                  </>
+                                )}
 
                                 {/* المفاتيح */}
-                                <Text style={styles.miniLabel}>{isDeepSeekProvider(provider) ? 'توكنات DeepSeek (كل توكن في سطر)' : isQwenProvider(provider) ? 'توكنات Qwen (كل توكن في سطر)' : 'مفاتيح API (كل مفتاح في سطر)'}</Text>
-                                <Text style={styles.hintSmall}>{isDeepSeekProvider(provider) ? '🔑 بالنسبة لـ DeepSeek: ضع توكنات الحساب هنا؛ سيتم استخدامها فعلياً بدل التوكن الافتراضي.' : isQwenProvider(provider) ? '🔑 بالنسبة لـ Qwen: ضع توكنات الحساب هنا وسيعاملها النظام مثل DeepSeek.' : '🔑 بالنسبة لـ GPT Android: اترك الحقل فارغاً أو ضع التوكن إن توفر.'}</Text>
+                                <Text style={styles.miniLabel}>{isDeepSeekProvider(provider) ? 'توكنات DeepSeek (كل توكن في سطر)' : isQwenProvider(provider) ? 'توكنات Qwen (كل توكن في سطر)' : isChatGPTAndroidProvider(provider) ? 'توكنات GPT (كل توكن في سطر)' : 'مفاتيح API (كل مفتاح في سطر)'}</Text>
+                                <Text style={styles.hintSmall}>{isDeepSeekProvider(provider) ? '🔑 بالنسبة لـ DeepSeek: ضع توكنات الحساب هنا؛ سيتم استخدامها فعلياً بدل التوكن الافتراضي.' : isQwenProvider(provider) ? '🔑 بالنسبة لـ Qwen: ضع توكنات الحساب هنا وسيعاملها النظام مثل DeepSeek.' : isChatGPTAndroidProvider(provider) ? '🔑 بالنسبة لـ GPT: ضع كل توكن حساب في سطر؛ لا يوجد توكن ثابت في الكود.' : 'ضع كل مفتاح API في سطر.'}</Text>
                                 <TextInput
                                     style={styles.keysInputSmall}
                                     multiline
-                                    placeholder={isDeepSeekProvider(provider) ? "DeepSeek token 1\nDeepSeek token 2" : isQwenProvider(provider) ? "Qwen token 1\nQwen token 2" : "AIzaSy...\ngpt token..."}
+                                    placeholder={isDeepSeekProvider(provider) ? "DeepSeek token 1\nDeepSeek token 2" : isQwenProvider(provider) ? "Qwen token 1\nQwen token 2" : isChatGPTAndroidProvider(provider) ? "GPT token 1\nGPT token 2" : "AIzaSy...\nsk-..."}
                                     placeholderTextColor="#666"
                                     value={provider._keysText || provider.apiKeys.join('\n')}
                                     onChangeText={(text) => updateProviderKeys(provider.providerId, text)}
@@ -512,6 +645,17 @@ const styles = StyleSheet.create({
   hint: { color: '#888', fontSize: 12, textAlign: 'right', marginBottom: 15 },
   hintSmall: { color: '#888', fontSize: 10, textAlign: 'right', marginBottom: 5 },
   sectionTitle: { color: '#fff', fontSize: 18, fontWeight: 'bold', marginBottom: 15, marginTop: 25, textAlign: 'right' },
+
+
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.75)', justifyContent: 'center', padding: 20 },
+  providerPickerBox: { backgroundColor: '#111', borderRadius: 18, padding: 16, borderWidth: 1, borderColor: 'rgba(255,255,255,0.15)' },
+  providerPickerTitle: { color: '#fff', fontSize: 18, fontWeight: 'bold', textAlign: 'right', marginBottom: 6 },
+  providerPickerHint: { color: '#aaa', fontSize: 12, textAlign: 'right', marginBottom: 12 },
+  providerTemplateBtn: { flexDirection: 'row-reverse', alignItems: 'center', gap: 12, padding: 12, borderRadius: 12, borderWidth: 1, borderColor: '#333', backgroundColor: 'rgba(255,255,255,0.06)', marginBottom: 10 },
+  providerTemplateTitle: { color: '#fff', fontSize: 15, fontWeight: 'bold', textAlign: 'right' },
+  providerTemplateSubtitle: { color: '#999', fontSize: 11, textAlign: 'right', marginTop: 2 },
+  cancelPickerBtn: { padding: 12, alignItems: 'center' },
+  cancelPickerText: { color: '#ff8888', fontWeight: 'bold' },
 
   // زر إضافة مزوّد
   addProviderBtn: {
