@@ -1,120 +1,143 @@
 const axios = require('axios');
 const { v4: uuidv4 } = require('uuid');
 
-// نسخ الـ Headers الثابتة من الكود (مع التأكد من صحة الـ Cookie)
-const getStaticHeaders = () => ({
-    'User-Agent': "ChatGPT/1.2027.000 (Android 15; RMX3834; build 2700000)",
-    'Accept': "application/json",
-    'Accept-Encoding': "gzip",
-    'Content-Type': "application/json",
-    'oai-package-name': "com.Modderme",
-    'oai-client-type': "android",
-    'oai-device-id': "84329164059103383964",
-    'accept-language': "en-US,en;q=0.9,ar-EG;q=0.8,ar;q=0.7",
-    'x-device-tier': "lower_mid",
-    'chatgpt-account-id': "84329164059103383964",
-    'chatgpt-residency-region': "no_constraint",
-    'Cookie': "__cflb=04dTod5Jcx9DYJeMeKbyj32ve2B3i9pLVRxJxEAaKD; _cfuvid=PXu6q36jhfgxnsdFkDmqwLzCfHOSgG588liApL0856A-1777834828.2542033-1.0.1.1-JFC10kaoqt9_IXzxrixI6zZuAm.TzRPF14QfJiD43MQ; oai-ll=; oai-sc=0gAAAAABp959mEmk6Qr5JsnqYMpWx1-15EJhCVV2EV6SQpet7Z7SjNuAT0x2cVScJu_g_TE9_NXidYfi68DtZfl4ImOQIRkr8PF-R-v9PUl7IPGtYiF1rwqdVm0NjapKV1lROdrmNGkiuNgcVMGYXMrP45hfmmQKiCQ5MBQLjfI7XI2tKSLvHT3WkjFEnmDZIRtVz85lyV9pxK181GJRARSxM53m06IfD3jEDjVbSR5QDQbL6Nxl4l7c; __cf_bm=y_lpbPz3viZYHSAd8nCLtIlm2JBCYWvEwOz8xvvwFow-1777835878.3854406-1.0.1.1-Muu0UxZKqufJhSVDELNGz2fO12Xcqc.oJ3hINoXkGIc2tGinJqVnmBTM7EAKDRfqdl1WdKtZ06fuCJ3y5DddxeMPVlBNX_r7daQReYa59qkFBwXOF3p4W3lwU.tdPN9A"
-});
+const DEFAULT_BASE_URL = 'https://android.chat.openai.com/backend-api';
+const DEFAULT_MODEL = process.env.CHATGPT_ANDROID_MODEL || 'gpt-5-5';
+const DEFAULT_AUTH_TOKEN = process.env.CHATGPT_ANDROID_AUTH_TOKEN || '';
+const DEFAULT_COOKIES = process.env.CHATGPT_ANDROID_COOKIES || '';
+const DEFAULT_DEVICE_ID = process.env.CHATGPT_ANDROID_DEVICE_ID || '05d871f5-391c-418a-b1d1-8dc804241915';
+const DEFAULT_ACCOUNT_ID = process.env.CHATGPT_ANDROID_ACCOUNT_ID || '';
 
-// الحصول على Conduit Token (مطلوب لكل طلب جديد)
-async function getConduitToken() {
-    const url = "https://android.chat.openai.com/backend-api/f/conversation/prepare";
-    const payload = {
-        action: "next",
+function buildHeaders(options = {}) {
+    const headers = {
+        'User-Agent': options.userAgent || 'ChatGPT/1.2026.195 (Android 15; RMX3834; build 2619512)',
+        'Accept': 'application/json',
+        'Accept-Encoding': 'gzip',
+        'Content-Type': 'application/json',
+        'oai-package-name': options.packageName || 'com.openai.chatgpt',
+        'oai-client-type': 'android',
+        'oai-device-id': options.deviceId || DEFAULT_DEVICE_ID,
+        'accept-language': options.acceptLanguage || 'ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7',
+        'x-device-tier': options.deviceTier || 'lower_mid',
+        'chatgpt-residency-region': options.residencyRegion || 'no_constraint'
+    };
+    const accountId = options.accountId || DEFAULT_ACCOUNT_ID;
+    const authToken = options.authToken || options.token || DEFAULT_AUTH_TOKEN;
+    const cookies = options.cookies || DEFAULT_COOKIES;
+    if (accountId) headers['chatgpt-account-id'] = accountId;
+    if (authToken) headers.Authorization = `Bearer ${authToken}`;
+    if (cookies) headers.Cookie = cookies;
+    return headers;
+}
+
+async function prepareConversation(model, options = {}) {
+    const baseUrl = options.baseUrl || DEFAULT_BASE_URL;
+    const response = await axios.post(`${baseUrl}/f/conversation/prepare`, {
+        action: 'next',
         messages: [],
-        model: "auto",
+        model,
         history_and_training_disabled: false,
         fork_from_shared_post: false,
         enable_message_followups: false,
         force_use_sse: false,
         force_use_search: null,
         force_paragen: false,
-        supports_buffering: false,
-        timezone: "Africa/Cairo",
-        timezone_offset_min: -180,
+        supported_encodings: ['v1'],
+        supports_buffering: true,
+        timezone: options.timezone || 'Africa/Cairo',
+        timezone_offset_min: options.timezoneOffsetMin ?? -180,
         system_hints: [],
-        is_onboarding_conversation: false
-    };
-    const response = await axios.post(url, payload, { headers: getStaticHeaders(), timeout: 30000 });
-    if (response.status === 200 && response.data.conduit_token) {
-        return response.data.conduit_token;
-    }
-    throw new Error("Failed to get conduit token");
+        is_onboarding_conversation: false,
+        client_prepare_dispatch: 'debounced',
+        client_prepare_source: 'composer_editor_state'
+    }, { headers: buildHeaders(options), timeout: options.prepareTimeout || 30000 });
+
+    const token = response.data?.conduit_token;
+    if (!token) throw new Error(`ChatGPT Android conduit token missing: ${JSON.stringify(response.data)}`);
+    return token;
 }
 
-// إرسال رسالة إلى ChatGPT (بدون سياق سابق - كل مرة جولة جديدة)
-async function sendMessage(prompt, options = { stream = false, timeout = 120000 }) {
-    const conduitToken = await getConduitToken();
+function parseChatGPTLine(line, state) {
+    if (line.startsWith('event: ')) {
+        state.currentEvent = line.slice(7).trim();
+        return;
+    }
+    if (!line.startsWith('data: ')) return;
+    const raw = line.slice(6).trim();
+    if (!raw || raw === '[DONE]') return;
+    let event;
+    try { event = JSON.parse(raw); } catch (_) { return; }
+
+    if (event.conversation_id) state.conversationId = event.conversation_id;
+    if (event.message?.id) state.responseMessageId = event.message.id;
+    const setFull = event.message?.content?.parts?.[0];
+    if (typeof setFull === 'string') state.text = setFull;
+
+    const patches = Array.isArray(event.v) ? event.v : [event];
+    for (const patch of patches) {
+        if (patch?.o === 'append' && patch?.p === '/message/content/parts/0' && typeof patch.v === 'string') {
+            state.text += patch.v;
+        }
+    }
+}
+
+async function askChatGPTAndroid(prompt, options = {}) {
+    const model = options.model || DEFAULT_MODEL;
+    const context = options.context || {};
+    const baseUrl = options.baseUrl || DEFAULT_BASE_URL;
+    const conduitToken = context.conduitToken || await prepareConversation(model, options);
+    const convoSessionId = context.sessionId || options.sessionId || uuidv4();
+    const parentMessageId = context.parentMessageId || options.parentMessageId || uuidv4();
+
     const headers = {
-        ...getStaticHeaders(),
-        'Conduit-Token': conduitToken,
-        'x-oai-convo-session-id': uuidv4(),
+        ...buildHeaders(options),
+        Accept: 'text/event-stream,application/json',
+        'cache-control': 'no-cache',
+        'x-conduit-token': conduitToken,
+        'x-oai-convo-session-id': convoSessionId,
         'x-oai-turn-trace-id': uuidv4(),
         'x-openai-target-path': '/backend-api/f/conversation'
     };
-    
-    const messageId = uuidv4();
-    const parentMessageId = uuidv4(); // جديد لكل طلب
-    
-    const payload = {
-        action: "next",
-        messages: [{
-            id: messageId,
-            author: { role: "user" },
-            content: { content_type: "text", parts: [prompt] },
-            status: "finished_successfully"
-        }],
-        model: "auto",
-        parent_message_id: parentMessageId,
-        stream: options.stream || false,
-        timezone: "Africa/Cairo",
-        timezone_offset_min: -180
-    };
-    
-    const response = await axios.post(
-        'https://android.chat.openai.com/backend-api/f/conversation',
-        payload,
-        { headers, timeout: options.timeout, responseType: options.stream ? 'stream' : 'json' }
-    );
-    
-    if (options.stream) {
-        // في حالة البث، نعيد الـ stream ونعالجه خارجياً
-        return response.data;
-    } else {
-        // قراءة النص الكامل من response (غير stream)
-        let fullText = "";
-        // لكن الـ API يعيد stream دائماً تقريباً، لذا حتى مع stream:false نتعامل مع التدفق
-        // الأفضل نستخدم stream دائماً ونجمع النص يدوياً
-    }
-}
 
-// دالة تجمع النص من stream وتعيده كسلسلة
-async function getFullResponse(prompt, timeout = 120000) {
-    const conduitToken = await getConduitToken();
-    const headers = { ...getStaticHeaders(), 'Conduit-Token': conduitToken, ... };
-    // ... نفس بناء payload
-    const response = await axios.post(..., { responseType: 'stream', timeout });
-    return new Promise((resolve, reject) => {
-        let fullResponse = "";
-        response.data.on('data', (chunk) => {
-            const lines = chunk.toString().split('\n');
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    const data = line.slice(6);
-                    if (data === '[DONE]') continue;
-                    try {
-                        const event = JSON.parse(data);
-                        if (event.message?.content?.parts?.[0]) {
-                            fullResponse = event.message.content.parts[0];
-                        }
-                    } catch(e) {}
-                }
-            }
-        });
-        response.data.on('end', () => resolve(fullResponse));
+    const response = await axios.post(`${baseUrl}/f/conversation`, {
+        action: 'next',
+        messages: [{
+            id: uuidv4(),
+            author: { role: 'user' },
+            content: { parts: [prompt], content_type: 'text' },
+            status: 'finished_successfully',
+            recipient: 'all',
+            metadata: { model_slug: model, default_model_slug: model }
+        }],
+        model,
+        parent_message_id: parentMessageId,
+        conversation_id: context.conversationId,
+        history_and_training_disabled: false,
+        enable_message_followups: true,
+        force_use_sse: true,
+        supported_encodings: ['v1'],
+        supports_buffering: true,
+        timezone: options.timezone || 'Africa/Cairo',
+        timezone_offset_min: options.timezoneOffsetMin ?? -180,
+        stream: true
+    }, { headers, timeout: options.timeout || 500000, responseType: 'stream' });
+
+    const state = { text: '', currentEvent: null, conversationId: context.conversationId, responseMessageId: null };
+    await new Promise((resolve, reject) => {
+        response.data.on('data', chunk => chunk.toString().split('\n').forEach(line => parseChatGPTLine(line.trim(), state)));
+        response.data.on('end', resolve);
         response.data.on('error', reject);
     });
+
+    if (!state.text.trim()) throw new Error('ChatGPT Android returned an empty response');
+    if (options.context) {
+        options.context.conduitToken = conduitToken;
+        options.context.sessionId = convoSessionId;
+        if (state.conversationId) options.context.conversationId = state.conversationId;
+        if (state.responseMessageId) options.context.parentMessageId = state.responseMessageId;
+        options.context.lastUpdated = new Date();
+    }
+    return state.text;
 }
 
-module.exports = { getFullResponse };
+module.exports = { askChatGPTAndroid };

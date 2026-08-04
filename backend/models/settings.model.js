@@ -82,6 +82,7 @@ RETURN ONLY JSON:` },
         searchEnabled: { type: Boolean, default: true }, // DeepSeek: enable web search
         deepSeekModelType: { type: String, enum: ['default', 'expert'], default: 'default' }, // DeepSeek: Default or Expert mode
         deepSeekTokens: [{ type: String }], // DeepSeek account tokens; falls back to default app token when empty
+        qwenTokens: [{ type: String }], // Qwen account tokens; handled like DeepSeek tokens
         powProviders: [{
             id: { type: String, required: true },
             name: { type: String, required: true },

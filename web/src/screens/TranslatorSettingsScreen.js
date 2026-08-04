@@ -39,6 +39,14 @@ const isDeepSeekProvider = (provider) => {
   return providerId === 'deepseek' || name.includes('deepseek') || model.includes('deepseek') || hasDeepSeekModel;
 };
 
+const isQwenProvider = (provider) => {
+  const providerId = (provider.providerId || '').toLowerCase();
+  const name = (provider.name || '').toLowerCase();
+  const model = (provider.selectedModel || '').toLowerCase();
+  const hasQwenModel = provider.models && provider.models.some(m => (m.modelId || '').toLowerCase().includes('qwen'));
+  return providerId === 'qwen' || name.includes('qwen') || model.includes('qwen') || hasQwenModel;
+};
+
 const GlassContainer = ({ children, style }) => (
     <View style={[styles.glassContainer, style]}>
         {children}
@@ -75,13 +83,14 @@ export default function TranslatorSettingsScreen({ navigation }) {
                   name: p.name || 'مزوّد جديد',
                   baseUrl: p.baseUrl || '',
                   models: p.models && p.models.length ? p.models : [{ modelId: 'gemini-2.5-flash', modelName: 'Gemini 2.5 Flash' }],
-                  apiKeys: (p.apiKeys && p.apiKeys.length ? p.apiKeys : (p.deepSeekTokens || [])),
+                  apiKeys: (p.apiKeys && p.apiKeys.length ? p.apiKeys : (p.deepSeekTokens && p.deepSeekTokens.length ? p.deepSeekTokens : (p.qwenTokens || []))),
                   selectedModel: p.selectedModel || (p.models && p.models[0]?.modelId) || 'gemini-2.5-flash',
                   priority: p.priority !== undefined ? p.priority : idx,
                   thinkingEnabled: Boolean(p.thinkingEnabled),
                   searchEnabled: p.searchEnabled !== false,
                   deepSeekModelType: p.deepSeekModelType === 'expert' ? 'expert' : 'default',
                   deepSeekTokens: p.deepSeekTokens || [],
+                  qwenTokens: p.qwenTokens || [],
                   powProviders: normalizePowProviders(p.powProviders),
                   selectedPowProviderId: p.selectedPowProviderId || 'railway'
               }));
@@ -103,7 +112,8 @@ export default function TranslatorSettingsScreen({ navigation }) {
           baseUrl: '',
           models: [
               { modelId: 'gemini-2.5-flash', modelName: 'Gemini 2.5 Flash' },
-              { modelId: 'auto', modelName: 'ChatGPT Android' }
+              { modelId: 'qwen3.8-max', modelName: 'Qwen 3.8 Max' },
+              { modelId: 'gpt-5-5', modelName: 'GPT Android' }
           ],
           apiKeys: [],
           selectedModel: 'gemini-2.5-flash',
@@ -212,6 +222,7 @@ export default function TranslatorSettingsScreen({ navigation }) {
               searchEnabled: p.searchEnabled,
               deepSeekModelType: p.deepSeekModelType,
               deepSeekTokens: isDeepSeekProvider(p) ? p.apiKeys : p.deepSeekTokens,
+              qwenTokens: isQwenProvider(p) ? p.apiKeys : p.qwenTokens,
               powProviders: normalizePowProviders(p.powProviders).filter(pow => pow.url.trim() !== '').map(pow => ({
                   id: pow.id,
                   name: pow.name,
@@ -321,10 +332,10 @@ export default function TranslatorSettingsScreen({ navigation }) {
                                     autoCapitalize="none"
                                 />
 
-                                {isDeepSeekProvider(provider) && (
+                                {(isDeepSeekProvider(provider) || isQwenProvider(provider)) && (
                                   <View style={styles.deepSeekBox}>
-                                    <Text style={styles.miniLabel}>وضع DeepSeek للمحادثة</Text>
-                                    <Text style={styles.hintSmall}>مطابق لتطبيق DeepSeek: افتراضي للمحادثة الطبيعية أو خبير للإجابات الأقوى.</Text>
+                                    <Text style={styles.miniLabel}>وضع مزوّد المحادثة</Text>
+                                    <Text style={styles.hintSmall}>لـ DeepSeek و Qwen: محادثات مستقلة لكل توكن مع استمرار التوكن الناجح.</Text>
                                     <View style={styles.modeSelectorRow}>
                                       <TouchableOpacity
                                         style={[styles.modeChoice, provider.deepSeekModelType === 'default' && styles.modeChoiceActive]}
@@ -381,12 +392,12 @@ export default function TranslatorSettingsScreen({ navigation }) {
                                 ))}
 
                                 {/* المفاتيح */}
-                                <Text style={styles.miniLabel}>{isDeepSeekProvider(provider) ? 'توكنات DeepSeek (كل توكن في سطر)' : 'مفاتيح API (كل مفتاح في سطر)'}</Text>
-                                <Text style={styles.hintSmall}>{isDeepSeekProvider(provider) ? '🔑 بالنسبة لـ DeepSeek: ضع توكنات الحساب هنا؛ سيتم استخدامها فعلياً بدل التوكن الافتراضي.' : '🔑 بالنسبة لـ ChatGPT Android: اترك الحقل فارغاً أو اكتب أي نص (لا يحتاج مفتاح حقيقي)'}</Text>
+                                <Text style={styles.miniLabel}>{isDeepSeekProvider(provider) ? 'توكنات DeepSeek (كل توكن في سطر)' : isQwenProvider(provider) ? 'توكنات Qwen (كل توكن في سطر)' : 'مفاتيح API (كل مفتاح في سطر)'}</Text>
+                                <Text style={styles.hintSmall}>{isDeepSeekProvider(provider) ? '🔑 بالنسبة لـ DeepSeek: ضع توكنات الحساب هنا؛ سيتم استخدامها فعلياً بدل التوكن الافتراضي.' : isQwenProvider(provider) ? '🔑 بالنسبة لـ Qwen: ضع توكنات الحساب هنا وسيعاملها النظام مثل DeepSeek.' : '🔑 بالنسبة لـ GPT Android: اترك الحقل فارغاً أو ضع التوكن إن توفر.'}</Text>
                                 <TextInput
                                     style={styles.keysInputSmall}
                                     multiline
-                                    placeholder={isDeepSeekProvider(provider) ? "DeepSeek token 1\nDeepSeek token 2" : "AIzaSy...\nsk-..."}
+                                    placeholder={isDeepSeekProvider(provider) ? "DeepSeek token 1\nDeepSeek token 2" : isQwenProvider(provider) ? "Qwen token 1\nQwen token 2" : "AIzaSy...\ngpt token..."}
                                     placeholderTextColor="#666"
                                     value={provider._keysText || provider.apiKeys.join('\n')}
                                     onChangeText={(text) => updateProviderKeys(provider.providerId, text)}

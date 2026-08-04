@@ -1,12 +1,13 @@
 const mongoose = require('mongoose');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const axios = require('axios'); // 🔥 NEW: for OpenRouter and custom providers
-const { v4: uuidv4 } = require('uuid'); // 🔥 NEW: for ChatGPT Android API
 const Novel = require('../models/novel.model.js');
 const Glossary = require('../models/glossary.model.js');
 const TranslationJob = require('../models/translationJob.model.js');
 const Settings = require('../models/settings.model.js');
 const { askDeepSeek } = require('../services/deepseekAndroid.service.js');
+const { askQwen } = require('../services/qwenAndroid.service.js');
+const { askChatGPTAndroid } = require('../services/chatgptAndroid.service.js');
 
 const DEEPSEEK_CHAPTERS_PER_CONVERSATION = 100;
 const DEEPSEEK_MAX_ATTEMPTS_PER_TOKEN = 5;
@@ -14,8 +15,8 @@ const DEFAULT_DEEPSEEK_POW_PROVIDERS = [
     { id: 'railway', name: 'Railway', url: 'https://web-production-c09dc.up.railway.app/pow' },
     { id: 'ngrok', name: 'Ngrok', url: 'https://immunize-quintet-trimmer.ngrok-free.dev/get_pow' }
 ];
-const deepSeekTokenAssignments = new Map();
-let deepSeekNextTokenIndex = 0;
+const stickyTokenAssignments = new Map();
+let stickyNextTokenIndex = 0;
 
 
 function normalizePowProviderUrl(url) {
@@ -85,23 +86,30 @@ function getProviderAuthKeys(provider) {
             : [];
         if (deepSeekTokens.length > 0) return deepSeekTokens;
     }
+    if (isQwenProvider(provider)) {
+        const qwenTokens = Array.isArray(provider.qwenTokens)
+            ? provider.qwenTokens.map(t => (t || '').trim()).filter(Boolean)
+            : [];
+        if (qwenTokens.length > 0) return qwenTokens;
+    }
     return Array.isArray(provider.apiKeys) ? provider.apiKeys.map(k => (k || '').trim()).filter(Boolean) : [];
 }
 
 function pickDeepSeekToken(provider, options = {}, explicitToken) {
     const directToken = (explicitToken || '').trim();
     if (directToken && !directToken.startsWith('dummy-key-for-')) return directToken;
-    const tokens = Array.isArray(provider.deepSeekTokens)
-        ? provider.deepSeekTokens.map(t => (t || '').trim()).filter(Boolean)
+    const tokenField = isQwenProvider(provider) ? provider.qwenTokens : provider.deepSeekTokens;
+    const tokens = Array.isArray(tokenField)
+        ? tokenField.map(t => (t || '').trim()).filter(Boolean)
         : [];
     if (tokens.length === 0) return provider.deepSeekToken || undefined;
     const stickyKey = `${options.deepSeekJobId || ''}:${provider.providerId || provider.name || 'deepseek'}`;
     if (options.deepSeekJobId) {
-        if (!deepSeekTokenAssignments.has(stickyKey)) {
-            deepSeekTokenAssignments.set(stickyKey, deepSeekNextTokenIndex % tokens.length);
-            deepSeekNextTokenIndex++;
+        if (!stickyTokenAssignments.has(stickyKey)) {
+            stickyTokenAssignments.set(stickyKey, stickyNextTokenIndex % tokens.length);
+            stickyNextTokenIndex++;
         }
-        return tokens[deepSeekTokenAssignments.get(stickyKey) % tokens.length];
+        return tokens[stickyTokenAssignments.get(stickyKey) % tokens.length];
     }
     return tokens[hashStringToIndex(stickyKey, tokens.length)];
 }
@@ -197,12 +205,24 @@ function isDeepSeekProvider(provider) {
     return providerId === 'deepseek' || name.includes('deepseek') || model.includes('deepseek') || hasDeepSeekModel;
 }
 
-function isChatGPTAndroidProvider(provider) {
+function isQwenProvider(provider) {
+    const providerId = (provider.providerId || '').toLowerCase();
     const name = (provider.name || '').toLowerCase();
     const model = (provider.selectedModel || '').toLowerCase();
-    // Check if any model has modelId 'auto' or contains 'chatgpt'
-    const hasAutoModel = provider.models && provider.models.some(m => (m.modelId || '').toLowerCase() === 'auto');
-    return name.includes('chatgpt') || name.includes('gpt') || model === 'auto' || hasAutoModel;
+    const hasQwenModel = provider.models && provider.models.some(m => (m.modelId || '').toLowerCase().includes('qwen'));
+    return providerId === 'qwen' || name.includes('qwen') || model.includes('qwen') || hasQwenModel;
+}
+
+function isChatGPTAndroidProvider(provider) {
+    const providerId = (provider.providerId || '').toLowerCase();
+    const name = (provider.name || '').toLowerCase();
+    const model = (provider.selectedModel || '').toLowerCase();
+    const hasGptModel = provider.models && provider.models.some(m => /(gpt|chatgpt)/i.test(m.modelId || ''));
+    return providerId === 'chatgpt-android' || name.includes('chatgpt') || model.includes('gpt') || hasGptModel;
+}
+
+function isStickyChatProvider(provider) {
+    return isDeepSeekProvider(provider) || isQwenProvider(provider) || isChatGPTAndroidProvider(provider);
 }
 
 // 🔥 Helper to truncate prompt if too long (to avoid 413 error)
@@ -478,131 +498,36 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
         return response.text();
     }
 
-    // ---- ChatGPT Android API (Reverse Engineered) ----
-    if (isChatGPT || providerId === 'chatgpt-android') {
-        // Helper function to get conduit token
-        async function getConduitToken() {
-            const prepareUrl = "https://android.chat.openai.com/backend-api/f/conversation/prepare";
-            const preparePayload = {
-                action: "next",
-                messages: [],
-                model: "auto",
-                history_and_training_disabled: false,
-                fork_from_shared_post: false,
-                enable_message_followups: false,
-                force_use_sse: false,
-                force_use_search: null,
-                force_paragen: false,
-                supports_buffering: false,
-                timezone: "Africa/Cairo",
-                timezone_offset_min: -180,
-                system_hints: [],
-                is_onboarding_conversation: false
-            };
-            const staticHeaders = {
-                'User-Agent': "ChatGPT/1.2027.000 (Android 15; RMX3834; build 2700000)",
-                'Accept': "application/json",
-                'Accept-Encoding': "gzip",
-                'Content-Type': "application/json",
-                'oai-package-name': "com.Modderme",
-                'oai-client-type': "android",
-                'oai-device-id': "84329164059103383964",
-                'accept-language': "en-US,en;q=0.9,ar-EG;q=0.8,ar;q=0.7",
-                'x-device-tier': "lower_mid",
-                'chatgpt-account-id': "84329164059103383964",
-                'chatgpt-residency-region': "no_constraint",
-                'Cookie': "__cflb=04dTod5Jcx9DYJeMeKbyj32ve2B3i9pLVRxJxEAaKD; _cfuvid=PXu6q36jhfgxnsdFkDmqwLzCfHOSgG588liApL0856A-1777834828.2542033-1.0.1.1-JFC10kaoqt9_IXzxrixI6zZuAm.TzRPF14QfJiD43MQ; oai-ll=; oai-sc=0gAAAAABp959mEmk6Qr5JsnqYMpWx1-15EJhCVV2EV6SQpet7Z7SjNuAT0x2cVScJu_g_TE9_NXidYfi68DtZfl4ImOQIRkr8PF-R-v9PUl7IPGtYiF1rwqdVm0NjapKV1lROdrmNGkiuNgcVMGYXMrP45hfmmQKiCQ5MBQLjfI7XI2tKSLvHT3WkjFEnmDZIRtVz85lyV9pxK181GJRARSxM53m06IfD3jEDjVbSR5QDQbL6Nxl4l7c; __cf_bm=y_lpbPz3viZYHSAd8nCLtIlm2JBCYWvEwOz8xvvwFow-1777835878.3854406-1.0.1.1-Muu0UxZKqufJhSVDELNGz2fO12Xcqc.oJ3hINoXkGIc2tGinJqVnmBTM7EAKDRfqdl1WdKtZ06fuCJ3y5DddxeMPVlBNX_r7daQReYa59qkFBwXOF3p4W3lwU.tdPN9A"
-            };
-            try {
-                const prepareRes = await axios.post(prepareUrl, preparePayload, { headers: staticHeaders, timeout: 30000 });
-                if (prepareRes.status === 200 && prepareRes.data.conduit_token) {
-                    return prepareRes.data.conduit_token;
-                }
-                throw new Error("No conduit token in response");
-            } catch (err) {
-                throw new Error(`ChatGPT Android: failed to get conduit token: ${err.message}`);
-            }
-        }
-
-        // 🔥 FIX: Truncate prompt if too large to avoid 413 error
-        const finalPrompt = truncatePromptIfNeeded(prompt, 10000);
-        
-        // Get conduit token
-        const conduitToken = await getConduitToken();
-        
-        // Build headers with conduit token and session IDs
-        const chatHeaders = {
-            'User-Agent': "ChatGPT/1.2027.000 (Android 15; RMX3834; build 2700000)",
-            'Accept': "application/json",
-            'Accept-Encoding': "gzip",
-            'Content-Type': "application/json",
-            'oai-package-name': "com.Modderme",
-            'oai-client-type': "android",
-            'oai-device-id': "84329164059103383964",
-            'accept-language': "en-US,en;q=0.9,ar-EG;q=0.8,ar;q=0.7",
-            'x-device-tier': "lower_mid",
-            'chatgpt-account-id': "84329164059103383964",
-            'chatgpt-residency-region': "no_constraint",
-            'Cookie': "__cflb=04dTod5Jcx9DYJeMeKbyj32ve2B3i9pLVRxJxEAaKD; _cfuvid=PXu6q36jhfgxnsdFkDmqwLzCfHOSgG588liApL0856A-1777834828.2542033-1.0.1.1-JFC10kaoqt9_IXzxrixI6zZuAm.TzRPF14QfJiD43MQ; oai-ll=; oai-sc=0gAAAAABp959mEmk6Qr5JsnqYMpWx1-15EJhCVV2EV6SQpet7Z7SjNuAT0x2cVScJu_g_TE9_NXidYfi68DtZfl4ImOQIRkr8PF-R-v9PUl7IPGtYiF1rwqdVm0NjapKV1lROdrmNGkiuNgcVMGYXMrP45hfmmQKiCQ5MBQLjfI7XI2tKSLvHT3WkjFEnmDZIRtVz85lyV9pxK181GJRARSxM53m06IfD3jEDjVbSR5QDQbL6Nxl4l7c; __cf_bm=y_lpbPz3viZYHSAd8nCLtIlm2JBCYWvEwOz8xvvwFow-1777835878.3854406-1.0.1.1-Muu0UxZKqufJhSVDELNGz2fO12Xcqc.oJ3hINoXkGIc2tGinJqVnmBTM7EAKDRfqdl1WdKtZ06fuCJ3y5DddxeMPVlBNX_r7daQReYa59qkFBwXOF3p4W3lwU.tdPN9A",
-            'Conduit-Token': conduitToken,
-            'x-oai-convo-session-id': getDeepSeekConversationContext(options.conversationContexts, options.conversationPurpose, options.conversationBatchKey, options.conversationScopeKey)?.sessionId || uuidv4(),
-            'x-oai-turn-trace-id': uuidv4(),
-            'x-openai-target-path': '/backend-api/f/conversation'
-        };
-        
-        const messageId = uuidv4();
-        const chatContext = getDeepSeekConversationContext(options.conversationContexts, options.conversationPurpose, options.conversationBatchKey, options.conversationScopeKey);
-        if (chatContext && !chatContext.sessionId) chatContext.sessionId = chatHeaders['x-oai-convo-session-id'];
-        const parentMessageId = chatContext?.parentMessageId || uuidv4();
-        
-        const payload = {
-            action: "next",
-            messages: [{
-                id: messageId,
-                author: { role: "user" },
-                content: { content_type: "text", parts: [finalPrompt] },
-                status: "finished_successfully"
-            }],
-            model: modelName || "auto",
-            parent_message_id: parentMessageId,
-            stream: false,
-            timezone: "Africa/Cairo",
-            timezone_offset_min: -180
-        };
-        
-        const chatUrl = 'https://android.chat.openai.com/backend-api/f/conversation';
-        const response = await axios.post(chatUrl, payload, { headers: chatHeaders, timeout: options.timeout || 500000, responseType: 'stream' });
-        
-        // Collect full response from stream
-        let fullResponse = "";
-        let responseMessageId = null;
-        await new Promise((resolve, reject) => {
-            response.data.on('data', (chunk) => {
-                const lines = chunk.toString().split('\n');
-                for (const line of lines) {
-                    if (line.startsWith('data: ')) {
-                        const data = line.slice(6);
-                        if (data === '[DONE]') continue;
-                        try {
-                            const event = JSON.parse(data);
-                            if (event.message?.id) responseMessageId = event.message.id;
-                            if (event.message && event.message.content && event.message.content.parts && event.message.content.parts[0]) {
-                                fullResponse = event.message.content.parts[0];
-                            }
-                        } catch (e) {}
-                    }
-                }
-            });
-            response.data.on('end', () => resolve());
-            response.data.on('error', reject);
+    // ---- Qwen Android API (same conversation/token behavior as DeepSeek) ----
+    if (isQwenProvider(provider)) {
+        return askQwen(prompt, {
+            token: apiKey && !apiKey.startsWith('dummy-key-for-') ? apiKey : provider.qwenToken,
+            model: modelName || 'qwen3.8-max',
+            thinkingEnabled: Boolean(provider.thinkingEnabled),
+            searchEnabled: provider.searchEnabled !== false,
+            timeout: options.timeout || 500000,
+            context: getDeepSeekConversationContext(
+                options.conversationContexts,
+                options.conversationPurpose,
+                options.conversationBatchKey,
+                options.conversationScopeKey
+            )
         });
-        
-        if (!fullResponse) throw new Error("ChatGPT Android: empty response");
-        if (chatContext) {
-            if (responseMessageId) chatContext.parentMessageId = responseMessageId;
-            chatContext.lastUpdated = new Date();
-        }
-        return fullResponse;
+    }
+
+    // ---- ChatGPT Android API from root gpt.py (service-backed, no inline legacy code) ----
+    if (isChatGPT || providerId === 'chatgpt-android') {
+        return askChatGPTAndroid(truncatePromptIfNeeded(prompt, 10000), {
+            token: apiKey && !apiKey.startsWith('dummy-key-for-') ? apiKey : provider.chatgptToken,
+            model: modelName || 'gpt-5-5',
+            timeout: options.timeout || 500000,
+            context: getDeepSeekConversationContext(
+                options.conversationContexts,
+                options.conversationPurpose,
+                options.conversationBatchKey,
+                options.conversationScopeKey
+            )
+        });
     }
 
     // ---- Cloudflare Workers AI ----
@@ -729,6 +654,7 @@ async function processTranslationJob(jobId) {
 
         const chaptersToProcess = job.targetChapters.sort((a, b) => a - b);
         const conversationContexts = { chapters: new Map(), glossary: new Map(), chapter_review: new Map() };
+        let stickySuccessRoute = null;
 
         for (const [chapterIndex, chapterNum] of chaptersToProcess.entries()) {
             const freshJob = await TranslationJob.findById(jobId);
@@ -802,15 +728,22 @@ ${sourceContent}
                     ? buildRepairTranslationPrompt(transPrompt, glossaryText, sourceContent, translatedText, lastValidationReasons)
                     : translationInput;
 
-                for (const provider of providers) {
+                const orderedProviders = stickySuccessRoute
+                    ? [...providers.slice(stickySuccessRoute.providerIndex), ...providers.slice(0, stickySuccessRoute.providerIndex)]
+                    : providers;
+
+                for (const provider of orderedProviders) {
                     if (translationSuccess) break;
+                    const providerIndex = providers.indexOf(provider);
                     const providerName = provider.name || provider.providerId;
                     const modelToUse = provider.selectedModel || (provider.models && provider.models[0]?.modelId) || 'gemini-2.5-flash';
                     let keys = getProviderAuthKeys(provider);
                     const isChatGPT = isChatGPTAndroidProvider(provider);
                     const isDeepSeek = isDeepSeekProvider(provider);
+                    const isQwen = isQwenProvider(provider);
+                    const isStickyChat = isStickyChatProvider(provider);
 
-                    if (keys.length === 0 && !isChatGPT && !isDeepSeek) {
+                    if (keys.length === 0 && !isChatGPT && !isDeepSeek && !isQwen) {
                         await pushLog(jobId, `⚠️ المزوّد ${providerName} ليس لديه مفاتيح – تخطيه`, 'warning');
                         continue;
                     }
@@ -824,16 +757,25 @@ ${sourceContent}
                     } else if (isDeepSeek) {
                         await pushLog(jobId, `🔑 مزوّد DeepSeek: سيتم استخدام ${keys.length} توكن محفوظ من حقل المفاتيح/التوكنات`, 'info');
                     }
+                    if (isQwen && keys.length === 0) {
+                        keys = ['dummy-key-for-qwen'];
+                        await pushLog(jobId, `🔑 مزوّد Qwen: لا توجد توكنات محفوظة، سيتم استخدام إعدادات البيئة/الافتراضي`, 'info');
+                    } else if (isQwen) {
+                        await pushLog(jobId, `🔑 مزوّد Qwen: سيتم استخدام ${keys.length} توكن محفوظ`, 'info');
+                    }
 
-                    for (let keyIdx = 0; keyIdx < keys.length; keyIdx++) {
+                    const preferredKeyIdx = stickySuccessRoute?.providerIndex === providerIndex ? stickySuccessRoute.keyIdx : 0;
+                    const orderedKeyIndexes = [...Array(keys.length).keys()].slice(preferredKeyIdx).concat([...Array(keys.length).keys()].slice(0, preferredKeyIdx));
+
+                    for (const keyIdx of orderedKeyIndexes) {
                         const key = keys[keyIdx];
-                        const conversationScopeKey = isDeepSeek ? getTokenConversationScope(provider, key, keyIdx) : undefined;
-                        const tokenAttempts = isDeepSeek ? DEEPSEEK_MAX_ATTEMPTS_PER_TOKEN : 1;
+                        const conversationScopeKey = isStickyChat ? getTokenConversationScope(provider, key, keyIdx) : undefined;
+                        const tokenAttempts = isStickyChat ? DEEPSEEK_MAX_ATTEMPTS_PER_TOKEN : 1;
                         let tokenFailed = false;
 
                         for (let tokenAttempt = 1; tokenAttempt <= tokenAttempts; tokenAttempt++) {
                             try {
-                                const retryLabel = isDeepSeek ? ` | محاولة التوكن ${tokenAttempt}/${tokenAttempts}` : '';
+                                const retryLabel = isStickyChat ? ` | محاولة التوكن ${tokenAttempt}/${tokenAttempts}` : '';
                                 await pushLog(jobId, `1️⃣ مزوّد: ${providerName} | نموذج: ${modelToUse} | مفتاح ${keyIdx + 1}/${keys.length} | محاولة ${attempt}${retryLabel}`, 'info');
                                 const candidateText = await callTranslationProvider(provider, modelToUse, key, promptForAttempt, {
                                     deepSeekJobId: jobId.toString(),
@@ -877,7 +819,7 @@ ${sourceContent}
                                     translatedText = candidateTextForReview || '';
                                     lastValidationReasons = [...validation.reasons, review.reason];
                                     await pushLog(jobId, `🧪 فشلت مراجعة الفصل ${chapterNum}: ${lastValidationReasons.join('، ')} — ستتم إعادة الترجمة ولن ننتقل للفصل التالي`, 'warning');
-                                    if (isDeepSeek) resetConversationContextsForScope(conversationContexts, conversationScopeKey, conversationBatchKey);
+                                    if (isStickyChat) resetConversationContextsForScope(conversationContexts, conversationScopeKey, conversationBatchKey);
                                     tokenFailed = true;
                                     continue;
                                 }
@@ -889,25 +831,26 @@ ${sourceContent}
                             lastValidationReasons = [];
                             translationSuccess = true;
                             usedProvider = provider;
-                                await pushLog(jobId, `✅ نجحت الترجمة والمراجعة باستخدام ${providerName}`, 'success');
+                            stickySuccessRoute = { providerIndex, keyIdx };
+                                await pushLog(jobId, `✅ نجحت الترجمة والمراجعة باستخدام ${providerName} (سيُكمل النظام من هذا المزود/التوكن في الفصل التالي)`, 'success');
                                 break;
                             } catch (err) {
                                 tokenFailed = true;
                                 console.error(`❌ فشل ${providerName} مفتاح ${keyIdx+1}: ${err.message}`);
                                 await pushLog(jobId, `❌ فشل: ${err.message}`, 'warning');
-                                if (isDeepSeek && tokenAttempt < tokenAttempts) {
+                                if (isStickyChat && tokenAttempt < tokenAttempts) {
                                     resetConversationContextsForScope(conversationContexts, conversationScopeKey, conversationBatchKey);
-                                    await pushLog(jobId, `🔁 DeepSeek: سيتم إنشاء محادثات جديدة لنفس التوكن قبل إعادة المحاولة ${tokenAttempt + 1}/${tokenAttempts}`, 'warning');
+                                    await pushLog(jobId, `🔁 مزوّد المحادثة: سيتم إنشاء محادثات جديدة لنفس التوكن قبل إعادة المحاولة ${tokenAttempt + 1}/${tokenAttempts}`, 'warning');
                                     await delay(3000);
                                 }
                             }
                         }
 
                         if (translationSuccess) break;
-                        if (isDeepSeek && tokenFailed && keyIdx < keys.length - 1) {
-                            await pushLog(jobId, `➡️ DeepSeek: فشل التوكن ${keyIdx + 1} بعد ${tokenAttempts} محاولات؛ الانتقال لتوكن آخر بمحادثاته المستقلة`, 'warning');
+                        if (isStickyChat && tokenFailed && keyIdx < keys.length - 1) {
+                            await pushLog(jobId, `➡️ ${providerName}: فشل التوكن ${keyIdx + 1} بعد ${tokenAttempts} محاولات؛ الانتقال لتوكن آخر وسيستمر استخدامه إذا نجح`, 'warning');
                             await delay(3000);
-                        } else if (!isDeepSeek && keyIdx < keys.length - 1) {
+                        } else if (!isStickyChat && keyIdx < keys.length - 1) {
                             await delay(3000);
                         }
                     }
@@ -918,7 +861,8 @@ ${sourceContent}
                 }
 
                 if (!translationSuccess) {
-                    await pushLog(jobId, `⏳ لم ينجح الفصل ${chapterNum}. الانتظار 30 دقيقة ثم إعادة المحاولة على نفس الفصل بدون تخطيه.`, 'warning');
+                    stickySuccessRoute = null;
+                    await pushLog(jobId, `⏳ لم ينجح الفصل ${chapterNum} بعد تجربة كل المزودين/التوكنات. سيتم تصفير نقطة البدء ثم الانتظار 30 دقيقة وإعادة المحاولة على نفس الفصل.`, 'warning');
                     await delay(RETRY_DELAY_MS);
                 }
             }
@@ -1039,6 +983,7 @@ if (jsonMatch) {
                         let keys = getProviderAuthKeys(usedProvider);
                         if (isChatGPTAndroidProvider(usedProvider) && keys.length === 0) keys = ['dummy-key-for-chatgpt-android'];
                         if (isDeepSeekProvider(usedProvider) && keys.length === 0) keys = ['dummy-key-for-deepseek'];
+                        if (isQwenProvider(usedProvider) && keys.length === 0) keys = ['dummy-key-for-qwen'];
                         for (const key of keys) {
                             try {
                                 const terms = await tryExtraction(usedProvider, usedProvider.selectedModel, key);
@@ -1083,6 +1028,7 @@ if (jsonMatch) {
                             let keys = getProviderAuthKeys(usedProvider);
                             if (isChatGPTAndroidProvider(usedProvider) && keys.length === 0) keys = ['dummy-key-for-chatgpt-android'];
                             if (isDeepSeekProvider(usedProvider) && keys.length === 0) keys = ['dummy-key-for-deepseek'];
+                        if (isQwenProvider(usedProvider) && keys.length === 0) keys = ['dummy-key-for-qwen'];
                             for (const key of keys) {
                                 try {
                                     const terms = await tryExtraction(usedProvider, llmModel.modelId, key);
@@ -1125,13 +1071,18 @@ if (jsonMatch) {
 
                 // ---- STEP 2: Fallback – any provider with an LLM ----
                 if (!extractionDone) {
-                    for (const provider of providers) {
+                    const orderedProviders = stickySuccessRoute
+                    ? [...providers.slice(stickySuccessRoute.providerIndex), ...providers.slice(0, stickySuccessRoute.providerIndex)]
+                    : providers;
+
+                for (const provider of orderedProviders) {
                         if (extractionDone) break;
                         const llmModel = findLLMModel(provider);
                         if (!llmModel) continue;
                         let keys = getProviderAuthKeys(provider);
                         if (isChatGPTAndroidProvider(provider) && keys.length === 0) keys = ['dummy-key-for-chatgpt-android'];
                         if (isDeepSeekProvider(provider) && keys.length === 0) keys = ['dummy-key-for-deepseek'];
+                        if (isQwenProvider(provider) && keys.length === 0) keys = ['dummy-key-for-qwen'];
                         for (const key of keys) {
                             try {
                                 const terms = await tryExtraction(provider, llmModel.modelId, key);
@@ -1408,7 +1359,7 @@ module.exports = function(app, verifyToken, verifyAdmin) {
             
             // 🔥 CHECK providers instead of legacy keys
             const providers = userSettings?.translationProviders || [];
-            const anyKeys = providers.some(p => (p.apiKeys && p.apiKeys.length > 0) || isChatGPTAndroidProvider(p) || isDeepSeekProvider(p));
+            const anyKeys = providers.some(p => (p.apiKeys && p.apiKeys.length > 0) || isChatGPTAndroidProvider(p) || isDeepSeekProvider(p) || isQwenProvider(p));
             const legacyKeys = userSettings?.translatorApiKeys || [];
             
             if (!anyKeys && legacyKeys.length === 0) {
