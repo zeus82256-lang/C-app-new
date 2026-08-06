@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional, Generator
 import requests
 
 
+
 def parse_cookies_str(cookies_str: str) -> dict:
     cookies = {}
     for part in cookies_str.split(';'):
