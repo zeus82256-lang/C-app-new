@@ -12,7 +12,7 @@ const { askChatGPTAndroid } = require('../services/chatgptAndroid.service.js');
 const DEEPSEEK_CHAPTERS_PER_CONVERSATION = 100;
 const DEEPSEEK_MAX_ATTEMPTS_PER_TOKEN = 5;
 const DEFAULT_DEEPSEEK_POW_PROVIDERS = [
-    { id: 'railway', name: 'Railway', url: 'https://web-production-c09dc.up.railway.app/pow' },
+    { id: 'railway', name: 'Railway', url: 'https://pow.up.railway.app/pow' },
     { id: 'ngrok', name: 'Ngrok', url: 'https://immunize-quintet-trimmer.ngrok-free.dev/get_pow' }
 ];
 const stickyTokenAssignments = new Map();
