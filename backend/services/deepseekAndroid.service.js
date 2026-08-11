@@ -1,7 +1,7 @@
 const axios = require('axios');
 
 const DEFAULT_DEEPSEEK_TOKEN = process.env.DEEPSEEK_APP_TOKEN || 'IVlSFv6JwO2TttyAhMW6Cu9/eMCDQhcfY0uHWu000SDnAyEwsYxtR8rFADgo22LM';
-const DEFAULT_POW_URL = process.env.DEEPSEEK_POW_URL || 'https://web-production-c09dc.up.railway.app/pow';
+const DEFAULT_POW_URL = process.env.DEEPSEEK_POW_URL || 'https://pow.up.railway.app/pow';
 
 function removeDeepSeekFinishedMarker(text) {
     return (text || '').replace(/(?:\r?\n|\s)*FINISHED\s*$/i, '').trim();
