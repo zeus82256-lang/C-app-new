@@ -34,10 +34,17 @@ const BOTTOM_DRAWER_HEIGHT = SCREEN_HEIGHT * 0.5;
 
 const ZEUS_SECRET = "Z3uS_N0v3l_2026_S3cr3t_K3y";
 
-// ---------- Fixed decryptContent ----------
+// ---------- Smart decryptContent (يقرأ النص الصريح الجديد + يفك تشفير الفصول القديمة) ----------
 const decryptContent = (encoded) => {
     try {
         if (!encoded) return "";
+        const value = String(encoded);
+
+        // النص الصريح (الجديد) يحتوي مسافات/أسطر/حروف عربية → أعده كما هو دون أي معالجة
+        const compact = value.replace(/\s+/g, '');
+        if (compact.length < 16) return value;
+        if (!/^[A-Za-z0-9+/]+={0,2}$/.test(compact)) return value;
+        if (compact.length % 4 !== 0) return value;
 
         const safeAtob = (str) => {
             const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
@@ -65,7 +72,7 @@ const decryptContent = (encoded) => {
             return output;
         };
 
-        const binaryStr = safeAtob(encoded);
+        const binaryStr = safeAtob(compact);
         let result = "";
 
         for (let i = 0; i < binaryStr.length; i++) {
@@ -77,30 +84,14 @@ const decryptContent = (encoded) => {
             result += String.fromCharCode(charCode);
         }
 
-        return decodeURIComponent(result);
+        const decoded = decodeURIComponent(result);
+        // تحقق أن الناتج نص مقروء فعلاً؛ وإلا النص الأصلي ليس مشفراً
+        if (decoded && /[\u0600-\u06FFa-zA-Z]/.test(decoded) && !decoded.includes('\uFFFD')) {
+            return decoded;
+        }
+        return value;
     } catch (e) {
-        console.warn("Decryption error:", e);
         return encoded;
-    }
-};
-
-const obfuscate = (text) => {
-    try {
-        const encoded = encodeURIComponent(text);
-        let result = "";
-        for (let i = 0; i < encoded.length; i++) {
-            result += String.fromCharCode(encoded.charCodeAt(i) ^ ZEUS_SECRET.charCodeAt(i % ZEUS_SECRET.length));
-        }
-        const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
-        let output = '';
-        for (let block, charCode, idx = 0, map = chars; result.charAt(idx | 0) || (map = '=', idx % 1); output += map.charAt(63 & block >> 8 - idx % 1 * 8)) {
-            charCode = result.charCodeAt(idx += 3 / 4);
-            if (charCode > 0xFF) throw new Error("'btoa' failed: The string to be encoded contains characters outside of the Latin1 range.");
-            block = block << 8 | charCode;
-        }
-        return output;
-    } catch (e) {
-        return text;
     }
 };
 
@@ -1132,7 +1123,11 @@ const commentsButton = !isOfflineMode ? `
 </div>
 ` : '';
 
-const obfuscatedFinalContent = obfuscate(formattedContent);
+// تضمين المحتوى بأمان داخل سكريبت الـ WebView (بدون أي تشفير)
+const webViewContentJson = JSON.stringify(formattedContent)
+    .replace(/</g, '\\u003c')
+    .replace(/`/g, '\\`')
+    .replace(/\$\{/g, '\\${');
 
 const brightnessStyle = `filter: brightness(${textBrightness});`;
 
@@ -1235,21 +1230,9 @@ return `
     </div>
     <script>
       (function() {
-          const _S = "${ZEUS_SECRET}";
-          const _D = "${obfuscatedFinalContent}";
+          const _D = ${webViewContentJson};
 
-          function decrypt(encoded) {
-            try {
-              const text = atob(encoded);
-              let result = "";
-              for (let i = 0; i < text.length; i++) {
-                result += String.fromCharCode(text.charCodeAt(i) ^ _S.charCodeAt(i % _S.length));
-              }
-              return decodeURIComponent(result);
-            } catch (e) { return "خطأ في تحميل المحتوى الآمن."; }
-          }
-
-          document.getElementById('main-content-area').innerHTML = decrypt(_D);
+          document.getElementById('main-content-area').innerHTML = _D;
 
           function sendMessage(msg) {
               if (window.ReactNativeWebView) { window.ReactNativeWebView.postMessage(msg); }

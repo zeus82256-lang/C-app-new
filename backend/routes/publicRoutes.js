@@ -2,6 +2,7 @@
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken'); 
 const axios = require('axios');
+const { tryDecryptObfuscated } = require('../utils/contentCodec');
 
 // --- Config Imports ---
 let firestore, cloudinary;
@@ -894,7 +895,8 @@ module.exports = function(app, verifyToken, upload) {
                     const docRef = firestore.collection('novels').doc(novelId).collection('chapters').doc(chapterMeta.number.toString());
                     const docSnap = await docRef.get();
                     if (docSnap.exists) {
-                        content = docSnap.data().content;
+                        // فك تشفير الفصول القديمة المحفوظة بصيغة XOR+base64 (النص الصريح يمر كما هو)
+                        content = tryDecryptObfuscated(docSnap.data().content);
                     } else {
                         console.warn(`⚠️ Chapter content not found in Firestore for novel ${novelId}, chapter ${chapterMeta.number}`);
                     }
@@ -998,7 +1000,7 @@ module.exports = function(app, verifyToken, upload) {
 
             res.json({ 
                 ...chapterMeta, 
-                content: obfuscateText(content), 
+                content,
                 copyrightStart, 
                 copyrightEnd,   
                 copyrightStyles, 

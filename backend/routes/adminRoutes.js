@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const axios = require('axios'); // 🔥 NEW: for custom/OpenRouter providers
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { v4: uuidv4 } = require('uuid'); // 🔥 NEW: for ChatGPT Android API
+const { tryDecryptObfuscated } = require('../utils/contentCodec');
 
 // --- Config Imports ---
 let firestore, cloudinary;
@@ -513,7 +514,7 @@ async function processTitleExtractionJob(jobId) {
                 const docSnap = await docRef.get();
 
                 if (docSnap.exists) {
-                    const content = docSnap.data().content || "";
+                    const content = tryDecryptObfuscated(docSnap.data().content) || "";
                     
                     const lines = content.split('\n');
                     let firstLine = "";

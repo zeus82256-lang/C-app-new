@@ -7,6 +7,7 @@ const Glossary = require('../models/glossary.model.js');
 const TranslationJob = require('../models/translationJob.model.js');
 const Settings = require('../models/settings.model.js');
 const { askDeepSeek } = require('../services/deepseekAndroid.service.js');
+const { tryDecryptObfuscated } = require('../utils/contentCodec');
 
 const DEEPSEEK_CHAPTERS_PER_CONVERSATION = 100;
 const DEEPSEEK_MAX_ATTEMPTS_PER_TOKEN = 5;
@@ -218,7 +219,12 @@ function truncatePromptIfNeeded(prompt, maxLength = 10000) {
 const ARABIC_FULL_CHAPTER_WORD_THRESHOLD = 800;
 const SHORT_CHAPTER_SOURCE_WORD_THRESHOLD = 900;
 const MIN_ARABIC_TO_ENGLISH_WORD_RATIO = 0.35;
-const ALLOWED_SHORT_LATIN_TOKEN_PATTERN = /^[A-Z]{2,4}\d*$/;
+// رموز لاتينية مسموح إبقاؤها فقط (رتب/تصنيفات/وحدات قياس شائعة في الروايات)
+const RANK_AND_UNIT_TOKENS = new Set([
+    'A', 'B', 'C', 'D', 'E', 'F', 'S', 'SS', 'SSS',
+    'LV', 'LVL', 'HP', 'MP', 'XP', 'SP', 'EP', 'GP', 'EXP', 'PT', 'ST',
+    'KG', 'KM', 'CM', 'MM'
+]);
 
 function stripCodeBlocks(text) {
     return (text || '').replace(/```[\s\S]*?```/g, ' ');
@@ -246,13 +252,12 @@ function escapeRegex(value) {
 
 function isAllowedShortLatinToken(word) {
     const normalized = (word || '').trim();
-    if (normalized.length <= 1) return true;
-    
-    // ✅ جديد: السماح بأي سلسلة مكررة من نفس الحرف (SS, SSS, AAA, bb ...)
-    if (/^([a-zA-Z])\1+$/.test(normalized)) return true;
-    
-    // السلوك القديم: السماح باختصارات معينة بشرط عدم وجود حروف علة
-    return ALLOWED_SHORT_LATIN_TOKEN_PATTERN.test(normalized) && !/[AEIOU]/.test(normalized);
+    // يسمح فقط بالرموز المعروفة للرتب/المستويات/الوحدات بأحرف كبيرة بالضبط
+    // (إغلاق الثغرة القديمة التي كانت تسمح بأي حرف مفرد أو أي حروف مكررة —
+    //  مما كان يمرر بقايا أسماء مقطوعة مثل "ka" أو "on" إلى القارئ)
+    if (normalized.length < 1 || normalized.length > 4) return false;
+    if (normalized !== normalized.toUpperCase()) return false;
+    return RANK_AND_UNIT_TOKENS.has(normalized);
 }
 
 function extractEnglishResidues(text) {
@@ -360,7 +365,8 @@ ${JSON.stringify(contexts, null, 2)}
         const word = (item.word || '').trim();
         const translation = (item.translation || '').trim();
         if (!word || !translation || word.length <= 1) continue;
-        fixedText = fixedText.replace(new RegExp(`\\b${escapeRegex(word)}\\b`, 'g'), translation);
+        // gi = يغطي اختلافات الحالة الكبيرة/الصغيرة، والدالة = حماية من رموز $ الخاصة في الاستبدال
+        fixedText = fixedText.replace(new RegExp(`\\b${escapeRegex(word)}\\b`, 'gi'), () => translation);
     }
     return fixedText;
 }
@@ -422,7 +428,10 @@ ${basePrompt}
 
 أعد ترجمة الفصل كاملاً من النص الإنجليزي الأصلي أدناه إلى العربية فقط.
 مسموح فقط برموز لاتينية قصيرة للرتب/التصنيفات/المستويات مثل A أو S أو LV أو HP عند الحاجة.
-ممنوع ترك أي كلمة إنجليزية كاملة داخل السرد. ممنوع الاعتذار أو شرح ما فعلته. ممنوع إخراج JSON أو مصطلحات فقط.
+قاعدة الأسماء الصارمة: أي اسم أو مصطلح أجنبي إما يُنقل صوتياً بالكامل إلى الحروف العربية أو يُكتب بالكامل بالحروف اللاتينية.
+يُمنع منعاً باتاً: حذف أي كلمة من الأصل، أو قطع جزء من كلمة أو اسم، أو ترك بقايا حروف لاتينية مقطوعة داخل النص.
+لا تحذف أو تختصر أو تدمج أي جملة أو فقرة — الترجمة الكاملة سطراً بسطر إلزامية.
+ممنوع الاعتذار أو شرح ما فعلته. ممنوع إخراج JSON أو مصطلحات فقط.
 أخرج الفصل المترجم كاملاً فقط.
 
 --- GLOSSARY (Use these strictly) ---
@@ -455,7 +464,7 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
             // Authorization Failed، ونستخدم رمز التطبيق الافتراضي مثل التطبيق المستقل.
             token: deepSeekToken,
             thinkingEnabled: Boolean(provider.thinkingEnabled),
-            searchEnabled: provider.searchEnabled !== false,
+            searchEnabled: Boolean(provider.searchEnabled), // البحث معطل افتراضياً — الترجمة لا تحتاجه ويستهلك وقتاً ويلخبط الناتج
             modelType: provider.deepSeekModelType === 'expert' ? 'expert' : 'default',
             powUrl: resolveDeepSeekPowUrl(provider),
             timeout: options.timeout || 500000,
@@ -724,7 +733,11 @@ async function processTranslationJob(jobId) {
         // Sort by priority ascending
         providers.sort((a, b) => (a.priority || 0) - (b.priority || 0));
 
-        const transPrompt = settings?.customPrompt || "You are a professional translator. Translate the novel chapter from English to Arabic. Output ONLY the Arabic translation. Use the glossary provided.";
+        const transPrompt = settings?.customPrompt || `You are a professional novel translator. Translate the novel chapter from English to Arabic.
+Output ONLY the Arabic translation, complete from the first line to the last line.
+Never skip, shorten, summarize or merge any sentence or paragraph.
+Every foreign name or term must be either fully transliterated into Arabic letters or kept fully in Latin letters — never partially cut, never partially deleted.
+Use the glossary provided.`;
         const extractPrompt = settings?.translatorExtractPrompt || DEFAULT_EXTRACT_PROMPT;
 
         const chaptersToProcess = job.targetChapters.sort((a, b) => a - b);
@@ -753,8 +766,9 @@ async function processTranslationJob(jobId) {
                 const docRef = firestore.collection('novels').doc(freshNovel._id.toString()).collection('chapters').doc(chapterNum.toString());
                 const docSnap = await docRef.get();
                 if (docSnap.exists) {
+                    // فك تشفير تلقائي إذا كان الفصل مخزناً بصيغة قديمة مشفرة (النص الصريح يمر كما هو)
                     const data = docSnap.data();
-                    sourceContent = data.content || "";
+                    sourceContent = tryDecryptObfuscated(data.content) || "";
                 }
             } catch (fsErr) {
                 console.log(`Firestore fetch error for Ch ${chapterNum}:`, fsErr.message);
@@ -785,7 +799,7 @@ ${sourceContent}
             let usedProvider = null; // track which provider succeeded
 
             // ========== Multi-provider translation with strict validation ==========
-            const RETRY_DELAY_MS = 30 * 60 * 1000;
+            const RETRY_DELAY_MS = 5 * 60 * 1000;
             let attempt = 0;
             let lastValidationReasons = [];
 
@@ -918,7 +932,7 @@ ${sourceContent}
                 }
 
                 if (!translationSuccess) {
-                    await pushLog(jobId, `⏳ لم ينجح الفصل ${chapterNum}. الانتظار 30 دقيقة ثم إعادة المحاولة على نفس الفصل بدون تخطيه.`, 'warning');
+                    await pushLog(jobId, `⏳ لم ينجح الفصل ${chapterNum}. الانتظار 5 دقائق ثم إعادة المحاولة على نفس الفصل بدون تخطيه.`, 'warning');
                     await delay(RETRY_DELAY_MS);
                 }
             }

@@ -3,6 +3,7 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 const Novel = require('../models/novel.model.js');
 const TitleGenJob = require('../models/titleGenJob.model.js');
 const Settings = require('../models/settings.model.js');
+const { tryDecryptObfuscated } = require('../utils/contentCodec');
 
 // --- Firestore Setup ---
 let firestore;
@@ -90,7 +91,7 @@ async function processTitleGenJob(jobId) {
                 const docSnap = await docRef.get();
                 if (docSnap.exists) {
                     const data = docSnap.data();
-                    sourceContent = data.content || "";
+                    sourceContent = tryDecryptObfuscated(data.content) || "";
                 }
             } catch (fsErr) {
                 console.log(`Firestore fetch error for Ch ${chapterNum}:`, fsErr.message);
