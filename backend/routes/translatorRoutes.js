@@ -360,7 +360,13 @@ ${JSON.stringify(contexts, null, 2)}
         const word = (item.word || '').trim();
         const translation = (item.translation || '').trim();
         if (!word || !translation || word.length <= 1) continue;
-        fixedText = fixedText.replace(new RegExp(`\\b${escapeRegex(word)}\\b`, 'g'), translation);
+        // 🔥 SAFETY: only Latin words may be replaced, and '$' in the replacement must be
+        // escaped — otherwise JS treats $&/$' as special patterns which corrupts the text
+        // and leaves letter fragments behind (the "missing words / letter remnants" bug).
+        if (!/^[A-Za-z][A-Za-z'\u2019\-]*$/.test(word)) continue;
+        try {
+            fixedText = fixedText.replace(new RegExp(`\\b${escapeRegex(word)}\\b`, 'g'), translation.replace(/\$/g, '$$$$'));
+        } catch (e) { /* skip malformed term */ }
     }
     return fixedText;
 }
@@ -416,6 +422,9 @@ async function reviewQuestionableChapter(provider, modelToUse, key, translatedTe
 function buildRepairTranslationPrompt(basePrompt, glossaryText, sourceContent, previousTranslation, reasons) {
     return `
 ${basePrompt}
+
+--- قواعد إلزامية ---
+ترجم كل الفقرات دون حذف أو تلخيص أو دمج. أخرج الترجمة العربية الكاملة فقط بدون شرح.
 
 مراجعة صارمة: الترجمة السابقة فشلت للأسباب التالية:
 - ${reasons.join('\n- ')}
@@ -524,10 +533,9 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
             }
         }
 
-        // 🔥 FIX: Truncate prompt if too large to avoid 413 error
-        const finalPrompt = truncatePromptIfNeeded(prompt, 10000);
-        
-        // Get conduit token
+        // 🔥 FIX: long chapters are now split at paragraph boundaries and translated
+        // sequentially (with full context) instead of being TRUNCATED — truncation was
+        // silently deleting the middle of the chapter (the "missing paragraphs" bug).
         const conduitToken = await getConduitToken();
         
         // Build headers with conduit token and session IDs
@@ -555,53 +563,92 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
         if (chatContext && !chatContext.sessionId) chatContext.sessionId = chatHeaders['x-oai-convo-session-id'];
         const parentMessageId = chatContext?.parentMessageId || uuidv4();
         
-        const payload = {
-            action: "next",
-            messages: [{
-                id: messageId,
-                author: { role: "user" },
-                content: { content_type: "text", parts: [finalPrompt] },
-                status: "finished_successfully"
-            }],
-            model: modelName || "auto",
-            parent_message_id: parentMessageId,
-            stream: false,
-            timezone: "Africa/Cairo",
-            timezone_offset_min: -180
-        };
-        
         const chatUrl = 'https://android.chat.openai.com/backend-api/f/conversation';
-        const response = await axios.post(chatUrl, payload, { headers: chatHeaders, timeout: options.timeout || 500000, responseType: 'stream' });
-        
-        // Collect full response from stream
-        let fullResponse = "";
-        let responseMessageId = null;
-        await new Promise((resolve, reject) => {
-            response.data.on('data', (chunk) => {
-                const lines = chunk.toString().split('\n');
-                for (const line of lines) {
-                    if (line.startsWith('data: ')) {
-                        const data = line.slice(6);
-                        if (data === '[DONE]') continue;
-                        try {
-                            const event = JSON.parse(data);
-                            if (event.message?.id) responseMessageId = event.message.id;
-                            if (event.message && event.message.content && event.message.content.parts && event.message.content.parts[0]) {
-                                fullResponse = event.message.content.parts[0];
-                            }
-                        } catch (e) {}
+
+        // One streaming request -> returns the full text of the response
+        const sendChatRequest = async (promptText) => {
+            const payload = {
+                action: "next",
+                messages: [{
+                    id: uuidv4(),
+                    author: { role: "user" },
+                    content: { content_type: "text", parts: [promptText] },
+                    status: "finished_successfully"
+                }],
+                model: modelName || "auto",
+                parent_message_id: chatContext?.parentMessageId || parentMessageId,
+                stream: false,
+                timezone: "Africa/Cairo",
+                timezone_offset_min: -180
+            };
+            const response = await axios.post(chatUrl, payload, { headers: { ...chatHeaders, 'x-oai-turn-trace-id': uuidv4() }, timeout: options.timeout || 500000, responseType: 'stream' });
+            let fullText = "";
+            let responseMessageId = null;
+            await new Promise((resolve, reject) => {
+                response.data.on('data', (chunk) => {
+                    const lines = chunk.toString().split('\n');
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            const data = line.slice(6);
+                            if (data === '[DONE]') continue;
+                            try {
+                                const event = JSON.parse(data);
+                                if (event.message?.id) responseMessageId = event.message.id;
+                                if (event.message && event.message.content && event.message.content.parts && event.message.content.parts[0]) {
+                                    fullText = event.message.content.parts[0];
+                                }
+                            } catch (e) {}
+                        }
                     }
-                }
+                });
+                response.data.on('end', () => resolve());
+                response.data.on('error', reject);
             });
-            response.data.on('end', () => resolve());
-            response.data.on('error', reject);
-        });
-        
-        if (!fullResponse) throw new Error("ChatGPT Android: empty response");
-        if (chatContext) {
-            if (responseMessageId) chatContext.parentMessageId = responseMessageId;
-            chatContext.lastUpdated = new Date();
+            if (responseMessageId && chatContext) chatContext.parentMessageId = responseMessageId;
+            if (!fullText) throw new Error("ChatGPT Android: empty response");
+            return fullText;
+        };
+
+        // Split the chapter source (between the translation markers) at paragraph boundaries
+        const splitSourceIntoChunks = (source, maxLen = 16000) => {
+            const paras = source.split(/\n\s*\n/);
+            const chunks = [];
+            let buf = '';
+            for (const para of paras) {
+                if ((buf + '\n\n' + para).length > maxLen && buf) {
+                    chunks.push(buf);
+                    buf = para;
+                } else {
+                    buf = buf ? (buf + '\n\n' + para) : para;
+                }
+            }
+            if (buf) chunks.push(buf);
+            return chunks;
+        };
+
+        const SOURCE_START = '--- ENGLISH Text TO TRANSLATE ---';
+        let fullResponse = "";
+        const si = prompt.indexOf(SOURCE_START);
+        if (prompt.length > 22000 && si !== -1) {
+            // 🔥 Long chapter: translate in sequential parts so NOTHING is dropped
+            const head = prompt.substring(0, si + SOURCE_START.length);
+            const tailIdx = prompt.indexOf('\n---------------------------------', si);
+            const source = prompt.substring(si + SOURCE_START.length, tailIdx !== -1 ? tailIdx : prompt.length);
+            const footer = tailIdx !== -1 ? prompt.substring(tailIdx) : '';
+            const chunks = splitSourceIntoChunks(source);
+            const parts = [];
+            for (let ci = 0; ci < chunks.length; ci++) {
+                const partPrompt = ci === 0
+                    ? `${head}\n${chunks[ci]}${footer}\n\n(هذا الفصل مقسّم إلى ${chunks.length} أجزاء بسبب طوله. هذا الجزء 1 من ${chunks.length}. ترجم هذا الجزء كاملاً فقط دون أي شرح.)`
+                    : `${head}\n${chunks[ci]}${footer}\n\n(الجزء ${ci + 1} من ${chunks.length} من نفس الفصل. أكمل الترجمة بنفس الأسلوب والمسرد. أخرج ترجمة هذا الجزء فقط مباشرة دون مقدمات أو شرح.)`;
+                console.log(`📤 ChatGPT Android: translating part ${ci + 1}/${chunks.length} (${chunks[ci].length} chars)`);
+                parts.push(await sendChatRequest(partPrompt));
+            }
+            fullResponse = parts.join('\n\n');
+        } else {
+            fullResponse = await sendChatRequest(prompt);
         }
+        if (chatContext) chatContext.lastUpdated = new Date();
         return fullResponse;
     }
 
@@ -664,6 +711,11 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
     const res = await axios.post(url, body, { headers, timeout: 500000 });
     const choice = res.data?.choices?.[0];
     if (choice && choice.message && choice.message.content) {
+        // 🔥 FIX: a translation cut by the provider's output limit silently loses the
+        // ending of the chapter. Detect it and fail so the retry loop can retranslate.
+        if (choice.finish_reason === 'length') {
+            throw new Error(`الترجمة مبتورة عند حد أقصى مخرجات النموذج (${providerId}/${modelName}) — سيتم إعادة المحاولة`);
+        }
         return choice.message.content;
     }
     throw new Error(`Invalid response from ${providerId}: ${JSON.stringify(res.data)}`);
@@ -768,12 +820,22 @@ async function processTranslationJob(jobId) {
             const glossaryItems = await Glossary.find({ novelId: freshNovel._id });
             const glossaryText = glossaryItems.map(g => `"${g.term}": "${g.translation}"`).join(',\n');
 
+            // 🔥 Guardrails appended on EVERY translation regardless of the custom prompt:
+            // they forbid dropping/summarizing/merging sentences (the missing-words bug).
+            const noOmissionRules = `
+--- قواعد إلزامية (تنطبق دائماً) ---
+1. ترجم الفصل كاملاً فقرة بفقرة. ممنوع حذف أو تلخيص أو دمج أي جملة أو فقرة أو حوار.
+2. كل جملة في النص الإنجليزي يجب أن يكون لها مقابل عربي بنفس الترتيب وبنفس الفقرة.
+3. أخرج الترجمة العربية فقط: بدون مقدمات، بدون شرح، بدون عناوين إضافية، بدون JSON.
+4. لا تضف أي كلمة إنجليزية في الناتج النهائي إلا للرموز القصيرة مثل A أو S أو LV أو HP.
+-------------------------------------`;
             const translationInput = `
 ${transPrompt}
 
 --- GLOSSARY (Use these strictly) ---
 ${glossaryText}
 -------------------------------------
+${noOmissionRules}
 
 --- ENGLISH Text TO TRANSLATE ---
 ${sourceContent}

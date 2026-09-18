@@ -97,7 +97,21 @@ function parseDeepSeekLine(line, state) {
     if (item?.request_message_id) state.requestMessageId = item.request_message_id;
     if (item?.response_message_id) state.responseMessageId = item.response_message_id;
 
-    if (item?.v) {
+    // 🔥 HARDENED PARSER (fixes corrupted translations):
+    // 1) Patch operations (p + o) are handled EXCLUSIVELY here — only APPENDs on a
+    //    ".../content" path are added. This prevents the literal words "RESPONSE"/
+    //    "THINKING" (type patches with o:"=") from being injected into the chapter.
+    // 2) The old code appended string deltas TWICE (generic v-append + explicit
+    //    APPEND handler). Patches and snapshots are now mutually exclusive branches.
+    if (item?.p !== undefined && item?.o !== undefined) {
+        if (item.o === 'APPEND' && typeof item.v === 'string' && /\/content$/.test(String(item.p))) {
+            state.text += item.v;
+        }
+        return;
+    }
+
+    // Snapshot / bare delta (no patch path)
+    if (item?.v !== undefined) {
         if (typeof item.v === 'string') {
             state.text += item.v;
         } else if (typeof item.v === 'object' && item.v.response?.fragments) {
@@ -107,9 +121,6 @@ function parseDeepSeekLine(line, state) {
                 if (frag.type === 'SEARCH' && Array.isArray(frag.results)) state.searchResults = frag.results;
             }
         }
-    }
-    if (item?.p === 'response/fragments/-1/content' && item.o === 'APPEND' && item.v) {
-        state.text += item.v;
     }
 }
 
