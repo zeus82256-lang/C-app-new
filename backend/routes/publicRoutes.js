@@ -69,33 +69,29 @@ const BASE_CATEGORIES = [
     'فنون قتالية', 'عسكري', 'موريم', 'مصاصو الدماء', 'محاكي', 'مأساة', 'لعبة'
 ];
 
-// 🔥 Helper for Content Obfuscation (Genius Level Protection - Multi-layered)
-function obfuscateText(text) {
-    if (!text) return "";
+// 🔒 Chapter content encryption has been REMOVED (plain text everywhere).
+// ZEUS_SECRET is kept only for decoding legacy obfuscated image URLs in /api/image-proxy.
+
+// 🔧 Safe word/phrase replacement that never corrupts neighbouring Arabic words.
+// - Latin terms get \b word boundaries.
+// - Arabic terms get Unicode lookarounds so they never match inside longer Arabic words.
+// - '$' in the replacement is escaped so JS never treats it as a special replacement pattern.
+function safeReplaceAll(content, original, replacement) {
     try {
-        // Encode to URI component to handle Arabic characters safely
-        const encoded = encodeURIComponent(text);
-        let result = "";
-        
-        for (let i = 0; i < encoded.length; i++) {
-            let charCode = encoded.charCodeAt(i);
-            
-            // Layer 1: XOR with secret
-            charCode = charCode ^ ZEUS_SECRET.charCodeAt(i % ZEUS_SECRET.length);
-            
-            // Layer 2: Dynamic Offset based on position
-            const offset = (i * 7) % 13;
-            charCode = (charCode + offset) % 256;
-            
-            // Layer 3: Rotation (3 positions)
-            charCode = (charCode + 3) % 256;
-            
-            result += String.fromCharCode(charCode);
+        if (!original) return content;
+        const escaped = String(original).replace(/[.*+?${}()|[\]\\]/g, '\\$&');
+        const safeRepl = String(replacement == null ? '' : replacement).replace(/\$/g, '$$$$');
+        if (/^[A-Za-z0-9]/.test(original)) {
+            return content.replace(new RegExp('\\b' + escaped + '\\b', 'g'), safeRepl);
         }
-        // Return as Base64 using 'binary' encoding to preserve raw bytes
-        return Buffer.from(result, 'binary').toString('base64');
+        try {
+            const re = new RegExp('(?<![\\u0600-\\u06FF\\w])' + escaped + '(?![\\u0600-\\u06FF\\w])', 'g');
+            return content.replace(re, safeRepl);
+        } catch (e) {
+            return content.replace(new RegExp(escaped, 'g'), safeRepl);
+        }
     } catch (e) {
-        return text;
+        return content;
     }
 }
 
@@ -945,9 +941,7 @@ module.exports = function(app, verifyToken, upload) {
                     if (adminSettings.globalReplacements && adminSettings.globalReplacements.length > 0) {
                         adminSettings.globalReplacements.forEach(rep => {
                             if (rep.original) {
-                                const escapedOriginal = escapeRegExp(rep.original);
-                                const regex = new RegExp(escapedOriginal, 'g');
-                                content = content.replace(regex, rep.replacement || '');
+                                content = safeReplaceAll(content, rep.original, rep.replacement || '');
                             }
                         });
                     }
@@ -998,7 +992,7 @@ module.exports = function(app, verifyToken, upload) {
 
             res.json({ 
                 ...chapterMeta, 
-                content: obfuscateText(content), 
+                content: content, // 🔓 plain text (encryption removed)
                 copyrightStart, 
                 copyrightEnd,   
                 copyrightStyles, 

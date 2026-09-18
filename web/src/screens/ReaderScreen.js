@@ -32,75 +32,86 @@ const { width, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const DRAWER_WIDTH = width * 0.85;
 const BOTTOM_DRAWER_HEIGHT = SCREEN_HEIGHT * 0.5;
 
-const ZEUS_SECRET = "Z3uS_N0v3l_2026_S3cr3t_K3y";
+// ---------- Content helpers (encryption fully removed) ----------
+// The server now serves chapter content as PLAIN TEXT. The only remaining
+// decryption here is a read-only compatibility shim for OLD offline downloads
+// that were saved while the app still encrypted chapter content.
+const LEGACY_SECRET = "Z3uS_N0v3l_2026_S3cr3t_K3y";
+const LEGACY_B64_RE = /^[A-Za-z0-9+\/=]+$/;
 
-// ---------- Fixed decryptContent ----------
-const decryptContent = (encoded) => {
+const legacyDecrypt = (encoded) => {
     try {
-        if (!encoded) return "";
-
-        const safeAtob = (str) => {
-            const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
-            let output = '';
-            let i = 0;
-            str = str.replace(/=+$/, '');
-            while (i < str.length) {
-                const a = chars.indexOf(str.charAt(i++));
-                const b = chars.indexOf(str.charAt(i++));
-                const c = chars.indexOf(str.charAt(i++));
-                const d = chars.indexOf(str.charAt(i++));
-                if (a !== -1 && b !== -1) {
-                    const bytes = (a << 2) | (b >> 4);
-                    output += String.fromCharCode(bytes);
-                    if (c !== -1) {
-                        const bytes2 = ((b & 15) << 4) | (c >> 2);
-                        output += String.fromCharCode(bytes2);
-                        if (d !== -1) {
-                            const bytes3 = ((c & 3) << 6) | d;
-                            output += String.fromCharCode(bytes3);
-                        }
-                    }
+        const trimmed = (encoded || '').trim();
+        if (trimmed.length < 40 || !LEGACY_B64_RE.test(trimmed)) return null;
+        const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+        let output = '';
+        let i = 0;
+        const str = trimmed.replace(/=+$/, '');
+        while (i < str.length) {
+            const a = chars.indexOf(str.charAt(i++));
+            const b = chars.indexOf(str.charAt(i++));
+            const c = chars.indexOf(str.charAt(i++));
+            const d = chars.indexOf(str.charAt(i++));
+            if (a !== -1 && b !== -1) {
+                output += String.fromCharCode((a << 2) | (b >> 4));
+                if (c !== -1) {
+                    output += String.fromCharCode(((b & 15) << 4) | (c >> 2));
+                    if (d !== -1) output += String.fromCharCode(((c & 3) << 6) | d);
                 }
             }
-            return output;
-        };
-
-        const binaryStr = safeAtob(encoded);
+        }
         let result = "";
-
-        for (let i = 0; i < binaryStr.length; i++) {
-            let charCode = binaryStr.charCodeAt(i);
+        for (let j = 0; j < output.length; j++) {
+            let charCode = output.charCodeAt(j);
             charCode = (charCode - 3 + 256) % 256;
-            const offset = (i * 7) % 13;
+            const offset = (j * 7) % 13;
             charCode = (charCode - offset + 256) % 256;
-            charCode = charCode ^ ZEUS_SECRET.charCodeAt(i % ZEUS_SECRET.length);
+            charCode = charCode ^ LEGACY_SECRET.charCodeAt(j % LEGACY_SECRET.length);
             result += String.fromCharCode(charCode);
         }
-
-        return decodeURIComponent(result);
+        const decoded = decodeURIComponent(result);
+        if (/[\u0600-\u06FF]/.test(decoded) || /[A-Za-z]{4,}/.test(decoded)) return decoded;
+        return null;
     } catch (e) {
-        console.warn("Decryption error:", e);
-        return encoded;
+        return null;
     }
 };
 
-const obfuscate = (text) => {
+// Converts any legacy-encrypted blob to plain text; passes everything else through.
+const normalizeContent = (raw) => {
+    if (!raw) return "";
+    const trimmed = String(raw).trim();
+    if (!/[\u0600-\u06FF]/.test(trimmed) && LEGACY_B64_RE.test(trimmed) && trimmed.length > 40) {
+        const legacy = legacyDecrypt(trimmed);
+        if (legacy) return legacy;
+    }
+    return raw;
+};
+
+// Escape text for safe embedding in HTML text nodes (quotes are intentionally kept).
+const escapeHtmlText = (text) => String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+// Safe word/phrase replacement that never corrupts neighbouring Arabic words
+// (word-boundary aware, '$'-safe) — fixes "letter remnants of deleted words".
+const safeReplaceAll = (content, original, replacement) => {
     try {
-        const encoded = encodeURIComponent(text);
-        let result = "";
-        for (let i = 0; i < encoded.length; i++) {
-            result += String.fromCharCode(encoded.charCodeAt(i) ^ ZEUS_SECRET.charCodeAt(i % ZEUS_SECRET.length));
+        if (!original) return content;
+        const escaped = String(original).replace(/[.*+?${}()|[\]\\]/g, '\\$&');
+        const safeRepl = String(replacement == null ? '' : replacement).replace(/\$/g, '$$$$');
+        if (/^[A-Za-z0-9]/.test(original)) {
+            return content.replace(new RegExp('\\b' + escaped + '\\b', 'g'), safeRepl);
         }
-        const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
-        let output = '';
-        for (let block, charCode, idx = 0, map = chars; result.charAt(idx | 0) || (map = '=', idx % 1); output += map.charAt(63 & block >> 8 - idx % 1 * 8)) {
-            charCode = result.charCodeAt(idx += 3 / 4);
-            if (charCode > 0xFF) throw new Error("'btoa' failed: The string to be encoded contains characters outside of the Latin1 range.");
-            block = block << 8 | charCode;
+        try {
+            const re = new RegExp('(?<![\\u0600-\\u06FF\\w])' + escaped + '(?![\\u0600-\\u06FF\\w])', 'g');
+            return content.replace(re, safeRepl);
+        } catch (e) {
+            return content.replace(new RegExp(escaped, 'g'), safeRepl);
         }
-        return output;
     } catch (e) {
-        return text;
+        return content;
     }
 };
 
@@ -301,10 +312,24 @@ const backdropAnim = useRef(new Animated.Value(0)).current;
 
 const [showComments, setShowComments] = useState(false);
 
+// --- CONTINUOUS SCROLL STATE ---
+const [continuousMode, setContinuousMode] = useState(false);
+const [extraSections, setExtraSections] = useState([]);
+const [loadingNext, setLoadingNext] = useState(false);
+const [endReached, setEndReached] = useState(false);
+const [currentViewedChapter, setCurrentViewedChapter] = useState(parseInt(chapterId) || 1);
+const [errorInfo, setErrorInfo] = useState(null);
+
 const insets = useSafeAreaInsets();
 const webViewRef = useRef(null);
 const flatListRef = useRef(null);
 const androidListRef = useRef(null);
+const scrollSaveTimer = useRef(null);
+const restoredOnceRef = useRef(false);
+const pendingRestoreRef = useRef(0);
+const headerYsRef = useRef({});
+const loadingNextRef = useRef(false);
+const autoScrollNextRef = useRef(false);
 
 const novelId = novel._id || novel.id || novel.novelId;
 const isAdmin = userInfo?.role === 'admin';
@@ -456,6 +481,7 @@ const loadSettings = async () => {
             if (parsed.hideCustomMarks !== undefined) setHideCustomMarks(parsed.hideCustomMarks);
 
             if (parsed.textBrightness) setTextBrightness(parsed.textBrightness);
+            if (parsed.continuousMode !== undefined) setContinuousMode(parsed.continuousMode);
         }
     } catch (e) { console.error("Error loading settings", e); }
 };
@@ -725,20 +751,49 @@ const handleDeleteCleaner = async (item) => {
     ]);
 };
 
-const getProcessedContent = useMemo(() => {
-    if (!chapter || !chapter.content) return '';
-    let content = decryptContent(chapter.content);
+const applyReplacements = useCallback((raw) => {
+    let content = normalizeContent(raw);
     activeReplacementsList.forEach(rep => {
-        if (rep.original && rep.replacement) {
-            const escapedOriginal = rep.original.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const regex = new RegExp(escapedOriginal, 'g');
-            content = content.replace(regex, rep.replacement);
+        if (rep.original && rep.replacement !== undefined) {
+            content = safeReplaceAll(content, rep.original, rep.replacement);
         }
     });
     return content;
-}, [chapter, activeReplacementsList]);
+}, [activeReplacementsList]);
 
-const updateProgressOnServer = async (currentChapter) => {
+const getProcessedContent = useMemo(() => (chapter ? applyReplacements(chapter.content) : ''), [chapter, applyReplacements]);
+
+// Extra chapters appended in continuous-scroll mode
+const processedExtraSections = useMemo(() => (
+    extraSections.map(sec => ({ ...sec, content: applyReplacements(sec.rawContent) }))
+), [extraSections, applyReplacements]);
+
+// ----- Scroll position persistence (per novel + chapter) -----
+const scrollKeyFor = (chNum) => `@reader_scroll_v1_${novelId}_${chNum}`;
+
+const saveScrollPosition = async (chNum, offset) => {
+    try {
+        if (!chNum || offset == null || offset < 0) return;
+        await AsyncStorage.setItem(scrollKeyFor(chNum), JSON.stringify({ offset: Math.round(offset), savedAt: Date.now() }));
+    } catch (e) {}
+};
+
+const loadScrollPosition = async (chNum) => {
+    try {
+        const raw = await AsyncStorage.getItem(scrollKeyFor(chNum));
+        if (!raw) return 0;
+        const parsed = JSON.parse(raw);
+        return parsed?.offset || 0;
+    } catch (e) { return 0; }
+};
+
+const queueSaveScroll = (chNum, offset) => {
+    if (!continuousMode && parseInt(chNum) !== parseInt(chapterId)) return;
+    if (scrollSaveTimer.current) clearTimeout(scrollSaveTimer.current);
+    scrollSaveTimer.current = setTimeout(() => saveScrollPosition(chNum, offset), 600);
+};
+
+const updateProgressOnServer = async (currentChapter, chapterNum) => {
   if (!currentChapter || isOfflineMode) return;
   try {
     await api.post('/api/novel/update', {
@@ -746,7 +801,7 @@ const updateProgressOnServer = async (currentChapter) => {
       title: novel.title,
       cover: novel.cover,
       author: novel.author || novel.translator,
-      lastChapterId: parseInt(chapterId),
+      lastChapterId: parseInt(chapterNum) || parseInt(chapterId),
       lastChapterTitle: currentChapter.title
     });
   } catch (error) {
@@ -756,6 +811,13 @@ const updateProgressOnServer = async (currentChapter) => {
 
 const fetchChapter = async () => {
     setLoading(true);
+    setErrorInfo(null);
+    setExtraSections([]);
+    setEndReached(false);
+    setLoadingNext(false);
+    loadingNextRef.current = false;
+    restoredOnceRef.current = false;
+    setCurrentViewedChapter(parseInt(chapterId) || 1);
     try {
         let chapterData = null;
 
@@ -770,6 +832,10 @@ const fetchChapter = async () => {
             throw new Error("الفصل غير متوفر بدون اتصال");
         }
 
+        if (chapterData && chapterData.content) {
+            chapterData.content = normalizeContent(chapterData.content);
+        }
+
         setChapter(chapterData);
         if (availableChapters) {
              setRealTotalChapters(availableChapters.length);
@@ -777,16 +843,104 @@ const fetchChapter = async () => {
             setRealTotalChapters(chapterData.totalChapters);
         }
 
+        // Restore last scroll position for this chapter
+        const savedOffset = await loadScrollPosition(chapterId);
+        pendingRestoreRef.current = savedOffset;
+
         if (!isOfflineMode) {
             incrementView(novelId, chapterId);
-            updateProgressOnServer(chapterData);
+            updateProgressOnServer(chapterData, chapterId);
             fetchCommentCount();
         }
     } catch (error) {
         console.error("Error fetching chapter:", error);
-        Alert.alert("خطأ", "فشل تحميل الفصل. تأكد من اتصالك أو أن الفصل منزّل.");
+        const status = error?.response?.status;
+        let message = "فشل تحميل الفصل. تحقق من اتصالك بالإنترنت ثم أعد المحاولة.";
+        if (status === 403) message = "هذا الفصل غير متاح حالياً (خاص أو لم يُنشر بعد).";
+        else if (status === 404) message = "الفصل غير موجود. ربما تم حذفه أو تغيير ترقيمه.";
+        else if (isOfflineMode) message = "الفصل غير متوفر بدون اتصال. حمّله مسبقاً لتقرأه أوفلاين.";
+        setErrorInfo({ message, status });
     } finally {
         setLoading(false);
+    }
+};
+
+// ----- Continuous scroll: fetch + append the NEXT chapter -----
+const fetchNextChapter = async () => {
+    if (loadingNextRef.current || endReached) return;
+    const lastNum = extraSections.length > 0
+        ? extraSections[extraSections.length - 1].number
+        : parseInt(chapterId);
+    let nextNum = null;
+    if (availableChapters && availableChapters.length > 0) {
+        const sorted = [...availableChapters].sort((a, b) => a - b);
+        const idx = sorted.indexOf(lastNum);
+        if (idx !== -1 && idx < sorted.length - 1) nextNum = sorted[idx + 1];
+    } else {
+        const cand = lastNum + 1;
+        if (!(realTotalChapters > 0 && cand > realTotalChapters)) nextNum = cand;
+    }
+    if (nextNum === null) {
+        setEndReached(true);
+        if (Platform.OS !== 'android') {
+            webViewRef.current?.injectJavaScript('window.__markEnd && window.__markEnd(); true;');
+        }
+        return;
+    }
+    loadingNextRef.current = true;
+    setLoadingNext(true);
+    try {
+        let nextData = null;
+        const off = await getOfflineChapterContent(novelId, nextNum);
+        if (off) nextData = off;
+        else if (!isOfflineMode) {
+            const response = await api.get(`/api/novels/${novelId}/chapters/${nextNum}`);
+            nextData = response.data;
+        }
+        if (!nextData || !nextData.content) {
+            setEndReached(true);
+            if (Platform.OS !== 'android') {
+                webViewRef.current?.injectJavaScript('window.__markEnd && window.__markEnd(); true;');
+            }
+            return;
+        }
+        const section = {
+            number: nextNum,
+            title: nextData.title || `فصل ${nextNum}`,
+            rawContent: normalizeContent(nextData.content),
+            copyrightStart: nextData.copyrightStart,
+            copyrightEnd: nextData.copyrightEnd,
+            copyrightStyles: nextData.copyrightStyles
+        };
+        setExtraSections(prev => [...prev, section]);
+        if (Platform.OS !== 'android') {
+            // Append the new chapter into the LIVE WebView DOM (no reload => scroll kept)
+            const secHTML = buildSectionHTML({
+                number: section.number,
+                title: section.title,
+                content: applyReplacements(section.rawContent),
+                copyrightStart: section.copyrightStart,
+                copyrightEnd: section.copyrightEnd,
+                copyrightStyles: section.copyrightStyles
+            }, extraSections.length + 1);
+            const appendJs = `window.__appendChapter(${JSON.stringify(section.number)}, ${JSON.stringify(section.title)}, ${JSON.stringify(secHTML)}); true;`;
+            webViewRef.current?.injectJavaScript(appendJs);
+            if (autoScrollNextRef.current) {
+                autoScrollNextRef.current = false;
+                webViewRef.current?.injectJavaScript(
+                    `setTimeout(function(){ var el = document.querySelector('section[data-ch="${nextNum}"]'); if (el) { window.scrollTo(0, el.offsetTop - 8); } }, 250); true;`
+                );
+            }
+        }
+    } catch (e) {
+        // 403/404/network: stop auto-appending silently; buttons still work
+        setEndReached(true);
+        if (Platform.OS !== 'android') {
+            webViewRef.current?.injectJavaScript('window.__markEnd && window.__markEnd(); true;');
+        }
+    } finally {
+        loadingNextRef.current = false;
+        setLoadingNext(false);
     }
 };
 
@@ -902,6 +1056,31 @@ const navigateChapter = (targetId) => {
 };
 
 const navigateNextPrev = (offset) => {
+    // Continuous mode: "next" scrolls to the already-appended section or fetches it
+    if (continuousMode && offset > 0) {
+        const anchorNum = parseInt(chapterId) || 1;
+        const secNums = [anchorNum, ...processedExtraSections.map(x => x.number)];
+        const idx = secNums.indexOf(currentViewedChapter);
+        const nextSec = idx !== -1 ? secNums[idx + 1] : (processedExtraSections.length ? null : undefined);
+        if (nextSec) {
+            if (Platform.OS === 'android') {
+                const itemIdx = androidItems.findIndex(it => it.type === 'header' && it.number === nextSec);
+                if (itemIdx >= 0) {
+                    androidListRef.current?.scrollToIndex({ index: itemIdx, viewPosition: 'start', animated: true });
+                }
+            } else {
+                webViewRef.current?.injectJavaScript(`var el=document.querySelector('section[data-ch="${nextSec}"]'); if(el){ window.scrollTo({top: el.offsetTop - 8, behavior: 'smooth'}); } true;`);
+            }
+            return;
+        }
+        if (endReached) {
+            Alert.alert("تنبيه", "أنت في آخر فصل متاح.");
+            return;
+        }
+        autoScrollNextRef.current = true;
+        fetchNextChapter();
+        return;
+    }
     if (availableChapters && availableChapters.length > 0) {
         const currentNum = parseInt(chapterId);
         const sortedAvailable = [...availableChapters].sort((a,b) => a - b);
@@ -910,6 +1089,7 @@ const navigateNextPrev = (offset) => {
         const nextIndex = currentIndex + offset;
         if (nextIndex >= 0 && nextIndex < sortedAvailable.length) {
             const nextChapId = sortedAvailable[nextIndex];
+            if (offset > 0) clearScrollFor(nextChapId);
             navigation.replace('Reader', {
                 novel,
                 chapterId: nextChapId,
@@ -926,8 +1106,13 @@ const navigateNextPrev = (offset) => {
             Alert.alert("تنبيه", "أنت في آخر فصل متاح.");
             return;
         }
+        if (offset > 0) clearScrollFor(nextNum);
         navigation.replace('Reader', { novel, chapterId: nextNum, isOfflineMode });
     }
+};
+
+const clearScrollFor = async (chNum) => {
+    try { await AsyncStorage.removeItem(scrollKeyFor(chNum)); } catch (e) {}
 };
 
 const changeFontSize = (delta) => {
@@ -971,143 +1156,157 @@ const handleFontChange = (font) => {
     saveSettings({ fontId: font.id });
 };
 
-const androidTextLines = useMemo(() => {
-  if (Platform.OS !== 'android') return [];
-  return getProcessedContent.split('\n').filter(line => line.trim() !== '');
-}, [getProcessedContent]);
+// ----- HTML line processing (formatting spans are ALWAYS emitted; CSS controls them) -----
+const processLineHTML = (line) => {
+    let processedLine = escapeHtmlText(line);
+
+    // Bracket formatting [ ]
+    {
+        let openB = '', closeB = '';
+        if (selectedBracketStyle === 'guillemets') { openB = '«'; closeB = '»'; }
+        else if (selectedBracketStyle === 'curly') { openB = '“'; closeB = '”'; }
+        else if (selectedBracketStyle === 'straight') { openB = '"'; closeB = '"'; }
+        else if (selectedBracketStyle === 'single') { openB = '‘'; closeB = '’'; }
+        const innerStart = openB ? `<span class="bq-style">${escapeHtmlText(openB)}</span>` : '';
+        const innerEnd = closeB ? `<span class="bq-style">${escapeHtmlText(closeB)}</span>` : '';
+        processedLine = processedLine.replace(/\[(.*?)\]/g, (match, content) => (
+            `<span class="bracket-formatted"><span class="bmark">[</span>${innerStart}${content}${innerEnd}<span class="bmark">]</span></span>`
+        ));
+    }
+
+    // Markdown bold **
+    {
+        let openQ = '', closeQ = '';
+        if (selectedMarkdownStyle === 'guillemets') { openQ = '«'; closeQ = '»'; }
+        else if (selectedMarkdownStyle === 'curly') { openQ = '“'; closeQ = '”'; }
+        else if (selectedMarkdownStyle === 'straight') { openQ = '"'; closeQ = '"'; }
+        else if (selectedMarkdownStyle === 'single') { openQ = '‘'; closeQ = '’'; }
+        const qStart = openQ ? `<span class="mq-style">${escapeHtmlText(openQ)}</span>` : '';
+        const qEnd = closeQ ? `<span class="mq-style">${escapeHtmlText(closeQ)}</span>` : '';
+        processedLine = processedLine.replace(/\*\*(.*?)\*\*/g, (match, content) => (
+            `<span class="cm-markdown-bold"><span class="mmark">**</span>${qStart}${content}${qEnd}<span class="mmark">**</span></span>`
+        ));
+    }
+
+    // Dialogue quotes
+    {
+        let quoteRegex;
+        if (selectedQuoteStyle === 'guillemets') quoteRegex = /(«)([\s\S]*?)(»)/g;
+        else if (selectedQuoteStyle === 'curly') quoteRegex = /([“])([\s\S]*?)([”])/g;
+        else if (selectedQuoteStyle === 'straight') quoteRegex = /(")([\s\S]*?)(")/g;
+        else if (selectedQuoteStyle === 'single') quoteRegex = /(['‘])([\s\S]*?)(['’])/g;
+        else quoteRegex = /([“"«])([\s\S]*?)([”"»])/g;
+        processedLine = processedLine.replace(quoteRegex, (match, open, content, close) => (
+            `<span class="cm-dialogue-text"><span class="qmark">${open}</span>${content}<span class="qmark">${close}</span></span>`
+        ));
+    }
+
+    // Custom formatting
+    if (customOpenMark.trim() && customCloseMark.trim()) {
+        const escapedOpen = customOpenMark.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const escapedClose = customCloseMark.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const customRegex = new RegExp(`${escapedOpen}(.*?)${escapedClose}`, 'g');
+        processedLine = processedLine.replace(customRegex, (match, content) => (
+            `<span class="custom-formatted"><span class="cmark">${escapeHtmlText(customOpenMark)}</span>${content}<span class="cmark">${escapeHtmlText(customCloseMark)}</span></span>`
+        ));
+    }
+
+    return processedLine;
+};
+
+// ----- Build one chapter <section> (used for the anchor chapter AND appended ones) -----
+const buildSectionHTML = (sec, idx) => {
+    const style = sec.copyrightStyles || {};
+    const copyrightCSS = `color: ${style.color || '#888'}; opacity: ${style.opacity || 1}; text-align: ${style.alignment || 'center'}; font-weight: ${style.isBold ? 'bold' : 'normal'}; font-size: ${style.fontSize || 14}px; line-height: 1.5; padding: 15px 0; margin: 10px 0; font-family: sans-serif;`;
+    const lines = (sec.content || '').split('\n').filter(line => line.trim() !== '');
+    const paragraphs = lines.map(line => `<p>${processLineHTML(line)}</p>`).join('');
+    const sepHTML = idx > 0 ? `<div class="chapter-sep">◆ ◆ ◆</div>` : '';
+    const titleHTML = `<div class="title${idx > 0 ? ' sub-title' : ''}">${escapeHtmlText(sec.title || '')}</div>`;
+    const customSep = idx === 0 && enableSeparator ? `<div class="custom-sep">${escapeHtmlText(separatorText)}</div>` : '';
+    const startHTML = sec.copyrightStart ? `<div class="app-copyright" style="${copyrightCSS}">${escapeHtmlText(sec.copyrightStart)}</div><div class="chapter-divider"></div>` : '';
+    const endHTML = sec.copyrightEnd ? `<div class="chapter-divider"></div><div class="app-copyright" style="${copyrightCSS}">${escapeHtmlText(sec.copyrightEnd)}</div>` : '';
+    return `<section class="chapter-sec" data-ch="${sec.number}">${sepHTML}${titleHTML}${customSep}${startHTML}<div class="content-area">${paragraphs}</div>${endHTML}</section>`;
+};
+
+// ----- Full CSS (re-injected on every settings change WITHOUT reloading the WebView,
+// which is what keeps the scroll position intact when changing colors/fonts/sizes) -----
+const buildReaderCSS = () => `
+      * { -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; box-sizing: border-box; }
+      body, html {
+        margin: 0; padding: 0; background-color: ${bgColor}; color: ${textColor};
+        font-family: ${fontFamily.family}; line-height: 1.8;
+        -webkit-overflow-scrolling: touch; overflow-x: hidden;
+        filter: brightness(${textBrightness});
+      }
+      .container { padding: 25px 20px 120px 20px; width: 100%; max-width: 800px; margin: 0 auto; }
+      .title {
+        font-size: ${fontSize + 8}px; font-weight: bold; margin-bottom: 20px;
+        color: ${bgColor === '#fff' || bgColor === '#ffffff' ? '#000' : '#fff'};
+        padding-bottom: 10px; font-family: ${fontFamily.family}; text-align: right;
+      }
+      .sub-title { font-size: ${fontSize + 4}px; margin-top: 35px; }
+      .chapter-sep { text-align: center; color: rgba(128,128,128,0.55); font-size: 18px; letter-spacing: 6px; margin: 45px 0 10px 0; user-select: none; }
+      .custom-sep { text-align: center; color: rgba(128,128,128,0.5); font-size: 1em; padding: 10px 0; margin: 5px 0 20px 0; letter-spacing: 2px; user-select: none; }
+      .chapter-divider { border: none; height: 1px; background-color: rgba(128,128,128,0.3); margin: 10px 0 30px 0; width: 100%; }
+      .content-area { font-size: ${fontSize}px; text-align: justify; word-wrap: break-word; }
+      p { margin-bottom: 1.5em; }
+
+      .cm-dialogue-text {
+          color: ${enableDialogue ? dialogueColor : 'inherit'};
+          font-size: ${enableDialogue ? dialogueSize + '%' : '100%'};
+          font-weight: ${enableDialogue ? 'bold' : 'inherit'};
+          transition: color 0.3s ease, font-size 0.3s ease;
+      }
+      .cm-markdown-bold {
+          font-weight: bold;
+          color: ${enableMarkdown ? markdownColor : 'inherit'};
+          font-size: ${enableMarkdown ? markdownSize + '%' : '100%'};
+          transition: color 0.3s ease, font-size 0.3s ease;
+      }
+      .bracket-formatted {
+          color: ${enableBracket ? bracketColor : 'inherit'};
+          font-size: ${enableBracket ? bracketSize + '%' : '100%'};
+          font-weight: ${enableBracket ? 'bold' : 'inherit'};
+          transition: color 0.3s ease, font-size 0.3s ease;
+      }
+      .custom-formatted {
+          color: ${enableCustom ? customColor : 'inherit'};
+          font-size: ${enableCustom ? customSize + '%' : '100%'};
+          font-weight: ${enableCustom ? 'bold' : 'inherit'};
+          transition: color 0.3s ease, font-size 0.3s ease;
+      }
+      /* Formatting marks are always in the DOM; CSS shows/hides them live */
+      .qmark, .mmark, .bmark, .cmark { opacity: 1; transition: opacity 0.3s ease; }
+      ${hideQuotes ? '.qmark { opacity: 0; font-size: 0; }' : ''}
+      ${hideMarkdownMarks ? '.mmark { opacity: 0; font-size: 0; }' : ''}
+      ${hideBracketMarks ? '.bmark { opacity: 0; font-size: 0; }' : ''}
+      ${hideCustomMarks ? '.cmark { opacity: 0; font-size: 0; }' : ''}
+
+      body { user-select: none; -webkit-user-select: none; }
+      .author-section-wrapper { margin-top: 50px; margin-bottom: 20px; border-top: 1px solid #222; padding-top: 20px; }
+      .section-title { color: ${bgColor === '#fff' || bgColor === '#ffffff' ? '#000' : '#fff'}; font-size: 18px; font-weight: bold; margin-bottom: 12px; text-align: right; }
+      .author-card { border-radius: 16px; overflow: hidden; margin-top: 10px; border: 1px solid #222; position: relative; height: 140px; width: 100%; cursor: pointer; }
+      .author-banner { position: absolute; width: 100%; height: 100%; background-size: cover; background-position: center; }
+      .author-overlay { position: absolute; inset: 0; background: linear-gradient(to bottom, rgba(0,0,0,0.2), rgba(0,0,0,0.8)); z-index: 1; }
+      .author-content { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 2; width: 100%; }
+      .author-avatar-wrapper { width: 76px; height: 76px; border-radius: 38px; border: 3px solid #fff; background-color: #333; margin-bottom: 8px; overflow: hidden; }
+      .author-avatar-img { width: 100%; height: 100%; object-fit: cover; }
+      .author-name { color: #fff; font-size: 20px; font-weight: bold; text-transform: uppercase; text-shadow: 0 1px 6px rgba(0, 0, 0, 0.9); text-align: center; }
+      .comments-btn-container { margin-bottom: 40px; padding: 0 5px; }
+      .comments-btn { width: 100%; background-color: ${bgColor === '#fff' || bgColor === '#ffffff' ? '#f0f0f0' : '#1a1a1a'}; border: 1px solid ${bgColor === '#fff' || bgColor === '#ffffff' ? '#ddd' : '#333'}; color: ${bgColor === '#fff' || bgColor === '#ffffff' ? '#333' : '#fff'}; padding: 15px; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+`;
 
 const generateHTML = () => {
-if (!chapter) return '';
+    if (!chapter) return '';
 
-const startCopy = chapter.copyrightStart;
-const endCopy = chapter.copyrightEnd;
-const style = chapter.copyrightStyles || {};
+    const fontImports = FONT_OPTIONS.map(f => f.url ? `@import url('${f.url}');` : '').join('\n');
 
-const copyrightCSS = `
-    color: ${style.color || '#888'};
-    opacity: ${style.opacity || 1};
-    text-align: ${style.alignment || 'center'};
-    font-weight: ${style.isBold ? 'bold' : 'normal'};
-    font-size: ${style.fontSize || 14}px;
-    line-height: 1.5;
-    padding: 15px 0;
-    margin: 10px 0;
-    font-family: sans-serif;
-`;
+    const authorName = authorProfile?.name || novel.author || 'Zeus';
+    const authorAvatar = authorProfile?.picture || 'https://via.placeholder.com/150';
+    const authorBanner = authorProfile?.banner || null;
+    const bannerStyle = authorBanner ? `background-image: url('${authorBanner}');` : 'background-color: #000;';
 
-const dividerCSS = `
-    .chapter-divider {
-        border: none;
-        height: 1px;
-        background-color: rgba(128,128,128,0.3);
-        margin: 10px 0 30px 0;
-        width: 100%;
-    }
-`;
-
-const customSeparatorHTML = enableSeparator ? `<div style="text-align:center; color: rgba(128,128,128,0.5); font-size: ${fontSize}px; padding: 10px 0; margin: 5px 0 20px 0; letter-spacing: 2px; user-select: none;">${separatorText}</div>` : '';
-const dividerHTML = `<div class="chapter-divider"></div>`;
-
-const titleHTML = `<div class="title">${chapter.title}</div>`;
-
-const startHTML = startCopy ? `
-    <!-- START: COPYRIGHTS -->
-    <div class="app-copyright start" style="${copyrightCSS}">
-        ${startCopy}
-    </div>
-    ${dividerHTML}
-` : '';
-
-const endHTML = endCopy ? `
-    ${dividerHTML}
-    <!-- END: COPYRIGHTS -->
-    <div class="app-copyright end" style="${copyrightCSS}">
-        ${endCopy}
-    </div>
-` : '';
-
-const formattedContent = getProcessedContent
-    .split('\n')
-    .filter(line => line.trim() !== '')
-    .map(line => {
-        let processedLine = line;
-
-        // Bracket formatting [ ]
-        if (enableBracket) {
-            const bracketClass = hideBracketMarks ? 'bracket-mark-hidden' : 'bracket-mark-visible';
-            let openB = '', closeB = '';
-            if (selectedBracketStyle === 'guillemets') { openB = '«'; closeB = '»'; }
-            else if (selectedBracketStyle === 'curly') { openB = '“'; closeB = '”'; }
-            else if (selectedBracketStyle === 'straight') { openB = '"'; closeB = '"'; }
-            else if (selectedBracketStyle === 'single') { openB = '‘'; closeB = '’'; }
-
-            processedLine = processedLine.replace(/\[(.*?)\]/g, (match, content) => {
-                const innerStart = openB ? `<span class="bracket-quote-style">${openB}</span>` : '';
-                const innerEnd = closeB ? `<span class="bracket-quote-style">${closeB}</span>` : '';
-                return `<span class="bracket-formatted"><span class="${bracketClass}">[</span>${innerStart}${content}${innerEnd}<span class="${bracketClass}">]</span></span>`;
-            });
-        }
-
-        // Markdown
-        if (enableMarkdown) {
-            const markClass = hideMarkdownMarks ? 'mark-hidden' : 'mark-visible';
-            let openQuote = '', closeQuote = '';
-            if (selectedMarkdownStyle === 'guillemets') { openQuote = '«'; closeQuote = '»'; }
-            else if (selectedMarkdownStyle === 'curly') { openQuote = '“'; closeQuote = '”'; }
-            else if (selectedMarkdownStyle === 'straight') { openQuote = '"'; closeQuote = '"'; }
-            else if (selectedMarkdownStyle === 'single') { openQuote = '‘'; closeQuote = '’'; }
-
-            processedLine = processedLine.replace(/\*\*(.*?)\*\*/g, (match, content) => {
-                const quoteStart = openQuote ? `<span class="cm-quote-style">${openQuote}</span>` : '';
-                const quoteEnd = closeQuote ? `<span class="cm-quote-style">${closeQuote}</span>` : '';
-                return `<span class="cm-markdown-bold"><span class="${markClass}">**</span>${quoteStart}${content}${quoteEnd}<span class="${markClass}">**</span></span>`;
-            });
-        }
-
-        // Dialogue
-        if (enableDialogue) {
-            const quoteClass = hideQuotes ? 'quote-mark hidden' : 'quote-mark';
-            let quoteRegex;
-            if (selectedQuoteStyle === 'guillemets') {
-                quoteRegex = /(«)([\s\S]*?)(»)/g;
-            } else if (selectedQuoteStyle === 'curly') {
-                quoteRegex = /([“])([\s\S]*?)([”])/g;
-            } else if (selectedQuoteStyle === 'straight') {
-                quoteRegex = /(")([\s\S]*?)(")/g;
-            } else if (selectedQuoteStyle === 'single') {
-                quoteRegex = /(['‘])([\s\S]*?)(['’])/g;
-            } else {
-                quoteRegex = /([“"«])([\s\S]*?)([”"»])/g;
-            }
-
-            processedLine = processedLine.replace(quoteRegex, (match, open, content, close) => {
-                return `<span class="cm-dialogue-text"><span class="${quoteClass}">${open}</span>${content}<span class="${quoteClass}">${close}</span></span>`;
-            });
-        }
-
-        // Custom formatting
-        if (enableCustom && customOpenMark.trim() && customCloseMark.trim()) {
-            const customClass = hideCustomMarks ? 'custom-mark-hidden' : 'custom-mark-visible';
-            const escapedOpen = customOpenMark.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const escapedClose = customCloseMark.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const customRegex = new RegExp(`${escapedOpen}(.*?)${escapedClose}`, 'g');
-            processedLine = processedLine.replace(customRegex, (match, content) => {
-                return `<span class="custom-formatted"><span class="${customClass}">${customOpenMark}</span>${content}<span class="${customClass}">${customCloseMark}</span></span>`;
-            });
-        }
-
-        return `<p>${processedLine}</p>`;
-    })
-    .join('');
-
-const fontImports = FONT_OPTIONS.map(f => f.url ? `@import url('${f.url}');` : '').join('\n');
-
-const authorName = authorProfile?.name || novel.author || 'Zeus';
-const authorAvatar = authorProfile?.picture || 'https://via.placeholder.com/150';
-const authorBanner = authorProfile?.banner || null;
-const bannerStyle = authorBanner ? `background-image: url('${authorBanner}');` : 'background-color: #000;';
-
-const publisherBanner = `
+    const publisherBanner = `
 <div class="author-section-wrapper">
     <div class="section-title">الناشر</div>
     <div class="author-card" id="authorCard">
@@ -1123,7 +1322,7 @@ const publisherBanner = `
 </div>
 `;
 
-const commentsButton = !isOfflineMode ? `
+    const commentsButton = !isOfflineMode ? `
 <div class="comments-btn-container">
     <button class="comments-btn" id="commentsBtn">
         <span class="icon">💬</span>
@@ -1132,157 +1331,155 @@ const commentsButton = !isOfflineMode ? `
 </div>
 ` : '';
 
-const obfuscatedFinalContent = obfuscate(formattedContent);
+    const anchorSection = buildSectionHTML({
+        number: parseInt(chapterId) || 1,
+        title: chapter.title,
+        content: getProcessedContent,
+        copyrightStart: chapter.copyrightStart,
+        copyrightEnd: chapter.copyrightEnd,
+        copyrightStyles: chapter.copyrightStyles
+    }, 0);
 
-const brightnessStyle = `filter: brightness(${textBrightness});`;
+    const initialScroll = Math.max(0, Math.round(pendingRestoreRef.current || 0));
 
-return `
+    const webviewScript = `
+      (function() {
+          function sendMessage(msg) {
+              if (window.ReactNativeWebView) { window.ReactNativeWebView.postMessage(msg); }
+              else if (window.parent) { window.parent.postMessage(msg, '*'); }
+          }
+          window.__readerScrollTo = function(y) { setTimeout(function(){ window.scrollTo(0, y); }, 80); };
+          var initialScroll = ${initialScroll};
+          if (initialScroll > 0) {
+              setTimeout(function(){ window.scrollTo(0, initialScroll); }, 150);
+              setTimeout(function(){ window.scrollTo(0, initialScroll); }, 500);
+          }
+          var lastSent = 0;
+          function currentChapterNumber(y) {
+              var secs = document.querySelectorAll('section[data-ch]');
+              var cur = secs.length ? parseInt(secs[0].getAttribute('data-ch')) : 0;
+              for (var i = 0; i < secs.length; i++) {
+                  if (secs[i].offsetTop - 80 <= y) cur = parseInt(secs[i].getAttribute('data-ch'));
+                  else break;
+              }
+              return cur;
+          }
+          window.__continuous = ${continuousMode ? 'true' : 'false'};
+          function maybeNeedNext() {
+              if (!window.__continuous) return;
+              if (window.__endReached || window.__needNextLock) return;
+              var doc = document.documentElement;
+              if (window.scrollY + window.innerHeight >= doc.scrollHeight - 1500) {
+                  window.__needNextLock = true;
+                  sendMessage('readerNeedNext');
+              }
+          }
+          window.addEventListener('scroll', function() {
+              var now = Date.now();
+              if (now - lastSent < 250) return;
+              lastSent = now;
+              var y = window.scrollY || 0;
+              sendMessage(JSON.stringify({ type: 'readerScroll', offset: y, chapter: currentChapterNumber(y) }));
+              maybeNeedNext();
+          }, true);
+          document.addEventListener('click', function(e) {
+              try {
+                  if (e.target.closest('#commentsBtn')) { e.stopPropagation(); sendMessage('openComments'); return; }
+                  if (e.target.closest('#authorCard')) { e.stopPropagation(); sendMessage('openProfile'); return; }
+                  var selection = window.getSelection();
+                  if (selection && selection.toString().length > 0) return;
+                  sendMessage('toggleMenu');
+              } catch (err) {}
+          });
+          window.__appendChapter = function(num, title, html) {
+              var wrap = document.createElement('div');
+              wrap.innerHTML = html;
+              var root = document.getElementById('chapters-root');
+              while (wrap.firstChild) root.appendChild(wrap.firstChild);
+              window.__needNextLock = false;
+          };
+          window.__markEnd = function() { window.__endReached = true; window.__needNextLock = true; };
+      })();
+    `;
+
+    return `
   <!DOCTYPE html>
   <html lang="ar" dir="rtl">
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <style>
-      ${fontImports}
-      * { -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; box-sizing: border-box; }
-      body, html {
-        margin: 0; padding: 0; background-color: ${bgColor}; color: ${textColor};
-        font-family: ${fontFamily.family}; line-height: 1.8;
-        -webkit-overflow-scrolling: touch;
-        overflow-x: hidden;
-        ${brightnessStyle}
-      }
-      .container { padding: 25px 20px 120px 20px; width: 100%; max-width: 800px; margin: 0 auto; }
-
-      .title {
-        font-size: ${fontSize + 8}px; font-weight: bold; margin-bottom: 20px;
-        color: ${bgColor === '#fff' || bgColor === '#ffffff' ? '#000' : '#fff'};
-        padding-bottom: 10px; font-family: ${fontFamily.family};
-        text-align: right;
-      }
-
-      ${dividerCSS}
-
-      .content-area { font-size: ${fontSize}px; text-align: justify; word-wrap: break-word; }
-      p { margin-bottom: 1.5em; }
-
-      .cm-dialogue-text {
-          color: ${enableDialogue ? dialogueColor : 'inherit'};
-          font-size: ${dialogueSize}%;
-          font-weight: bold;
-          transition: color 0.3s ease, font-size 0.3s ease;
-      }
-      .cm-markdown-bold {
-          font-weight: bold;
-          color: ${enableMarkdown ? markdownColor : 'inherit'};
-          font-size: ${markdownSize}%;
-          transition: color 0.3s ease, font-size 0.3s ease;
-      }
-      .cm-quote-style { opacity: 1; }
-      .quote-mark { opacity: 1; transition: opacity 0.3s ease; }
-      .quote-mark.hidden { opacity: 0; font-size: 0; }
-      .mark-visible { opacity: 1; }
-      .mark-hidden { opacity: 0; font-size: 0; }
-
-      .bracket-formatted {
-          color: ${enableBracket ? bracketColor : 'inherit'};
-          font-size: ${bracketSize}%;
-          font-weight: bold;
-          transition: color 0.3s ease, font-size 0.3s ease;
-      }
-      .bracket-quote-style { opacity: 1; }
-      .bracket-mark-visible { opacity: 1; }
-      .bracket-mark-hidden { opacity: 0; font-size: 0; }
-
-      .custom-formatted {
-          color: ${enableCustom ? customColor : 'inherit'};
-          font-size: ${customSize}%;
-          font-weight: bold;
-          transition: color 0.3s ease, font-size 0.3s ease;
-      }
-      .custom-mark-visible { opacity: 1; }
-      .custom-mark-hidden { opacity: 0; font-size: 0; }
-
-      body { user-select: none; -webkit-user-select: none; }
-      .author-section-wrapper { margin-top: 50px; margin-bottom: 20px; border-top: 1px solid #222; padding-top: 20px; }
-      .section-title { color: ${bgColor === '#fff' || bgColor === '#ffffff' ? '#000' : '#fff'}; font-size: 18px; font-weight: bold; margin-bottom: 12px; text-align: right; }
-      .author-card { border-radius: 16px; overflow: hidden; margin-top: 10px; border: 1px solid #222; position: relative; height: 140px; width: 100%; cursor: pointer; }
-      .author-banner { position: absolute; width: 100%; height: 100%; background-size: cover; background-position: center; }
-      .author-overlay { position: absolute; inset: 0; background: linear-gradient(to bottom, rgba(0,0,0,0.2), rgba(0,0,0,0.8)); z-index: 1; }
-      .author-content { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 2; width: 100%; }
-      .author-avatar-wrapper { width: 76px; height: 76px; border-radius: 38px; border: 3px solid #fff; background-color: #333; margin-bottom: 8px; overflow: hidden; }
-      .author-avatar-img { width: 100%; height: 100%; object-fit: cover; }
-      .author-name { color: #fff; font-size: 20px; font-weight: bold; text-transform: uppercase; text-shadow: 0 1px 6px rgba(0, 0, 0, 0.9); text-align: center; }
-      .comments-btn-container { margin-bottom: 40px; padding: 0 5px; }
-      .comments-btn { width: 100%; background-color: ${bgColor === '#fff' || bgColor === '#ffffff' ? '#f0f0f0' : '#1a1a1a'}; border: 1px solid ${bgColor === '#fff' || bgColor === '#ffffff' ? '#ddd' : '#333'}; color: ${bgColor === '#fff' || bgColor === '#ffffff' ? '#333' : '#fff'}; padding: 15px; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-    </style>
+    <style>${fontImports}</style>
+    <style id="reader-style">${buildReaderCSS()}</style>
   </head>
   <body>
     <div class="container" id="clickable-area">
-      ${titleHTML}
-      ${customSeparatorHTML}
-
-      ${startHTML}
-
-      <div class="content-area" id="main-content-area">
-        <div style="text-align: center; padding: 20px; opacity: 0.5;">جاري التحميل الآمن...</div>
-      </div>
-
-      ${endHTML}
-
+      <div id="chapters-root">${anchorSection}</div>
       ${publisherBanner}
       ${commentsButton}
     </div>
-    <script>
-      (function() {
-          const _S = "${ZEUS_SECRET}";
-          const _D = "${obfuscatedFinalContent}";
-
-          function decrypt(encoded) {
-            try {
-              const text = atob(encoded);
-              let result = "";
-              for (let i = 0; i < text.length; i++) {
-                result += String.fromCharCode(text.charCodeAt(i) ^ _S.charCodeAt(i % _S.length));
-              }
-              return decodeURIComponent(result);
-            } catch (e) { return "خطأ في تحميل المحتوى الآمن."; }
-          }
-
-          document.getElementById('main-content-area').innerHTML = decrypt(_D);
-
-          function sendMessage(msg) {
-              if (window.ReactNativeWebView) { window.ReactNativeWebView.postMessage(msg); }
-              else if (window.parent) { window.parent.postMessage(msg, '*'); }
-          }
-          document.addEventListener('click', function(e) {
-            try {
-                if (e.target.closest('#commentsBtn')) { e.stopPropagation(); sendMessage('openComments'); return; }
-                if (e.target.closest('#authorCard')) { e.stopPropagation(); sendMessage('openProfile'); return; }
-                var selection = window.getSelection();
-                if (selection && selection.toString().length > 0) return;
-                sendMessage('toggleMenu');
-            } catch(err) {}
-          });
-      })();
-    </script>
+    <script>${webviewScript}<\/script>
   </body>
   </html>
 `;
 };
 
+// Stable per-chapter HTML: styling changes must NOT regenerate it (scroll preservation)
+const baseHtml = useMemo(() => generateHTML(), [
+    chapter, chapterId, commentCount, authorProfile, isOfflineMode,
+    enableSeparator, separatorText, customOpenMark, customCloseMark,
+    selectedQuoteStyle, selectedMarkdownStyle, selectedBracketStyle,
+    getProcessedContent, novel.author, novel.title
+]);
+
+// Web (iframe) still needs full regeneration on style change
+const webHtml = useMemo(() => generateHTML(), [baseHtml, fontSize, bgColor, textColor, fontFamily, textBrightness, enableDialogue, dialogueColor, dialogueSize, hideQuotes, enableMarkdown, markdownColor, markdownSize, hideMarkdownMarks, enableBracket, bracketColor, bracketSize, hideBracketMarks, enableCustom, customColor, customSize, hideCustomMarks]);
+
+// Inject updated CSS into the WebView WITHOUT reloading it (scroll position is kept)
+useEffect(() => {
+    if (Platform.OS !== 'ios') return;
+    const css = buildReaderCSS();
+    const js = `(function(){window.__continuous=${continuousMode ? 'true' : 'false'};var el=document.getElementById('reader-style'); if(el){el.textContent=${JSON.stringify(css)};}})(); true;`;
+    webViewRef.current?.injectJavaScript(js);
+}, [fontSize, bgColor, textColor, fontFamily, textBrightness,
+    enableDialogue, dialogueColor, dialogueSize, hideQuotes,
+    enableMarkdown, markdownColor, markdownSize, hideMarkdownMarks,
+    enableBracket, bracketColor, bracketSize, hideBracketMarks,
+    enableCustom, customColor, customSize, hideCustomMarks, baseHtml]);
+
+// Cleanup scroll-save timer on unmount
+useEffect(() => () => {
+    if (scrollSaveTimer.current) clearTimeout(scrollSaveTimer.current);
+}, []);
+
+// Keep server reading-progress in sync with the chapter actually being viewed
+useEffect(() => {
+    if (chapter && !isOfflineMode) updateProgressOnServer(chapter, currentViewedChapter);
+}, [currentViewedChapter]);
+
 const onMessage = (event) => {
-    if (event && event.nativeEvent && event.nativeEvent.data) {
-        const msg = event.nativeEvent.data;
-        if (msg === 'toggleMenu') {
-            toggleMenu();
-        } else if (msg === 'openComments') {
-            setShowComments(true);
-        } else if (msg === 'openProfile') {
-            if (authorProfile && !isOfflineMode) {
-                navigation.push('UserProfile', { userId: authorProfile._id });
+    const msg = event?.nativeEvent?.data;
+    if (!msg) return;
+    if (typeof msg === 'string' && msg.startsWith('{')) {
+        try {
+            const data = JSON.parse(msg);
+            if (data.type === 'readerScroll') {
+                const chNum = parseInt(data.chapter) || currentViewedChapter;
+                setCurrentViewedChapter(prev => (parseInt(prev) === chNum ? prev : chNum));
+                queueSaveScroll(chNum, data.offset);
+                return;
             }
+        } catch (e) {}
+    }
+    if (msg === 'toggleMenu') {
+        toggleMenu();
+    } else if (msg === 'openComments') {
+        setShowComments(true);
+    } else if (msg === 'openProfile') {
+        if (authorProfile && !isOfflineMode) {
+            navigation.push('UserProfile', { userId: authorProfile._id });
         }
+    } else if (msg === 'readerNeedNext') {
+        fetchNextChapter();
     }
 };
 
@@ -1355,6 +1552,69 @@ const renderChapterItem = ({ item }) => {
     );
 };
 
+// ----- Android continuous-scroll items (anchor chapter + appended sections) -----
+const androidItems = useMemo(() => {
+    if (Platform.OS !== 'android') return [];
+    const items = [];
+    const secs = [{
+        number: parseInt(chapterId) || 1,
+        title: chapter?.title,
+        content: getProcessedContent,
+        copyrightStart: chapter?.copyrightStart,
+        copyrightEnd: chapter?.copyrightEnd,
+        copyrightStyles: chapter?.copyrightStyles
+    }, ...processedExtraSections];
+    secs.forEach((sec, si) => {
+        items.push({
+            type: 'header', key: `h_${si}_${sec.number}`, number: sec.number,
+            title: sec.title, copyrightStart: sec.copyrightStart, showSep: si > 0
+        });
+        (sec.content || '').split('\n').filter(l => l.trim() !== '').forEach((line, li) => {
+            items.push({ type: 'line', key: `l_${si}_${sec.number}_${li}`, text: line, number: sec.number });
+        });
+        if (sec.copyrightEnd) items.push({ type: 'copy', key: `ce_${si}_${sec.number}`, text: sec.copyrightEnd, styles: sec.copyrightStyles });
+    });
+    return items;
+}, [chapter, chapterId, getProcessedContent, processedExtraSections]);
+
+const androidRestoreTriesRef = useRef(0);
+
+const handleAndroidScroll = (e) => {
+    const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+    const y = contentOffset.y;
+    let cur = parseInt(chapterId) || 1;
+    const ys = headerYsRef.current;
+    Object.keys(ys).forEach(k => {
+        const num = parseInt(k);
+        if (ys[k] <= y + 120 && num > cur) cur = num;
+    });
+    setCurrentViewedChapter(prev => (prev === cur ? prev : cur));
+    queueSaveScroll(cur, y);
+    if (continuousMode && contentSize.height > 0 && y + layoutMeasurement.height >= contentSize.height - 1500) {
+        fetchNextChapter();
+    }
+};
+
+const handleAndroidContentSize = (w, h) => {
+    const target = pendingRestoreRef.current;
+    if (target <= 0 || restoredOnceRef.current) return;
+    if (h >= target + 300) {
+        restoredOnceRef.current = true;
+        androidListRef.current?.scrollToOffset({ offset: target, animated: false });
+        pendingRestoreRef.current = 0;
+    } else {
+        // Push towards the end so virtualization renders further items; retry next size change
+        if (androidRestoreTriesRef.current < 80) {
+            androidRestoreTriesRef.current += 1;
+            androidListRef.current?.scrollToOffset({ offset: Math.max(0, h - 600), animated: false });
+        } else {
+            restoredOnceRef.current = true;
+            pendingRestoreRef.current = 0;
+        }
+    }
+};
+
+
 if (loading) {
 return (
 <View style={[styles.loadingContainer, { backgroundColor: bgColor }]}>
@@ -1367,10 +1627,10 @@ return (
 const getHeaderSubtitle = () => {
     if (availableChapters) {
         const sorted = [...availableChapters].sort((a,b) => a - b);
-        const index = sorted.indexOf(parseInt(chapterId));
+        const index = sorted.indexOf(parseInt(currentViewedChapter));
         return `الفصل ${index + 1} من ${sorted.length}`;
     } else {
-        return `الفصل ${chapterId} من ${realTotalChapters > 0 ? realTotalChapters : '؟'}`;
+        return `الفصل ${currentViewedChapter} من ${realTotalChapters > 0 ? realTotalChapters : '؟'}`;
     }
 };
 
@@ -1378,35 +1638,67 @@ const renderAndroidContent = () => (
   <View style={{ flex: 1 }}>
     <FlatList
       ref={androidListRef}
-      data={androidTextLines}
-      keyExtractor={(_, index) => index.toString()}
+      data={androidItems}
+      keyExtractor={(item) => item.key}
       contentContainerStyle={{ paddingHorizontal: 20, paddingTop: insets.top + 60, paddingBottom: 150 }}
       showsVerticalScrollIndicator={false}
       removeClippedSubviews={true}
-      ListHeaderComponent={() => (
-        <TouchableOpacity activeOpacity={1} onPress={toggleMenu}>
-          <Text style={[styles.androidTitle, { color: textColor, fontSize: fontSize + 8, fontFamily: fontFamily.id === 'Cairo' || fontFamily.id === 'Amiri' ? fontFamily.id : undefined }]}>
-            {chapter ? chapter.title : ''}
-          </Text>
-        </TouchableOpacity>
-      )}
-      renderItem={({ item }) => (
-        <TouchableOpacity activeOpacity={1} onPress={toggleMenu}>
-          <Text style={{
-            fontSize: fontSize,
-            color: textColor,
-            fontFamily: fontFamily.id === 'Cairo' || fontFamily.id === 'Amiri' ? fontFamily.id : undefined,
-            lineHeight: fontSize * 1.8,
-            textAlign: 'right',
-            marginBottom: 20,
-            writingDirection: 'rtl'
-          }}>
-            {item}
-          </Text>
-        </TouchableOpacity>
-      )}
+      onScroll={handleAndroidScroll}
+      onContentSizeChanged={handleAndroidContentSize}
+      scrollEventThrottle={16}
+      renderItem={({ item }) => {
+        if (item.type === 'header') {
+          return (
+            <TouchableOpacity activeOpacity={1} onPress={toggleMenu}
+              onLayout={(e) => { headerYsRef.current[item.number] = e.nativeEvent.layout.y; }}>
+              {item.showSep && <Text style={{ textAlign: 'center', color: 'rgba(128,128,128,0.55)', fontSize: 18, letterSpacing: 6, marginVertical: 25 }}>◆ ◆ ◆</Text>}
+              <Text style={[styles.androidTitle, { color: textColor, fontSize: fontSize + 8, fontFamily: fontFamily.id === 'Cairo' || fontFamily.id === 'Amiri' ? fontFamily.id : undefined }]}>
+                {item.title || `فصل ${item.number}`}
+              </Text>
+              {item.copyrightStart ? (
+                <Text style={{ color: item.styles?.color || '#888', textAlign: 'center', fontSize: item.styles?.fontSize || 14, opacity: item.styles?.opacity || 1, marginBottom: 20 }}>
+                  {item.copyrightStart}
+                </Text>
+              ) : null}
+            </TouchableOpacity>
+          );
+        }
+        if (item.type === 'copy') {
+          return (
+            <Text style={{ color: item.styles?.color || '#888', textAlign: 'center', fontSize: item.styles?.fontSize || 14, opacity: item.styles?.opacity || 1, marginVertical: 25 }}>
+              {item.text}
+            </Text>
+          );
+        }
+        return (
+          <TouchableOpacity activeOpacity={1} onPress={toggleMenu}>
+            <Text style={{
+              fontSize: fontSize,
+              color: textColor,
+              fontFamily: fontFamily.id === 'Cairo' || fontFamily.id === 'Amiri' ? fontFamily.id : undefined,
+              lineHeight: fontSize * 1.8,
+              textAlign: 'right',
+              marginBottom: 20,
+              writingDirection: 'rtl'
+            }}>
+              {item.text}
+            </Text>
+          </TouchableOpacity>
+        );
+      }}
       ListFooterComponent={() => (
         <View style={{ marginTop: 30 }}>
+          {loadingNext && (
+            <View style={{ paddingVertical: 20, alignItems: 'center' }}>
+              <ActivityIndicator size="small" color="#4a7cc7" />
+              <Text style={{ color: '#888', marginTop: 8, fontSize: 13 }}>جاري جلب الفصل التالي…</Text>
+            </View>
+          )}
+          {endReached && !loadingNext && (
+            <Text style={{ textAlign: 'center', color: 'rgba(128,128,128,0.6)', fontSize: 14, marginVertical: 20, letterSpacing: 1 }}>
+              — وصلت إلى آخر فصل متاح —
+            </Text>
+          )}
           {authorProfile && (
             <TouchableOpacity onPress={() => !isOfflineMode && navigation.push('UserProfile', { userId: authorProfile._id })} style={styles.androidAuthorCard}>
               <Text style={{ color: '#fff', fontWeight: 'bold' }}>الناشر: {authorProfile.name}</Text>
@@ -1423,6 +1715,25 @@ const renderAndroidContent = () => (
     />
   </View>
 );
+
+// ----- Full-screen error state (retry / back instead of being stuck) -----
+if (errorInfo && !chapter && !loading) {
+  return (
+    <View style={[styles.errorContainer, { backgroundColor: bgColor }]}>
+      <Ionicons name="cloud-offline-outline" size={64} color="#ff6b6b" />
+      <Text style={styles.errorTitle}>تعذّر عرض الفصل</Text>
+      <Text style={styles.errorMessage}>{errorInfo.message}</Text>
+      <TouchableOpacity style={styles.errorBtn} onPress={fetchChapter}>
+        <Ionicons name="refresh" size={20} color="#000" />
+        <Text style={styles.errorBtnTextDark}>إعادة المحاولة</Text>
+      </TouchableOpacity>
+      <TouchableOpacity style={[styles.errorBtn, styles.errorBtnSecondary]} onPress={() => navigation.goBack()}>
+        <Ionicons name="arrow-back" size={20} color="#fff" />
+        <Text style={styles.errorBtnText}>رجوع</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
 
 return (
 <View style={[styles.container, { backgroundColor: bgColor }]}>
@@ -1441,12 +1752,12 @@ return (
 
   {/* Platforms */}
   {Platform.OS === 'web' ? (
-      <iframe srcDoc={generateHTML()} style={{ flex: 1, border: 'none', backgroundColor: bgColor, width: '100%', height: '100%' }} />
+      <iframe srcDoc={webHtml} style={{ flex: 1, border: 'none', backgroundColor: bgColor, width: '100%', height: '100%' }} />
   ) : Platform.OS === 'ios' ? (
       <WebView
         ref={webViewRef}
         originWhitelist={['*']}
-        source={{ html: generateHTML() }}
+        source={{ html: baseHtml }}
         style={{ backgroundColor: bgColor, flex: 1 }}
         onMessage={onMessage}
         scrollEnabled={true}
@@ -1525,7 +1836,7 @@ return (
 
           {/* Right Drawer (Replacements OR Cleaner OR Copyright) */}
           {!isOfflineMode && (
-          <Animated.View style={[styles.drawerContent, { right: 0, left: width * 0.15, borderLeftWidth: 1, borderLeftColor: '#333', paddingTop: insets.top + 20, paddingBottom: insets.bottom + 20, transform: [{ translateX: slideAnimRight }] }]}>
+          <Animated.View style={[styles.drawerContent, { right: 0, left: width * 0.15, top: 0, bottom: 0, borderLeftWidth: 1, borderLeftColor: '#333', paddingTop: insets.top + 20, paddingBottom: insets.bottom + 20, transform: [{ translateX: slideAnimRight }] }]}>
               {drawerMode === 'replacements' && (
                   <View style={{flex: 1}}>
                       {replacementViewMode === 'folders' && (
@@ -1818,7 +2129,7 @@ return (
                   <Text style={styles.commentsTitle}>تعليقات الفصل {chapterId}</Text>
                   <TouchableOpacity onPress={() => setShowComments(false)}><Ionicons name="close-circle" size={28} color="#555" /></TouchableOpacity>
               </View>
-              <CommentsSection novelId={novelId} user={userInfo} chapterNumber={chapterId} />
+              <CommentsSection novelId={novelId} user={userInfo} chapterNumber={currentViewedChapter} />
           </View>
       </View>
   </Modal>
@@ -1845,6 +2156,19 @@ return (
                             <Text style={styles.cardTitle}>مظهر القراءة</Text>
                             <Text style={styles.cardSub}>الخط، الحجم، الألوان</Text>
                         </TouchableOpacity>
+
+                        <View style={[styles.settingsCard, { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 15 }]}>
+                            <Switch
+                                value={continuousMode}
+                                onValueChange={(val) => { setContinuousMode(val); saveSettings({ continuousMode: val }); }}
+                                trackColor={{ false: "#333", true: "#4a7cc7" }}
+                                thumbColor={"#fff"}
+                            />
+                            <View style={{ flex: 1, marginLeft: 15 }}>
+                                <Text style={styles.cardTitle}>التمرير المستمر</Text>
+                                <Text style={styles.cardSub}>جلب الفصل التالي تلقائياً لمتابعة القراءة دون توقف</Text>
+                            </View>
+                        </View>
 
                         {!isOfflineMode && (
                         <TouchableOpacity style={styles.settingsCard} onPress={() => openRightDrawer('replacements')}>
@@ -2392,4 +2716,13 @@ freqBtn: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, backgrou
 freqBtnActive: { backgroundColor: '#4a7cc7', borderColor: '#4a7cc7' },
 freqBtnText: { color: '#888', fontSize: 12, fontWeight: 'bold' },
 scrollSettingsContainer: { paddingBottom: 50 },
+
+// --- ERROR STATE STYLES ---
+errorContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 30 },
+errorTitle: { color: '#fff', fontSize: 22, fontWeight: 'bold', marginTop: 20, marginBottom: 10 },
+errorMessage: { color: '#999', fontSize: 15, textAlign: 'center', lineHeight: 24, marginBottom: 30 },
+errorBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#fff', paddingVertical: 14, paddingHorizontal: 30, borderRadius: 12, width: '100%', marginBottom: 12 },
+errorBtnSecondary: { backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#333' },
+errorBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
+errorBtnTextDark: { color: '#000', fontWeight: 'bold', fontSize: 16 },
 });

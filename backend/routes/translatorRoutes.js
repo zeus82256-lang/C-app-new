@@ -386,7 +386,13 @@ ${JSON.stringify(contexts, null, 2)}
         const word = (item.word || '').trim();
         const translation = (item.translation || '').trim();
         if (!word || !translation || word.length <= 1) continue;
-        fixedText = fixedText.replace(new RegExp(`\\b${escapeRegex(word)}\\b`, 'g'), translation);
+        // 🔥 SAFETY: only Latin words may be replaced, and '$' in the replacement must be
+        // escaped — otherwise JS treats $&/$' as special patterns which corrupts the text
+        // and leaves letter fragments behind (the "missing words / letter remnants" bug).
+        if (!/^[A-Za-z][A-Za-z'\u2019\-]*$/.test(word)) continue;
+        try {
+            fixedText = fixedText.replace(new RegExp(`\\b${escapeRegex(word)}\\b`, 'g'), translation.replace(/\$/g, '$$$$'));
+        } catch (e) { /* skip malformed term */ }
     }
     return fixedText;
 }
@@ -439,6 +445,34 @@ async function reviewQuestionableChapter(provider, modelToUse, key, translatedTe
     }
 }
 
+function buildRepairTranslationPrompt(basePrompt, glossaryText, sourceContent, previousTranslation, reasons) {
+    return `
+${basePrompt}
+
+--- قواعد إلزامية ---
+ترجم كل الفقرات دون حذف أو تلخيص أو دمج. أخرج الترجمة العربية الكاملة فقط بدون شرح.
+
+مراجعة صارمة: الترجمة السابقة فشلت للأسباب التالية:
+- ${reasons.join('\n- ')}
+
+أعد ترجمة الفصل كاملاً من النص الإنجليزي الأصلي أدناه إلى العربية فقط.
+مسموح فقط برموز لاتينية قصيرة للرتب/التصنيفات/المستويات مثل A أو S أو LV أو HP عند الحاجة.
+ممنوع ترك أي كلمة إنجليزية كاملة داخل السرد. ممنوع الاعتذار أو شرح ما فعلته. ممنوع إخراج JSON أو مصطلحات فقط.
+أخرج الفصل المترجم كاملاً فقط.
+
+--- GLOSSARY (Use these strictly) ---
+${glossaryText}
+-------------------------------------
+
+--- PREVIOUS FAILED OUTPUT (Do not copy its English/meta errors) ---
+${(previousTranslation || '').substring(0, 5000)}
+-------------------------------------
+
+--- ENGLISH Text TO TRANSLATE ---
+${sourceContent}
+---------------------------------
+`;
+}
 
 // 🔥 Unified provider caller supporting Gemini, OpenRouter, Cloudflare, custom APIs, and ChatGPT Android
 async function callTranslationProvider(provider, modelName, apiKey, prompt, options = {}) {
@@ -570,6 +604,11 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
     const res = await axios.post(url, body, { headers, timeout: 500000 });
     const choice = res.data?.choices?.[0];
     if (choice && choice.message && choice.message.content) {
+        // 🔥 FIX: a translation cut by the provider's output limit silently loses the
+        // ending of the chapter. Detect it and fail so the retry loop can retranslate.
+        if (choice.finish_reason === 'length') {
+            throw new Error(`الترجمة مبتورة عند حد أقصى مخرجات النموذج (${providerId}/${modelName}) — سيتم إعادة المحاولة`);
+        }
         return choice.message.content;
     }
     throw new Error(`Invalid response from ${providerId}: ${JSON.stringify(res.data)}`);
@@ -675,12 +714,22 @@ async function processTranslationJob(jobId) {
             const glossaryItems = await Glossary.find({ novelId: freshNovel._id });
             const glossaryText = glossaryItems.map(g => `"${g.term}": "${g.translation}"`).join(',\n');
 
+            // 🔥 Guardrails appended on EVERY translation regardless of the custom prompt:
+            // they forbid dropping/summarizing/merging sentences (the missing-words bug).
+            const noOmissionRules = `
+--- قواعد إلزامية (تنطبق دائماً) ---
+1. ترجم الفصل كاملاً فقرة بفقرة. ممنوع حذف أو تلخيص أو دمج أي جملة أو فقرة أو حوار.
+2. كل جملة في النص الإنجليزي يجب أن يكون لها مقابل عربي بنفس الترتيب وبنفس الفقرة.
+3. أخرج الترجمة العربية فقط: بدون مقدمات، بدون شرح، بدون عناوين إضافية، بدون JSON.
+4. لا تضف أي كلمة إنجليزية في الناتج النهائي إلا للرموز القصيرة مثل A أو S أو LV أو HP.
+-------------------------------------`;
             const translationInput = `
 ${transPrompt}
 
 --- GLOSSARY (Use these strictly) ---
 ${glossaryText}
 -------------------------------------
+${noOmissionRules}
 
 --- ENGLISH Text TO TRANSLATE ---
 ${sourceContent}
