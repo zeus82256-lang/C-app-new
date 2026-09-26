@@ -6,6 +6,7 @@ const axios = require('axios'); // 🔥 NEW: for custom/OpenRouter providers
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { askQwen } = require('../services/qwenAndroid.service.js');
 const { askChatGPTAndroid } = require('../services/chatgptAndroid.service.js');
+const { askDeepSeek } = require('../services/deepseekAndroid.service.js');
 
 // --- Config Imports ---
 let firestore, cloudinary;
@@ -79,11 +80,90 @@ function isChatGPTAndroidProvider(provider) {
     return providerId === 'chatgpt-android' || name.includes('chatgpt') || model.includes('gpt') || hasGptModel;
 }
 
-// 🔥 NEW: Unified provider caller (same as translatorRoutes) – now with Cloudflare support
+// 🔥 NEW: DeepSeek Android helpers (mirror of translatorRoutes) – كانت مفقودة بالكامل
+// مما كان يُسقط مزوّد DeepSeek إلى مسار OpenAI-Compatible ب Authorization Failed لكل مفتاح
+const DEFAULT_DEEPSEEK_POW_PROVIDERS = [
+    { id: 'railway', name: 'Railway', url: 'https://pow.up.railway.app/pow' },
+    { id: 'ngrok', name: 'Ngrok', url: 'https://immunize-quintet-trimmer.ngrok-free.dev/get_pow' }
+];
+
+function normalizePowProviderUrl(url) {
+    const value = url || '';
+    return value.includes('/get_pow') ? value.split('?')[0] : value;
+}
+
+function resolveDeepSeekPowUrl(provider) {
+    const powProviders = Array.isArray(provider.powProviders) && provider.powProviders.length > 0
+        ? provider.powProviders
+        : DEFAULT_DEEPSEEK_POW_PROVIDERS;
+    const selected = powProviders.find(p => p.id === provider.selectedPowProviderId) || powProviders[0];
+    return normalizePowProviderUrl(selected?.url);
+}
+
+function isDeepSeekProvider(provider) {
+    const providerId = (provider.providerId || '').toLowerCase();
+    const name = (provider.name || '').toLowerCase();
+    const model = (provider.selectedModel || '').toLowerCase();
+    const hasDeepSeekModel = provider.models && provider.models.some(m => (m.modelId || '').toLowerCase().includes('deepseek'));
+    return providerId === 'deepseek' || name.includes('deepseek') || model.includes('deepseek') || hasDeepSeekModel;
+}
+
+function pickDeepSeekTokenSimple(provider, explicitToken) {
+    const direct = (explicitToken || '').trim();
+    if (direct && !direct.startsWith('dummy-key-for-')) return direct;
+    const tokens = Array.isArray(provider.deepSeekTokens)
+        ? provider.deepSeekTokens.map(t => (t || '').trim()).filter(Boolean)
+        : [];
+    if (tokens.length > 0) return tokens[0];
+    return provider.deepSeekToken || undefined;
+}
+
+// 🔥 NEW: استخراج JSON بشكل متسامح من ردود المزوّدين (تفكير/مقدمات/أسوار كود/فواصل زائدة)
+function extractJsonObject(rawText) {
+    if (!rawText || !String(rawText).trim()) throw new Error('رد فارغ من المزوّد');
+    let text = String(rawText).trim();
+
+    // 1) إزالة كتل التفكير إن وُجدت
+    text = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+
+    // 2) إزالة أسوار الكود ```json ... ``` (في أي موضع وليس البداية فقط)
+    const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fence && fence[1].trim().startsWith('{')) text = fence[1].trim();
+
+    // 3) قص من أول { إلى آخر }
+    const first = text.indexOf('{');
+    const last = text.lastIndexOf('}');
+    if (first === -1 || last === -1 || last <= first) {
+        throw new Error(`لا يوجد JSON في الرد: "${text.substring(0, 150)}"`);
+    }
+    const candidate = text.substring(first, last + 1);
+    try {
+        return JSON.parse(candidate);
+    } catch (e) {
+        // 4) إصلاح الفواصل الزائدة الشائعة قبل } أو ]
+        const repaired = candidate.replace(/,\s*([}\]])/g, '$1');
+        return JSON.parse(repaired);
+    }
+}
+
+// 🔥 NEW: Unified provider caller (same as translatorRoutes) – now with Cloudflare + DeepSeek support
 async function callTranslationProvider(provider, modelName, apiKey, prompt, options = {}) {
     const providerId = (provider.providerId || 'gemini').toLowerCase();
     const isCloudflare = (providerId === 'cloudflare');
     const isChatGPT = isChatGPTAndroidProvider(provider);
+    const isDeepSeek = isDeepSeekProvider(provider);
+
+    // ---- DeepSeek Android API (كان مفقوداً هنا causing فشل جميع المفاتيح) ----
+    if (isDeepSeek) {
+        return askDeepSeek(prompt, {
+            token: pickDeepSeekTokenSimple(provider, apiKey),
+            thinkingEnabled: Boolean(provider.thinkingEnabled),
+            searchEnabled: provider.searchEnabled !== false,
+            modelType: provider.deepSeekModelType === 'expert' ? 'expert' : 'default',
+            powUrl: resolveDeepSeekPowUrl(provider),
+            timeout: options.timeout || 500000
+        });
+    }
 
     // ---- Gemini native ----
     if (providerId === 'gemini' && !provider.baseUrl) {
@@ -311,18 +391,14 @@ async function translateNovelMetadata(novelId, originalData, jobId = null) {
                     try {
                         await logScraper(`🔑 مزوّد: ${providerName} | نموذج: ${modelToUse} | مفتاح ${keyIdx + 1}/${keys.length}`, 'info');
                         const rawText = await callTranslationProvider(provider, modelToUse, key, prompt);
-                        let jsonText = rawText.trim();
-                        if (jsonText.startsWith("```json")) {
-                            jsonText = jsonText.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-                        } else if (jsonText.startsWith("```")) {
-                            jsonText = jsonText.replace(/^```\s*/, "").replace(/\s*```$/, "");
-                        }
-                        parsed = JSON.parse(jsonText);
+                        parsed = extractJsonObject(rawText);
                         if (jobId) await updateMetadataJob(jobId, 'active', `✅ نجحت الترجمة باستخدام ${providerName}`, 'success');
                         break; // exit key loop
                     } catch (err) {
                         lastError = err;
                         console.error(`❌ فشل ${providerName} مفتاح ${keyIdx+1}: ${err.message}`);
+                        // 🔥 NEW: أظهر سبب الفشل في سجل السكرابر داخل التطبيق أيضاً (ليس الكونسول فقط)
+                        await logScraper(`❌ فشل ${providerName} (مفتاح ${keyIdx + 1}/${keys.length}): ${err.message}`, 'warning');
                         if (err.message.includes('429') || err.message.includes('quota')) {
                             if (jobId) await updateMetadataJob(jobId, 'active', `⚠️ ضغط على المفتاح، تبديل...`, 'warning');
                             await delay(3000);
@@ -1253,7 +1329,28 @@ app.put('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
                 // Ensure it's in watchlist
                 novel.isWatched = true; 
 
-                // 🛑 DO NOT UPDATE COVER, DESCRIPTION, TITLE, OR AUTHOR
+                // 🔥 NEW: Fill MISSING cover for existing novels (never overwrite an existing one).
+                // كانت الروايات المسحوبة بلا غلاف (مثل twkan سابقاً) تبقى بلا صورة للأبد
+                if (!novel.cover && novelData.cover) {
+                    if (cloudinary && !novelData.cover.includes('cloudinary')) {
+                        try {
+                            const uploadRes = await cloudinary.uploader.upload(novelData.cover, {
+                                folder: 'novels_covers',
+                                resource_type: 'auto',
+                                timeout: 60000
+                            });
+                            novel.cover = uploadRes.secure_url;
+                            await logScraper(`✅ تم رفع الغلاف الناقص للرواية الموجودة`, 'success');
+                        } catch (imgErr) {
+                            novel.cover = novelData.cover;
+                            await logScraper(`⚠️ فشل رفع الغلاف الناقص (سيُستخدم الرابط الأصلي)`, 'warning');
+                        }
+                    } else {
+                        novel.cover = novelData.cover;
+                    }
+                }
+                
+                // 🛑 DO NOT UPDATE DESCRIPTION, TITLE, OR AUTHOR (except the missing cover above)
                 // We deliberately skip any other metadata updates here.
                 
                 // 🛑 DO NOT SAVE LAST UPDATE DATE YET
