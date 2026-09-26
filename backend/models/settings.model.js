@@ -65,7 +65,10 @@ OUTPUT JSON STRUCTURE:
 
 RETURN ONLY JSON:` },
     translatorApiKeys: [{ type: String }], // Global Keys for Translator
-    
+
+    // 🔥 ScraperAPI keys for the novel scraper service (multi-key rotation)
+    scraperApiKeys: [{ type: String }],
+
     // 🔥 NEW: Multi-provider translation support (including ChatGPT Android)
     translationProviders: [{
         providerId: { type: String, required: true }, // e.g., 'gemini', 'openrouter', 'chatgpt-android', 'custom1'

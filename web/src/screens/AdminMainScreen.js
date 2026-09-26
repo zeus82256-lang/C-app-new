@@ -337,12 +337,19 @@ export default function AdminMainScreen({ navigation }) {
                     color="#10b981" 
                     onPress={() => navigation.navigate('TitleGeneratorHub')}
                 />
-                <DashboardButton 
-                    title="الاستيراد الآلي (Scraper)" 
+                <DashboardButton
+                    title="الاستيراد الآلي (Scraper)"
                     subtitle="سحب الروايات من المواقع الخارجية"
-                    icon="planet" 
-                    color="#8b5cf6" 
+                    icon="planet"
+                    color="#8b5cf6"
                     onPress={() => navigation.navigate('AutoImport')}
+                />
+                <DashboardButton
+                    title="مفاتيح ScraperAPI 🛰️"
+                    subtitle="إدارة مفاتيح السحب من المواقع المحمية"
+                    icon="key"
+                    color="#6366f1"
+                    onPress={() => navigation.navigate('ScraperKeys')}
                 />
             </View>
 

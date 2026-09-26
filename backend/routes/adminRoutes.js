@@ -1193,6 +1193,113 @@ app.put('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
     });
 
     // =========================================================
+    // 🛰️ SCRAPERAPI KEYS MANAGEMENT (مفاتيح السكرابر متعددة)
+    // =========================================================
+    // المصدر الوحيد للمفاتيح هو واجهة التطبيق؛ تُخزن في Settings وتُدفع
+    // لخدمة السكرابر فوراً، ويستطيع السكرابر سحبها بنفسه عبر x-api-secret.
+    const SCRAPER_SERVICE_URL = (process.env.SCRAPER_SERVICE_URL || 'https://scraper-production-63ee.up.railway.app').replace(/\/+$/, '');
+    const SCRAPER_API_SECRET = process.env.API_SECRET || 'Zeusndndjddnejdjdjdejekk29393838msmskxcm9239484jdndjdnddjj99292938338zeuslojdnejxxmejj82283849';
+
+    const _sanitizeScraperKeys = (input) => {
+        let raw = [];
+        if (Array.isArray(input)) raw = input;
+        else if (typeof input === 'string') raw = String(input).split(/[\n,]/);
+        const seen = new Set();
+        const out = [];
+        for (let part of raw) {
+            const k = String(part || '').trim().replace(/^["']|["']$/g, '');
+            if (k.length >= 15 && k.length <= 80 && /^[A-Za-z0-9_\-]+$/.test(k) && !seen.has(k.toLowerCase())) {
+                seen.add(k.toLowerCase());
+                out.push(k);
+            }
+        }
+        return out;
+    };
+
+    const _maskScraperKey = (k) => (k && k.length > 12) ? `${k.slice(0, 8)}…${k.slice(-5)}` : (k || '');
+
+    const _checkScraperApiKey = async (key) => {
+        try {
+            const r = await axios.get('https://api.scraperapi.com/account', { params: { api_key: key }, timeout: 20000 });
+            const d = r.data || {};
+            return {
+                key: _maskScraperKey(key),
+                valid: true,
+                creditsLeft: d.creditsLeft,
+                requestCount: d.requestCount,
+                requestLimit: d.requestLimit,
+                nextBillingDate: d.nextBillingDate || null,
+                note: d.creditsLeft === 0 ? 'مستهلك — يتجدد ' + (d.nextBillingDate ? new Date(d.nextBillingDate).toISOString().slice(0, 10) : 'شهرياً') : 'جاهز'
+            };
+        } catch (e) {
+            const status = e.response ? e.response.status : 0;
+            return { key: _maskScraperKey(key), valid: false, note: status === 401 || status === 403 ? 'مفتاح غير صالح' : `فشل الفحص (HTTP ${status})` };
+        }
+    };
+
+    const _pushKeysToScraper = async (keys) => {
+        try {
+            const r = await axios.post(`${SCRAPER_SERVICE_URL}/scraperapi/keys`,
+                { keys },
+                { headers: { 'Authorization': SCRAPER_API_SECRET, 'Content-Type': 'application/json' }, timeout: 20000 });
+            return { pushed: true, message: r.data && r.data.message };
+        } catch (e) {
+            return { pushed: false, message: e.message };
+        }
+    };
+
+    // GET: قراءة المفاتيح (المشرف بالتوكن أو السكرابر بالسري)
+    app.get('/api/admin/scraper-keys', async (req, res, next) => {
+        const secret = req.headers['authorization'] || req.headers['x-api-secret'];
+        if (secret === SCRAPER_API_SECRET) return next(); // السكرابر يسحبها بنفسه
+        return verifyAdmin(req, res, next);
+    }, async (req, res) => {
+        try {
+            let settings = await Settings.findOne();
+            if (!settings) settings = await Settings.create({});
+            res.json({ keys: settings.scraperApiKeys || [] });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // POST: حفظ المفاتيح + دفعها للسكرابر + فحص أرصدة كل مفتاح
+    app.post('/api/admin/scraper-keys', verifyAdmin, async (req, res) => {
+        try {
+            const { keys } = req.body || {};
+            const clean = _sanitizeScraperKeys(keys);
+            if (clean.length === 0) {
+                return res.status(400).json({ error: 'لا يوجد أي مفتاح صالح — تأكد أن كل مفتاح في سطر مستقل (أو مفصول بفواصل) وأن طوله صحيح.' });
+            }
+            let settings = await Settings.findOne();
+            if (!settings) settings = await Settings.create({});
+            settings.scraperApiKeys = clean;
+            await settings.save();
+
+            // دفع فوري للسكرابر (إن فشل لا يمنع الحفظ — السكرابر يسحبها لاحقاً بنفسه)
+            const push = await _pushKeysToScraper(clean);
+            const statuses = await Promise.all(clean.map(_checkScraperApiKey));
+            await logScraper(`🛰️ تم تحديث مفاتيح ScraperAPI: ${clean.length} مفتاح(مفاتيح) صالح` + (push.pushed ? ' وتم إرسالها للسكرابر.' : ' (فشل الإرسال للسكرابر — سيسحبها تلقائياً لاحقاً).'), 'success');
+
+            res.json({ saved: clean.length, push, statuses });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // فحص مباشر لأرصدة المفاتيح المحفوظة
+    app.get('/api/admin/scraper-keys/check', verifyAdmin, async (req, res) => {
+        try {
+            const settings = await Settings.findOne();
+            const keys = (settings && settings.scraperApiKeys) || [];
+            const statuses = await Promise.all(keys.map(_checkScraperApiKey));
+            res.json({ total: keys.length, statuses });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // =========================================================
     // 🔍 CHECK EXISTING CHAPTERS
     // =========================================================
     app.post('/api/scraper/check-chapters', async (req, res) => {

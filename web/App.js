@@ -40,6 +40,7 @@ import UsersManagementScreen from './src/screens/UsersManagementScreen';
 import AdminMainScreen from './src/screens/AdminMainScreen';
 import BulkUploadScreen from './src/screens/BulkUploadScreen';
 import AutoImportScreen from './src/screens/AutoImportScreen';
+import ScraperKeysScreen from './src/screens/ScraperKeysScreen';
 import PrivacyPolicyScreen from './src/screens/PrivacyPolicyScreen';
 
 // New Screens
@@ -323,7 +324,8 @@ function NavigationRoot() {
                 <Stack.Screen name="UsersManagement" component={UsersManagementScreen} options={{ animation: 'slide_from_bottom' }} />
                 <Stack.Screen name="AdminMain" component={AdminMainScreen} options={{ animation: 'fade_from_bottom' }} />
                 <Stack.Screen name="BulkUpload" component={BulkUploadScreen} options={{ animation: 'slide_from_bottom' }} />
-                <Stack.Screen name="AutoImport" component={AutoImportScreen} options={{ animation: 'slide_from_bottom' }} /> 
+                <Stack.Screen name="AutoImport" component={AutoImportScreen} options={{ animation: 'slide_from_bottom' }} />
+                <Stack.Screen name="ScraperKeys" component={ScraperKeysScreen} options={{ animation: 'slide_from_bottom' }} />
                 
                 {/* Updated Title Fixer Route */}
                 <Stack.Screen name="ChapterTitleFixer" component={ChapterTitleFixerScreen} options={{ animation: 'slide_from_bottom' }} />

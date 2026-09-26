@@ -435,6 +435,9 @@ export default function AutoImportScreen({ navigation }) {
                 <TouchableOpacity onPress={() => handleUpdateAll(false)} style={[styles.iconBtn, {backgroundColor: updatingAll ? '#4a7cc7' : 'rgba(255,255,255,0.1)'}]} disabled={updatingAll}>
                     {updatingAll ? <ActivityIndicator size="small" color="#fff" /> : <Ionicons name="sync" size={24} color="#fff" />}
                 </TouchableOpacity>
+                <TouchableOpacity onPress={() => navigation.navigate('ScraperKeys')} style={styles.iconBtn}>
+                    <Ionicons name="key" size={24} color="#fff" />
+                </TouchableOpacity>
                 <TouchableOpacity onPress={() => setShowConsole(true)} style={styles.iconBtn}>
                     <Ionicons name="terminal" size={24} color={isScraping ? "#4ade80" : "#fff"} />
                 </TouchableOpacity>
