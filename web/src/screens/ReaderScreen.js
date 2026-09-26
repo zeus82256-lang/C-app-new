@@ -15,8 +15,7 @@ import {
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { Ionicons } from '@expo/vector-icons';
-import * as Speech from 'expo-speech';
-import * as KeepAwake from 'expo-keep-awake';
+import { Speech, KeepAwake } from '../reader/optionalModules';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import api, { incrementView } from '../services/api';
