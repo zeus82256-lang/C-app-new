@@ -30,7 +30,6 @@ import { getOfflineChapterContent } from '../services/offlineStorage';
 
 const { width, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const DRAWER_WIDTH = width * 0.85;
-const BOTTOM_DRAWER_HEIGHT = SCREEN_HEIGHT * 0.5;
 
 // ---------- Content helpers (encryption fully removed) ----------
 // The server now serves chapter content as PLAIN TEXT. The only remaining
@@ -140,8 +139,8 @@ const CustomSlider = ({ value, onValueChange, minimumValue, maximumValue, step =
         >
             <TouchableWithoutFeedback onPress={handleTouch}>
                 <View style={{height: 40, justifyContent: 'center'}}>
-                    <View style={{ height: 6, backgroundColor: '#333', borderRadius: 3, overflow: 'hidden' }}>
-                        <View style={{ height: '100%', width: `${percentage}%`, backgroundColor: activeColor }} />
+                    <View style={{ height: 6, backgroundColor: '#2a2a2a', borderRadius: 3, overflow: 'hidden' }}>
+                        <View style={{ height: '100%', width: `${percentage}%`, backgroundColor: activeColor, borderRadius: 3 }} />
                     </View>
                     <View style={{
                         position: 'absolute',
@@ -153,11 +152,11 @@ const CustomSlider = ({ value, onValueChange, minimumValue, maximumValue, step =
                         backgroundColor: thumbColor,
                         shadowColor: "#000",
                         shadowOffset: { width: 0, height: 2 },
-                        shadowOpacity: 0.3,
-                        shadowRadius: 3,
-                        elevation: 5,
+                        shadowOpacity: 0.35,
+                        shadowRadius: 4,
+                        elevation: 6,
                         borderWidth: 1,
-                        borderColor: 'rgba(0,0,0,0.1)'
+                        borderColor: 'rgba(0,0,0,0.15)'
                     }} />
                 </View>
             </TouchableWithoutFeedback>
@@ -233,7 +232,7 @@ const [textColor, setTextColor] = useState('#e0e0e0');
 const [fontFamily, setFontFamily] = useState(FONT_OPTIONS[0]);
 const [showMenu, setShowMenu] = useState(false);
 const [showSettings, setShowSettings] = useState(false);
-const [settingsView, setSettingsView] = useState('main');
+const [settingsTab, setSettingsTab] = useState('appearance'); // appearance | format | tools
 const [textBrightness, setTextBrightness] = useState(1);
 const [bgColorHexInput, setBgColorHexInput] = useState('#0a0a0a');
 const [textColorHexInput, setTextColorHexInput] = useState('#e0e0e0');
@@ -251,14 +250,14 @@ const [markdownSize, setMarkdownSize] = useState(100);
 const [hideMarkdownMarks, setHideMarkdownMarks] = useState(false);
 const [selectedMarkdownStyle, setSelectedMarkdownStyle] = useState('all');
 
-// --- NEW: BRACKET FORMATTING STATE ---
+// --- BRACKET FORMATTING STATE ---
 const [enableBracket, setEnableBracket] = useState(false);
 const [bracketColor, setBracketColor] = useState('#3b82f6');
 const [bracketSize, setBracketSize] = useState(110);
 const [hideBracketMarks, setHideBracketMarks] = useState(false);
 const [selectedBracketStyle, setSelectedBracketStyle] = useState('all');
 
-// --- NEW: CUSTOM FORMATTING STATE ---
+// --- CUSTOM FORMATTING STATE ---
 const [enableCustom, setEnableCustom] = useState(false);
 const [customOpenMark, setCustomOpenMark] = useState('');
 const [customCloseMark, setCustomCloseMark] = useState('');
@@ -303,6 +302,7 @@ const [separatorText, setSeparatorText] = useState('____________________________
 // Chapters list state
 const [chaptersList, setChaptersList] = useState([]);
 const [loadingChapters, setLoadingChapters] = useState(false);
+const [chapterSearch, setChapterSearch] = useState('');
 
 const [drawerMode, setDrawerMode] = useState('none');
 const slideAnim = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
@@ -320,6 +320,9 @@ const [endReached, setEndReached] = useState(false);
 const [currentViewedChapter, setCurrentViewedChapter] = useState(parseInt(chapterId) || 1);
 const [errorInfo, setErrorInfo] = useState(null);
 
+// --- Reading progress ratio (0..1) shown as the thin top indicator ---
+const [progressRatio, setProgressRatio] = useState(0);
+
 const insets = useSafeAreaInsets();
 const webViewRef = useRef(null);
 const flatListRef = useRef(null);
@@ -330,6 +333,7 @@ const pendingRestoreRef = useRef(0);
 const headerYsRef = useRef({});
 const loadingNextRef = useRef(false);
 const autoScrollNextRef = useRef(false);
+const progressThrottleRef = useRef(0);
 
 const novelId = novel._id || novel.id || novel.novelId;
 const isAdmin = userInfo?.role === 'admin';
@@ -496,8 +500,8 @@ const saveSettings = async (newSettings) => {
 
 const loadFoldersAndPrefs = async () => {
     try {
-        const savedFolders = await AsyncStorage.getItem('@reader_folders_v2');
         let parsedFolders = [];
+        const savedFolders = await AsyncStorage.getItem('@reader_folders_v2');
         if (savedFolders) {
             parsedFolders = JSON.parse(savedFolders);
         } else {
@@ -793,6 +797,10 @@ const queueSaveScroll = (chNum, offset) => {
     scrollSaveTimer.current = setTimeout(() => saveScrollPosition(chNum, offset), 600);
 };
 
+const clearScrollFor = async (chNum) => {
+    try { await AsyncStorage.removeItem(scrollKeyFor(chNum)); } catch (e) {}
+};
+
 const updateProgressOnServer = async (currentChapter, chapterNum) => {
   if (!currentChapter || isOfflineMode) return;
   try {
@@ -809,6 +817,15 @@ const updateProgressOnServer = async (currentChapter, chapterNum) => {
   }
 };
 
+// Throttled progress-ratio update (avoids re-rendering at 60fps)
+const pushProgressRatio = (ratio) => {
+    const now = Date.now();
+    const clamped = Math.max(0, Math.min(1, ratio || 0));
+    if (now - progressThrottleRef.current < 200) return;
+    progressThrottleRef.current = now;
+    setProgressRatio(prev => Math.abs(prev - clamped) > 0.004 ? clamped : prev);
+};
+
 const fetchChapter = async () => {
     setLoading(true);
     setErrorInfo(null);
@@ -818,6 +835,7 @@ const fetchChapter = async () => {
     loadingNextRef.current = false;
     restoredOnceRef.current = false;
     setCurrentViewedChapter(parseInt(chapterId) || 1);
+    setProgressRatio(0);
     try {
         let chapterData = null;
 
@@ -991,11 +1009,26 @@ useEffect(() => {
 
 const openLeftDrawer = () => {
     setDrawerMode('chapters');
+    setChapterSearch('');
     Animated.parallel([
         Animated.timing(slideAnim, { toValue: 0, duration: 300, useNativeDriver: true }),
         Animated.timing(backdropAnim, { toValue: 1, duration: 300, useNativeDriver: true })
-    ]).start();
+    ]).start(() => {
+        // Auto-reveal the chapter currently being read
+        try {
+            const sorted = sortedChaptersRef.current || [];
+            const idx = sorted.findIndex(c => c.number == currentViewedChapter);
+            if (idx >= 0) {
+                setTimeout(() => {
+                    flatListRef.current?.scrollToIndex({ index: idx, viewPosition: 0.5, animated: true });
+                }, 60);
+            }
+        } catch (e) {}
+    });
 };
+
+// Ref mirror of sortedChapters so the drawer-open callback always sees fresh data
+const sortedChaptersRef = useRef([]);
 
 const openRightDrawer = (mode) => {
     if (isOfflineMode) return;
@@ -1041,6 +1074,17 @@ const sortedChapters = useMemo(() => {
     if (!isAscending) list.reverse();
     return list;
 }, [chaptersList, isAscending]);
+
+useEffect(() => { sortedChaptersRef.current = sortedChapters; }, [sortedChapters]);
+
+const filteredChapters = useMemo(() => {
+    if (!chapterSearch.trim()) return sortedChapters;
+    const q = chapterSearch.trim().toLowerCase();
+    return sortedChapters.filter(c =>
+        (c.title || '').toLowerCase().includes(q) ||
+        String(c.number).includes(q)
+    );
+}, [sortedChapters, chapterSearch]);
 
 const navigateChapter = (targetId) => {
     closeDrawers();
@@ -1109,10 +1153,6 @@ const navigateNextPrev = (offset) => {
         if (offset > 0) clearScrollFor(nextNum);
         navigation.replace('Reader', { novel, chapterId: nextNum, isOfflineMode });
     }
-};
-
-const clearScrollFor = async (chNum) => {
-    try { await AsyncStorage.removeItem(scrollKeyFor(chNum)); } catch (e) {}
 };
 
 const changeFontSize = (delta) => {
@@ -1220,7 +1260,7 @@ const buildSectionHTML = (sec, idx) => {
     const copyrightCSS = `color: ${style.color || '#888'}; opacity: ${style.opacity || 1}; text-align: ${style.alignment || 'center'}; font-weight: ${style.isBold ? 'bold' : 'normal'}; font-size: ${style.fontSize || 14}px; line-height: 1.5; padding: 15px 0; margin: 10px 0; font-family: sans-serif;`;
     const lines = (sec.content || '').split('\n').filter(line => line.trim() !== '');
     const paragraphs = lines.map(line => `<p>${processLineHTML(line)}</p>`).join('');
-    const sepHTML = idx > 0 ? `<div class="chapter-sep">◆ ◆ ◆</div>` : '';
+    const sepHTML = idx > 0 ? `<div class="chapter-sep"><span class="sep-orn">◆</span></div>` : '';
     const titleHTML = `<div class="title${idx > 0 ? ' sub-title' : ''}">${escapeHtmlText(sec.title || '')}</div>`;
     const customSep = idx === 0 && enableSeparator ? `<div class="custom-sep">${escapeHtmlText(separatorText)}</div>` : '';
     const startHTML = sec.copyrightStart ? `<div class="app-copyright" style="${copyrightCSS}">${escapeHtmlText(sec.copyrightStart)}</div><div class="chapter-divider"></div>` : '';
@@ -1230,26 +1270,44 @@ const buildSectionHTML = (sec, idx) => {
 
 // ----- Full CSS (re-injected on every settings change WITHOUT reloading the WebView,
 // which is what keeps the scroll position intact when changing colors/fonts/sizes) -----
+const isLightBg = bgColor === '#fff' || bgColor === '#ffffff';
+
 const buildReaderCSS = () => `
       * { -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; box-sizing: border-box; }
       body, html {
         margin: 0; padding: 0; background-color: ${bgColor}; color: ${textColor};
-        font-family: ${fontFamily.family}; line-height: 1.8;
+        font-family: ${fontFamily.family}; line-height: 1.9;
         -webkit-overflow-scrolling: touch; overflow-x: hidden;
         filter: brightness(${textBrightness});
       }
-      .container { padding: 25px 20px 120px 20px; width: 100%; max-width: 800px; margin: 0 auto; }
+      .container { padding: 28px 22px 140px 22px; width: 100%; max-width: 780px; margin: 0 auto; }
       .title {
-        font-size: ${fontSize + 8}px; font-weight: bold; margin-bottom: 20px;
-        color: ${bgColor === '#fff' || bgColor === '#ffffff' ? '#000' : '#fff'};
-        padding-bottom: 10px; font-family: ${fontFamily.family}; text-align: right;
+        font-size: ${fontSize + 9}px; font-weight: bold; margin-bottom: 8px;
+        color: ${isLightBg ? '#000' : '#fff'};
+        padding-bottom: 18px; font-family: ${fontFamily.family}; text-align: right;
+        line-height: 1.5; position: relative;
       }
-      .sub-title { font-size: ${fontSize + 4}px; margin-top: 35px; }
-      .chapter-sep { text-align: center; color: rgba(128,128,128,0.55); font-size: 18px; letter-spacing: 6px; margin: 45px 0 10px 0; user-select: none; }
-      .custom-sep { text-align: center; color: rgba(128,128,128,0.5); font-size: 1em; padding: 10px 0; margin: 5px 0 20px 0; letter-spacing: 2px; user-select: none; }
-      .chapter-divider { border: none; height: 1px; background-color: rgba(128,128,128,0.3); margin: 10px 0 30px 0; width: 100%; }
+      .title::after {
+        content: ''; position: absolute; bottom: 0; right: 0;
+        width: 64px; height: 3px; border-radius: 2px;
+        background: linear-gradient(to left, rgba(128,128,128,0.9), rgba(128,128,128,0.05));
+      }
+      .sub-title { font-size: ${fontSize + 5}px; margin-top: 42px; }
+      .chapter-sep { text-align: center; margin: 55px 0 14px 0; user-select: none; }
+      .sep-orn {
+        display: inline-block; color: rgba(128,128,128,0.6); font-size: 15px;
+        padding: 0 18px; position: relative; letter-spacing: 4px;
+      }
+      .sep-orn::before, .sep-orn::after {
+        content: ''; position: absolute; top: 50%; width: 44px; height: 1px;
+        background: linear-gradient(to right, transparent, rgba(128,128,128,0.4));
+      }
+      .sep-orn::before { right: 100%; }
+      .sep-orn::after { left: 100%; transform: scaleX(-1); }
+      .custom-sep { text-align: center; color: rgba(128,128,128,0.5); font-size: 0.95em; padding: 12px 0; margin: 5px 0 22px 0; letter-spacing: 2px; user-select: none; }
+      .chapter-divider { border: none; height: 1px; background-color: rgba(128,128,128,0.25); margin: 10px 0 30px 0; width: 100%; }
       .content-area { font-size: ${fontSize}px; text-align: justify; word-wrap: break-word; }
-      p { margin-bottom: 1.5em; }
+      p { margin-bottom: 1.55em; line-height: 1.9; }
 
       .cm-dialogue-text {
           color: ${enableDialogue ? dialogueColor : 'inherit'};
@@ -1283,17 +1341,18 @@ const buildReaderCSS = () => `
       ${hideCustomMarks ? '.cmark { opacity: 0; font-size: 0; }' : ''}
 
       body { user-select: none; -webkit-user-select: none; }
-      .author-section-wrapper { margin-top: 50px; margin-bottom: 20px; border-top: 1px solid #222; padding-top: 20px; }
-      .section-title { color: ${bgColor === '#fff' || bgColor === '#ffffff' ? '#000' : '#fff'}; font-size: 18px; font-weight: bold; margin-bottom: 12px; text-align: right; }
-      .author-card { border-radius: 16px; overflow: hidden; margin-top: 10px; border: 1px solid #222; position: relative; height: 140px; width: 100%; cursor: pointer; }
+      .author-section-wrapper { margin-top: 55px; margin-bottom: 22px; border-top: 1px solid rgba(128,128,128,0.2); padding-top: 22px; }
+      .section-title { color: ${isLightBg ? '#000' : '#fff'}; font-size: 17px; font-weight: bold; margin-bottom: 12px; text-align: right; }
+      .author-card { border-radius: 18px; overflow: hidden; margin-top: 10px; border: 1px solid rgba(128,128,128,0.25); position: relative; height: 148px; width: 100%; cursor: pointer; }
       .author-banner { position: absolute; width: 100%; height: 100%; background-size: cover; background-position: center; }
-      .author-overlay { position: absolute; inset: 0; background: linear-gradient(to bottom, rgba(0,0,0,0.2), rgba(0,0,0,0.8)); z-index: 1; }
+      .author-overlay { position: absolute; inset: 0; background: linear-gradient(to bottom, rgba(0,0,0,0.2), rgba(0,0,0,0.82)); z-index: 1; }
       .author-content { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 2; width: 100%; }
       .author-avatar-wrapper { width: 76px; height: 76px; border-radius: 38px; border: 3px solid #fff; background-color: #333; margin-bottom: 8px; overflow: hidden; }
       .author-avatar-img { width: 100%; height: 100%; object-fit: cover; }
       .author-name { color: #fff; font-size: 20px; font-weight: bold; text-transform: uppercase; text-shadow: 0 1px 6px rgba(0, 0, 0, 0.9); text-align: center; }
       .comments-btn-container { margin-bottom: 40px; padding: 0 5px; }
-      .comments-btn { width: 100%; background-color: ${bgColor === '#fff' || bgColor === '#ffffff' ? '#f0f0f0' : '#1a1a1a'}; border: 1px solid ${bgColor === '#fff' || bgColor === '#ffffff' ? '#ddd' : '#333'}; color: ${bgColor === '#fff' || bgColor === '#ffffff' ? '#333' : '#fff'}; padding: 15px; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+      .comments-btn { width: 100%; background-color: ${isLightBg ? '#f4f4f4' : 'rgba(255,255,255,0.07)'}; border: 1px solid ${isLightBg ? '#ddd' : 'rgba(255,255,255,0.14)'}; color: ${isLightBg ? '#333' : '#fff'}; padding: 16px; border-radius: 14px; font-size: 15px; font-weight: bold; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 10px; }
+      .end-mark { text-align: center; color: rgba(128,128,128,0.55); font-size: 14px; letter-spacing: 8px; margin: 30px 0 10px 0; user-select: none; }
 `;
 
 const generateHTML = () => {
@@ -1364,6 +1423,11 @@ const generateHTML = () => {
               }
               return cur;
           }
+          function scrollRatio(y) {
+              var doc = document.documentElement;
+              var max = doc.scrollHeight - window.innerHeight;
+              return max > 0 ? Math.min(1, y / max) : 0;
+          }
           window.__continuous = ${continuousMode ? 'true' : 'false'};
           function maybeNeedNext() {
               if (!window.__continuous) return;
@@ -1379,7 +1443,7 @@ const generateHTML = () => {
               if (now - lastSent < 250) return;
               lastSent = now;
               var y = window.scrollY || 0;
-              sendMessage(JSON.stringify({ type: 'readerScroll', offset: y, chapter: currentChapterNumber(y) }));
+              sendMessage(JSON.stringify({ type: 'readerScroll', offset: y, chapter: currentChapterNumber(y), ratio: scrollRatio(y) }));
               maybeNeedNext();
           }, true);
           document.addEventListener('click', function(e) {
@@ -1414,6 +1478,7 @@ const generateHTML = () => {
   <body>
     <div class="container" id="clickable-area">
       <div id="chapters-root">${anchorSection}</div>
+      <div class="end-mark">◆ ◆ ◆</div>
       ${publisherBanner}
       ${commentsButton}
     </div>
@@ -1466,6 +1531,7 @@ const onMessage = (event) => {
                 const chNum = parseInt(data.chapter) || currentViewedChapter;
                 setCurrentViewedChapter(prev => (parseInt(prev) === chNum ? prev : chNum));
                 queueSaveScroll(chNum, data.offset);
+                pushProgressRatio(data.ratio);
                 return;
             }
         } catch (e) {}
@@ -1486,7 +1552,7 @@ const onMessage = (event) => {
 const renderFolderItem = ({ item }) => (
     <TouchableOpacity style={styles.drawerItem} onPress={() => openFolder(item.id)}>
         <View style={{flexDirection: 'row', alignItems: 'center'}}>
-            <Ionicons name="folder" size={20} color="#4a7cc7" style={{marginLeft: 10}} />
+            <Ionicons name="folder" size={20} color="#8b95a5" style={{marginLeft: 10}} />
             <Text style={styles.drawerItemTitle}>{item.name}</Text>
         </View>
         <View style={{flexDirection: 'row', alignItems: 'center'}}>
@@ -1507,7 +1573,7 @@ const renderReplacementItem = ({ item, index }) => {
         >
             <View style={styles.replacementInfo}>
                 <Text style={[styles.replacementText, {color: '#888', fontSize: 12, marginBottom: 2}]}>{item.original}</Text>
-                <Ionicons name="arrow-down" size={12} color="#4a7cc7" style={{marginVertical: 2}} />
+                <Ionicons name="arrow-down" size={12} color="#8b95a5" style={{marginVertical: 2}} />
                 <Text style={[styles.replacementText, {fontWeight: 'bold', color: '#fff'}]}>{item.replacement}</Text>
             </View>
             <View style={styles.replacementActions}>
@@ -1528,7 +1594,7 @@ const renderCleanerItem = ({ item, index }) => {
             </View>
             <View style={styles.replacementActions}>
                 <TouchableOpacity onPress={() => handleEditCleaner(item, index)} style={styles.actionBtn}>
-                    <Ionicons name="create-outline" size={18} color="#4a7cc7" />
+                    <Ionicons name="create-outline" size={18} color="#8b95a5" />
                 </TouchableOpacity>
                 <TouchableOpacity onPress={() => handleDeleteCleaner(item)} style={styles.actionBtn}>
                     <Ionicons name="trash-outline" size={18} color="#ff4444" />
@@ -1539,15 +1605,17 @@ const renderCleanerItem = ({ item, index }) => {
 };
 
 const renderChapterItem = ({ item }) => {
+    const isActive = item.number == currentViewedChapter;
     return (
         <TouchableOpacity
-            style={[styles.drawerItem, item.number == chapterId && styles.drawerItemActive]}
+            style={[styles.chapterRow, isActive && styles.chapterRowActive]}
             onPress={() => navigateChapter(item.number)}
         >
-            <Text style={[styles.drawerItemTitle, item.number == chapterId && styles.drawerItemTextActive]}>
+            <Text style={[styles.chapterRowNum, isActive && styles.chapterRowNumActive]}>{item.number}</Text>
+            <Text style={[styles.chapterRowTitle, isActive && styles.chapterRowTitleActive]} numberOfLines={1}>
                 {item.title || `فصل ${item.number}`}
             </Text>
-            <Text style={styles.drawerItemSubtitle}>{item.number}</Text>
+            {isActive && <View style={styles.readingNowChip}><Text style={styles.readingNowText}>تقرأ الآن</Text></View>}
         </TouchableOpacity>
     );
 };
@@ -1590,6 +1658,8 @@ const handleAndroidScroll = (e) => {
     });
     setCurrentViewedChapter(prev => (prev === cur ? prev : cur));
     queueSaveScroll(cur, y);
+    const denom = contentSize.height - layoutMeasurement.height;
+    if (denom > 0) pushProgressRatio(y / denom);
     if (continuousMode && contentSize.height > 0 && y + layoutMeasurement.height >= contentSize.height - 1500) {
         fetchNextChapter();
     }
@@ -1614,16 +1684,6 @@ const handleAndroidContentSize = (w, h) => {
     }
 };
 
-
-if (loading) {
-return (
-<View style={[styles.loadingContainer, { backgroundColor: bgColor }]}>
-<ActivityIndicator size="large" color="#4a7cc7" />
-<Text style={[styles.loadingText, { color: textColor }]}>جاري التحميل…</Text>
-</View>
-);
-}
-
 const getHeaderSubtitle = () => {
     if (availableChapters) {
         const sorted = [...availableChapters].sort((a,b) => a - b);
@@ -1640,7 +1700,7 @@ const renderAndroidContent = () => (
       ref={androidListRef}
       data={androidItems}
       keyExtractor={(item) => item.key}
-      contentContainerStyle={{ paddingHorizontal: 20, paddingTop: insets.top + 60, paddingBottom: 150 }}
+      contentContainerStyle={{ paddingHorizontal: 22, paddingTop: insets.top + 60, paddingBottom: 160 }}
       showsVerticalScrollIndicator={false}
       removeClippedSubviews={true}
       onScroll={handleAndroidScroll}
@@ -1651,8 +1711,14 @@ const renderAndroidContent = () => (
           return (
             <TouchableOpacity activeOpacity={1} onPress={toggleMenu}
               onLayout={(e) => { headerYsRef.current[item.number] = e.nativeEvent.layout.y; }}>
-              {item.showSep && <Text style={{ textAlign: 'center', color: 'rgba(128,128,128,0.55)', fontSize: 18, letterSpacing: 6, marginVertical: 25 }}>◆ ◆ ◆</Text>}
-              <Text style={[styles.androidTitle, { color: textColor, fontSize: fontSize + 8, fontFamily: fontFamily.id === 'Cairo' || fontFamily.id === 'Amiri' ? fontFamily.id : undefined }]}>
+              {item.showSep && (
+                <View style={styles.androidSepRow}>
+                  <View style={styles.androidSepLine} />
+                  <Text style={{ color: 'rgba(128,128,128,0.6)', fontSize: 15, marginHorizontal: 14 }}>◆</Text>
+                  <View style={[styles.androidSepLine, {transform: [{scaleX: -1}]}]} />
+                </View>
+              )}
+              <Text style={[styles.androidTitle, { color: isLightBg ? '#000' : textColor, fontSize: fontSize + 9, fontFamily: fontFamily.id === 'Cairo' || fontFamily.id === 'Amiri' ? fontFamily.id : undefined }]}>
                 {item.title || `فصل ${item.number}`}
               </Text>
               {item.copyrightStart ? (
@@ -1676,8 +1742,8 @@ const renderAndroidContent = () => (
               fontSize: fontSize,
               color: textColor,
               fontFamily: fontFamily.id === 'Cairo' || fontFamily.id === 'Amiri' ? fontFamily.id : undefined,
-              lineHeight: fontSize * 1.8,
-              textAlign: 'right',
+              lineHeight: fontSize * 1.9,
+              textAlign: 'justify',
               marginBottom: 20,
               writingDirection: 'rtl'
             }}>
@@ -1690,7 +1756,7 @@ const renderAndroidContent = () => (
         <View style={{ marginTop: 30 }}>
           {loadingNext && (
             <View style={{ paddingVertical: 20, alignItems: 'center' }}>
-              <ActivityIndicator size="small" color="#4a7cc7" />
+              <ActivityIndicator size="small" color="#8b95a5" />
               <Text style={{ color: '#888', marginTop: 8, fontSize: 13 }}>جاري جلب الفصل التالي…</Text>
             </View>
           )}
@@ -1716,6 +1782,15 @@ const renderAndroidContent = () => (
   </View>
 );
 
+if (loading) {
+  return (
+    <View style={[styles.loadingContainer, { backgroundColor: bgColor }]}>
+      <ActivityIndicator size="large" color="#8b95a5" />
+      <Text style={[styles.loadingText, { color: textColor }]}>جاري التحميل…</Text>
+    </View>
+  );
+}
+
 // ----- Full-screen error state (retry / back instead of being stuck) -----
 if (errorInfo && !chapter && !loading) {
   return (
@@ -1737,12 +1812,19 @@ if (errorInfo && !chapter && !loading) {
 
 return (
 <View style={[styles.container, { backgroundColor: bgColor }]}>
-  <StatusBar hidden={!showMenu} barStyle={bgColor === '#fff' || bgColor === '#ffffff' ? 'dark-content' : 'light-content'} animated />
+  <StatusBar hidden={!showMenu} barStyle={isLightBg ? 'dark-content' : 'light-content'} animated />
 
-  {/* Top Bar */}
-  <Animated.View style={[styles.topBar, { opacity: fadeAnim, paddingTop: insets.top + 10, transform: [{ translateY: fadeAnim.interpolate({ inputRange: [0, 1], outputRange: [-100, 0] }) }] }]} pointerEvents={showMenu ? 'auto' : 'none'}>
-    <View style={styles.topBarContent}>
-      <TouchableOpacity onPress={() => navigation.goBack()} style={styles.iconButton}><Ionicons name="arrow-forward" size={26} color="#fff" /></TouchableOpacity>
+  {/* Thin reading-progress indicator (always visible, chrome or not) */}
+  <View style={[styles.progressTrack, { top: insets.top }]} pointerEvents="none">
+    <View style={[styles.progressFill, { width: `${Math.round(progressRatio * 100)}%` }]} />
+  </View>
+
+  {/* Top Bar — floating glass card */}
+  <Animated.View style={[styles.topBar, { opacity: fadeAnim, top: insets.top + 10, transform: [{ translateY: fadeAnim.interpolate({ inputRange: [0, 1], outputRange: [-120, 0] }) }] }]} pointerEvents={showMenu ? 'auto' : 'none'}>
+    <View style={styles.topBarCard}>
+      <TouchableOpacity onPress={() => navigation.goBack()} style={styles.iconButton}>
+        <Ionicons name="arrow-forward" size={24} color="#fff" />
+      </TouchableOpacity>
       <View style={styles.headerInfo}>
         <Text style={styles.headerTitle} numberOfLines={1}>{chapter ? chapter.title : `فصل ${chapterId}`}</Text>
         <Text style={styles.headerSubtitle}>{getHeaderSubtitle()}</Text>
@@ -1770,38 +1852,40 @@ return (
       renderAndroidContent()
   )}
 
-  {/* Bottom Bar */}
-  <Animated.View style={[styles.bottomBar, { opacity: fadeAnim, paddingBottom: Math.max(insets.bottom, 20), transform: [{ translateY: fadeAnim.interpolate({ inputRange: [0, 1], outputRange: [100, 0] }) }] }]} pointerEvents={showMenu ? 'auto' : 'none'}>
-    <View style={styles.bottomBarContent}>
+  {/* Bottom Dock — floating glass pill */}
+  <Animated.View style={[styles.bottomBar, { opacity: fadeAnim, bottom: Math.max(insets.bottom, 12) + 8, transform: [{ translateY: fadeAnim.interpolate({ inputRange: [0, 1], outputRange: [140, 0] }) }] }]} pointerEvents={showMenu ? 'auto' : 'none'}>
+    <View style={styles.dockCard}>
+      <TouchableOpacity onPress={openLeftDrawer} style={styles.dockIconBtn}>
+        <Ionicons name="list" size={22} color="#fff" />
+      </TouchableOpacity>
 
-      <View style={styles.topIconsRow}>
-          <TouchableOpacity onPress={openLeftDrawer} style={styles.circleIconBtn}>
-              <Ionicons name="list" size={24} color="#fff" />
-          </TouchableOpacity>
+      <TouchableOpacity
+          style={[styles.dockNavBtn, styles.dockNavPrev]}
+          onPress={() => navigateNextPrev(-1)}
+      >
+        <Ionicons name="chevron-forward" size={18} color="#fff" />
+        <Text style={styles.dockNavPrevText}>السابق</Text>
+      </TouchableOpacity>
 
-          <TouchableOpacity onPress={() => { setSettingsView('main'); setShowSettings(true); }} style={styles.circleIconBtn}>
-              <Ionicons name="settings-outline" size={24} color="#fff" />
-          </TouchableOpacity>
-      </View>
+      <TouchableOpacity style={styles.dockProgress} onPress={openLeftDrawer} activeOpacity={0.8}>
+        <Text style={styles.dockProgressText} numberOfLines={1}>{getHeaderSubtitle()}</Text>
+        <View style={styles.dockProgressSub}>
+          <View style={[styles.dockProgressDot, { backgroundColor: loadingNext ? '#f59e0b' : endReached ? '#4ade80' : 'rgba(255,255,255,0.35)' }]} />
+          <Text style={styles.dockProgressLabel}>{loadingNext ? 'جاري الجلب' : endReached ? 'النهاية' : `${Math.round(progressRatio * 100)}%`}</Text>
+        </View>
+      </TouchableOpacity>
 
-      <View style={styles.navigationGroup}>
-        <TouchableOpacity
-            style={[styles.navButton, styles.prevButton]}
-            onPress={() => navigateNextPrev(-1)}
-        >
-          <Ionicons name="chevron-forward" size={20} color="#fff" />
-          <Text style={styles.prevText}>السابق</Text>
-        </TouchableOpacity>
+      <TouchableOpacity
+          style={[styles.dockNavBtn, styles.dockNavNext]}
+          onPress={() => navigateNextPrev(1)}
+      >
+        <Text style={styles.dockNavNextText}>التالي</Text>
+        <Ionicons name="chevron-back" size={18} color="#000" />
+      </TouchableOpacity>
 
-        <TouchableOpacity
-            style={[styles.navButton, styles.nextButton]}
-            onPress={() => navigateNextPrev(1)}
-        >
-          <Text style={styles.nextText}>التالي</Text>
-          <Ionicons name="chevron-back" size={20} color="#000" />
-        </TouchableOpacity>
-      </View>
-
+      <TouchableOpacity onPress={() => { setSettingsTab('appearance'); setShowSettings(true); }} style={styles.dockIconBtn}>
+        <Ionicons name="settings-outline" size={22} color="#fff" />
+      </TouchableOpacity>
     </View>
   </Animated.View>
 
@@ -1810,33 +1894,55 @@ return (
       <View style={[StyleSheet.absoluteFill, { zIndex: 1000 }]}>
           <TouchableWithoutFeedback onPress={closeDrawers}><Animated.View style={[styles.drawerBackdrop, { opacity: backdropAnim }]} /></TouchableWithoutFeedback>
 
-          {/* Left Drawer (Chapters) */}
-          <Animated.View style={[styles.drawerContent, {
+          {/* Chapters Bottom Sheet */}
+          <Animated.View style={[styles.sheetContent, {
               left: 0,
               right: 0,
               bottom: 0,
-              height: BOTTOM_DRAWER_HEIGHT,
-              borderTopWidth: 1,
-              borderTopColor: '#333',
-              paddingTop: 20,
-              paddingBottom: insets.bottom + 20,
+              height: SCREEN_HEIGHT * 0.78,
+              paddingBottom: insets.bottom + 16,
               transform: [{ translateY: slideAnim }]
           }]}>
-              <View style={styles.drawerHeader}>
-                  <TouchableOpacity onPress={closeDrawers}><Ionicons name="close" size={24} color="#888" /></TouchableOpacity>
-                  <Text style={styles.drawerTitle}>الفصول ({sortedChapters.length})</Text>
-                  <TouchableOpacity onPress={toggleSort} style={styles.sortButton}><Ionicons name={isAscending ? "arrow-down" : "arrow-up"} size={18} color="#4a7cc7" /></TouchableOpacity>
+              <View style={styles.sheetHandle} />
+              <View style={styles.sheetHeader}>
+                  <View style={{ flexDirection: 'row-reverse', alignItems: 'center', gap: 10 }}>
+                      <TouchableOpacity onPress={toggleSort} style={styles.sortChip}>
+                          <Ionicons name={isAscending ? "arrow-down" : "arrow-up"} size={16} color="#fff" />
+                          <Text style={styles.sortChipText}>{isAscending ? 'الأحدث أولاً' : 'الأقدم أولاً'}</Text>
+                      </TouchableOpacity>
+                      <Text style={styles.sheetTitle}>الفصول ({filteredChapters.length})</Text>
+                  </View>
+                  <TouchableOpacity onPress={closeDrawers} style={styles.sheetClose}><Ionicons name="close" size={22} color="#888" /></TouchableOpacity>
               </View>
+
+              <View style={styles.sheetSearchWrap}>
+                  <View style={styles.searchBar}>
+                      <Ionicons name="search" size={16} color="#666" />
+                      <TextInput
+                          style={styles.searchInput}
+                          placeholder="ابحث عن فصل..."
+                          placeholderTextColor="#666"
+                          value={chapterSearch}
+                          onChangeText={setChapterSearch}
+                      />
+                      {chapterSearch.length > 0 && (
+                          <TouchableOpacity onPress={() => setChapterSearch('')}>
+                              <Ionicons name="close-circle" size={16} color="#666" />
+                          </TouchableOpacity>
+                      )}
+                  </View>
+              </View>
+
               {loadingChapters ? (
-                  <View style={{flex:1, justifyContent:'center', alignItems:'center'}}><ActivityIndicator color="#4a7cc7" /></View>
+                  <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}><ActivityIndicator color="#8b95a5" /></View>
               ) : (
-                  <FlatList ref={flatListRef} data={sortedChapters} keyExtractor={(item) => item._id || item.number.toString()} renderItem={renderChapterItem} initialNumToRender={20} contentContainerStyle={styles.drawerList} showsVerticalScrollIndicator={true} indicatorStyle="white" />
+                  <FlatList ref={flatListRef} data={filteredChapters} keyExtractor={(item, i) => (item._id || item.number || i).toString()} renderItem={renderChapterItem} initialNumToRender={20} contentContainerStyle={styles.sheetList} showsVerticalScrollIndicator={true} indicatorStyle="white" onScrollToIndexFailed={() => {}} />
               )}
           </Animated.View>
 
           {/* Right Drawer (Replacements OR Cleaner OR Copyright) */}
           {!isOfflineMode && (
-          <Animated.View style={[styles.drawerContent, { right: 0, left: width * 0.15, top: 0, bottom: 0, borderLeftWidth: 1, borderLeftColor: '#333', paddingTop: insets.top + 20, paddingBottom: insets.bottom + 20, transform: [{ translateX: slideAnimRight }] }]}>
+          <Animated.View style={[styles.drawerContent, { right: 0, left: width * 0.15, top: 0, bottom: 0, borderTopLeftRadius: 24, borderBottomLeftRadius: 24, borderLeftWidth: 1, borderLeftColor: 'rgba(255,255,255,0.08)', paddingTop: insets.top + 20, paddingBottom: insets.bottom + 20, transform: [{ translateX: slideAnimRight }] }]}>
               {drawerMode === 'replacements' && (
                   <View style={{flex: 1}}>
                       {replacementViewMode === 'folders' && (
@@ -1857,12 +1963,12 @@ return (
                       {replacementViewMode === 'list' && (
                           <View style={{flex: 1}}>
                               <View style={styles.drawerHeader}>
-                                  <View style={{flexDirection: 'row', alignItems: 'center', gap: 10}}>
+                                  <View style={{flexDirection: 'row-reverse', alignItems: 'center', gap: 10}}>
                                       <TouchableOpacity onPress={backToFolders}><Ionicons name="arrow-back" size={24} color="#fff" /></TouchableOpacity>
                                       <Text style={styles.drawerTitle}>{folders.find(f => f.id === currentFolderId)?.name || 'كلمات'}</Text>
                                   </View>
-                                  <View style={{flexDirection: 'row', alignItems: 'center', gap: 10}}>
-                                      <TouchableOpacity onPress={toggleSortOrder} style={styles.sortButton}><Ionicons name={replaceSortDesc ? "arrow-up" : "arrow-down"} size={18} color="#4a7cc7" /></TouchableOpacity>
+                                  <View style={{flexDirection: 'row-reverse', alignItems: 'center', gap: 10}}>
+                                      <TouchableOpacity onPress={toggleSortOrder} style={styles.sortButton}><Ionicons name={replaceSortDesc ? "arrow-up" : "arrow-down"} size={18} color="#8b95a5" /></TouchableOpacity>
                                       <TouchableOpacity onPress={closeDrawers}><Ionicons name="close" size={24} color="#888" /></TouchableOpacity>
                                   </View>
                               </View>
@@ -1890,7 +1996,7 @@ return (
                                     <Ionicons name="arrow-down" size={20} color="#444" />
                                     <TextInput style={styles.textInput} placeholder="الكلمة البديلة" placeholderTextColor="#666" value={newReplacement} onChangeText={setNewReplacement}/>
                                  </View>
-                                 <View style={{flexDirection: 'row', gap: 8}}>
+                                 <View style={{flexDirection: 'row-reverse', gap: 8}}>
                                      <TouchableOpacity style={[styles.addButton, {flex: 1}]} onPress={handleAddReplacement}>
                                          <Text style={styles.addButtonText}>{editingId !== null ? "تحديث" : "إضافة"}</Text>
                                          <Ionicons name={editingId !== null ? "save-outline" : "add-circle-outline"} size={20} color="#fff" />
@@ -1915,7 +2021,7 @@ return (
                       </View>
                       <View style={styles.inputContainer}>
                          <TextInput style={[styles.textInput, {height: 120, textAlignVertical: 'top'}]} placeholder="النص..." placeholderTextColor="#666" value={newCleanerWord} onChangeText={setNewCleanerWord} multiline/>
-                         <View style={{flexDirection: 'row', gap: 8, marginTop: 10}}>
+                         <View style={{flexDirection: 'row-reverse', gap: 8, marginTop: 10}}>
                              <TouchableOpacity style={[styles.addButton, {backgroundColor: '#b91c1c', flex: 1}]} onPress={handleExecuteCleaner} disabled={cleaningLoading}>
                                  {cleaningLoading ? <ActivityIndicator color="#fff" /> : <Text style={styles.addButtonText}>{cleanerEditingId !== null ? 'تحديث' : 'تنفيذ الحذف'}</Text>}
                              </TouchableOpacity>
@@ -1932,7 +2038,7 @@ return (
               {drawerMode === 'copyright' && (
                   <View style={{flex: 1}}>
                       <View style={styles.drawerHeader}>
-                          <Text style={[styles.drawerTitle, {color: '#4a7cc7'}]}>حقوق التطبيق</Text>
+                          <Text style={[styles.drawerTitle, {color: '#8b95a5'}]}>حقوق التطبيق</Text>
                           <TouchableOpacity onPress={closeDrawers}><Ionicons name="close" size={24} color="#888" /></TouchableOpacity>
                       </View>
                       <ScrollView contentContainerStyle={{padding: 15, paddingBottom: 100}} style={{flex: 1}}>
@@ -1967,7 +2073,7 @@ return (
 
                           <View style={{marginBottom: 20}}>
                               <Text style={styles.cardSectionTitle}>اللون (Hex)</Text>
-                              <View style={{flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10}}>
+                              <View style={{flexDirection: 'row-reverse', alignItems: 'center', gap: 10, marginBottom: 10}}>
                                 <View style={{width: 30, height: 30, backgroundColor: copyrightStyle.color, borderRadius: 15, borderWidth: 1, borderColor: '#fff'}} />
                                 <TextInput
                                     style={[styles.textInput, {flex: 1, textAlign: 'left'}]}
@@ -2004,7 +2110,7 @@ return (
                                       step={1}
                                       value={copyrightStyle.fontSize}
                                       onValueChange={(val) => setCopyrightStyle(prev => ({...prev, fontSize: val}))}
-                                      activeColor="#4a7cc7"
+                                      activeColor="#8b95a5"
                                   />
                                   <Text style={styles.sliderTitle}>حجم الخط</Text>
                               </View>
@@ -2017,12 +2123,12 @@ return (
                                       step={0.1}
                                       value={copyrightStyle.opacity}
                                       onValueChange={(val) => setCopyrightStyle(prev => ({...prev, opacity: val}))}
-                                      activeColor="#4a7cc7"
+                                      activeColor="#8b95a5"
                                   />
                                   <Text style={styles.sliderTitle}>الشفافية</Text>
                               </View>
 
-                              <View style={{flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 15}}>
+                              <View style={{flexDirection: 'row-reverse', justifyContent: 'space-between', alignItems: 'center', marginBottom: 15}}>
                                   <View style={{flexDirection: 'row', gap: 10}}>
                                       {['left', 'center', 'right'].map(align => (
                                           <TouchableOpacity
@@ -2030,7 +2136,7 @@ return (
                                             style={[styles.alignBtn, copyrightStyle.alignment === align && styles.alignBtnActive]}
                                             onPress={() => setCopyrightStyle(prev => ({...prev, alignment: align}))}
                                           >
-                                              <Ionicons name={`options-outline`} size={16} color={copyrightStyle.alignment === align ? '#fff' : '#666'} />
+                                            <Ionicons name={`options-outline`} size={16} color={copyrightStyle.alignment === align ? '#fff' : '#666'} />
                                           </TouchableOpacity>
                                       ))}
                                   </View>
@@ -2041,7 +2147,7 @@ return (
                                   <Switch
                                       value={copyrightStyle.isBold}
                                       onValueChange={(val) => setCopyrightStyle(prev => ({...prev, isBold: val}))}
-                                      trackColor={{ false: "#333", true: "#4a7cc7" }}
+                                      trackColor={{ false: "#333", true: "#8b95a5" }}
                                       thumbColor={"#fff"}
                                   />
                                   <Text style={styles.toggleLabel}>خط عريض (Bold)</Text>
@@ -2058,12 +2164,12 @@ return (
                               multiline
                           />
 
-                          <View style={{marginBottom: 20, borderTopWidth: 1, borderTopColor: '#333', paddingTop: 20}}>
+                          <View style={{marginBottom: 20, borderTopWidth: 1, borderTopColor: '#2a2a2a', paddingTop: 20}}>
                               <View style={styles.toggleRow}>
                                   <Switch
                                       value={enableSeparator}
                                       onValueChange={setEnableSeparator}
-                                      trackColor={{ false: "#333", true: "#4a7cc7" }}
+                                      trackColor={{ false: "#333", true: "#8b95a5" }}
                                       thumbColor={"#fff"}
                                   />
                                   <Text style={[styles.toggleLabel, {fontWeight: 'bold'}]}>تفعيل الخط الفاصل تحت العنوان</Text>
@@ -2092,7 +2198,7 @@ return (
                               multiline
                           />
 
-                          <TouchableOpacity style={[styles.addButton, {backgroundColor: '#4a7cc7'}]} onPress={handleSaveCopyrights} disabled={copyrightLoading}>
+                          <TouchableOpacity style={[styles.addButton, {backgroundColor: '#8b95a5'}]} onPress={handleSaveCopyrights} disabled={copyrightLoading}>
                              {copyrightLoading ? <ActivityIndicator color="#fff" /> : <Text style={styles.addButtonText}>حفظ الحقوق</Text>}
                           </TouchableOpacity>
                           <Text style={{color:'#666', fontSize:11, marginTop:10, textAlign:'center'}}>
@@ -2113,7 +2219,7 @@ return (
               <TextInput style={styles.modalInput} placeholder="اسم الرواية" placeholderTextColor="#666" value={newFolderName} onChangeText={setNewFolderName} textAlign="right"/>
               <View style={styles.modalButtons}>
                   <TouchableOpacity style={[styles.modalBtn, {backgroundColor: '#333'}]} onPress={() => setShowFolderModal(false)}><Text style={styles.modalBtnText}>إلغاء</Text></TouchableOpacity>
-                  <TouchableOpacity style={[styles.modalBtn, {backgroundColor: '#4a7cc7'}]} onPress={handleCreateFolder}><Text style={styles.modalBtnText}>تم</Text></TouchableOpacity>
+                  <TouchableOpacity style={[styles.modalBtn, {backgroundColor: '#fff'}]} onPress={handleCreateFolder}><Text style={[styles.modalBtnText, {color: '#000'}]}>تم</Text></TouchableOpacity>
               </View>
           </View>
       </View>
@@ -2134,7 +2240,7 @@ return (
       </View>
   </Modal>
 
-  {/* Unified Settings Modal */}
+  {/* Unified Settings Sheet — 3 tabs */}
   <Modal visible={showSettings} transparent animationType="slide" onRequestClose={() => setShowSettings(false)}>
     <View style={styles.modalOverlay}>
         <TouchableOpacity style={styles.modalBackdrop} activeOpacity={1} onPress={() => setShowSettings(false)} />
@@ -2142,78 +2248,33 @@ return (
         <View style={styles.settingsSheet}>
             <View style={styles.settingsHandle} />
 
-            {settingsView === 'main' ? (
-                <ScrollView contentContainerStyle={styles.scrollSettingsContainer}>
-                    <View style={styles.settingsHeader}>
-                        <Text style={styles.settingsTitle}>الإعدادات</Text>
-                        <TouchableOpacity onPress={() => setShowSettings(false)}><Ionicons name="close-circle" size={30} color="#555" /></TouchableOpacity>
-                    </View>
-                    <View style={styles.settingsGrid}>
-                        <TouchableOpacity style={styles.settingsCard} onPress={() => setSettingsView('appearance')}>
-                            <View style={styles.cardIcon}>
-                                <Ionicons name="text-outline" size={32} color="#fff" />
-                            </View>
-                            <Text style={styles.cardTitle}>مظهر القراءة</Text>
-                            <Text style={styles.cardSub}>الخط، الحجم، الألوان</Text>
-                        </TouchableOpacity>
+            <View style={styles.settingsHeader}>
+                <Text style={styles.settingsTitle}>إعدادات القارئ</Text>
+                <TouchableOpacity onPress={() => setShowSettings(false)}><Ionicons name="close-circle" size={28} color="#444" /></TouchableOpacity>
+            </View>
 
-                        <View style={[styles.settingsCard, { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 15 }]}>
-                            <Switch
-                                value={continuousMode}
-                                onValueChange={(val) => { setContinuousMode(val); saveSettings({ continuousMode: val }); }}
-                                trackColor={{ false: "#333", true: "#4a7cc7" }}
-                                thumbColor={"#fff"}
-                            />
-                            <View style={{ flex: 1, marginLeft: 15 }}>
-                                <Text style={styles.cardTitle}>التمرير المستمر</Text>
-                                <Text style={styles.cardSub}>جلب الفصل التالي تلقائياً لمتابعة القراءة دون توقف</Text>
-                            </View>
-                        </View>
+            {/* Segmented control */}
+            <View style={styles.segRow}>
+                {[
+                    { id: 'appearance', label: 'المظهر', icon: 'text-outline' },
+                    { id: 'format', label: 'التنسيق', icon: 'color-palette-outline' },
+                    { id: 'tools', label: 'أدوات', icon: 'construct-outline' },
+                ].map(tab => (
+                    <TouchableOpacity
+                        key={tab.id}
+                        style={[styles.segBtn, settingsTab === tab.id && styles.segBtnActive]}
+                        onPress={() => setSettingsTab(tab.id)}
+                    >
+                        <Ionicons name={tab.icon} size={15} color={settingsTab === tab.id ? '#000' : '#888'} />
+                        <Text style={[styles.segBtnText, settingsTab === tab.id && styles.segBtnTextActive]}>{tab.label}</Text>
+                    </TouchableOpacity>
+                ))}
+            </View>
 
-                        {!isOfflineMode && (
-                        <TouchableOpacity style={styles.settingsCard} onPress={() => openRightDrawer('replacements')}>
-                            <View style={[styles.cardIcon, { backgroundColor: '#4a7cc7' }]}>
-                                <Ionicons name="swap-horizontal-outline" size={32} color="#fff" />
-                            </View>
-                            <Text style={styles.cardTitle}>استبدال الكلمات</Text>
-                            <Text style={styles.cardSub}>تغيير كلمات داخل الفصل</Text>
-                        </TouchableOpacity>
-                        )}
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{paddingBottom: 60}}>
 
-                        {!isOfflineMode && isAdmin && (
-                            <>
-                                <TouchableOpacity style={[styles.settingsCard, {borderColor: '#b91c1c'}]} onPress={() => openRightDrawer('cleaner')}>
-                                    <View style={[styles.cardIcon, { backgroundColor: '#b91c1c' }]}>
-                                        <Ionicons name="trash-outline" size={32} color="#fff" />
-                                    </View>
-                                    <Text style={[styles.cardTitle, {color: '#ff4444'}]}>الحذف الشامل</Text>
-                                    <Text style={styles.cardSub}>حذف حقوق/نصوص من السيرفر</Text>
-                                </TouchableOpacity>
-
-                                <TouchableOpacity style={[styles.settingsCard, {borderColor: '#4a7cc7'}]} onPress={() => openRightDrawer('copyright')}>
-                                    <View style={[styles.cardIcon, { backgroundColor: '#1e3a8a' }]}>
-                                        <Ionicons name="information-circle-outline" size={32} color="#fff" />
-                                    </View>
-                                    <Text style={[styles.cardTitle, {color: '#4a7cc7'}]}>حقوق التطبيق</Text>
-                                    <Text style={styles.cardSub}>إضافة نص في بداية ونهاية كل فصل</Text>
-                                </TouchableOpacity>
-                            </>
-                        )}
-                    </View>
-                </ScrollView>
-            ) : (
-                // Appearance View
-                <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{paddingBottom: 50}}>
-                    <View style={styles.settingsHeader}>
-                        <View style={{flexDirection: 'row', alignItems: 'center', gap: 10}}>
-                            <TouchableOpacity onPress={() => setSettingsView('main')} style={{padding: 5}}>
-                                <Ionicons name="arrow-back" size={24} color="#fff" />
-                            </TouchableOpacity>
-                            <Text style={styles.settingsTitle}>مظهر القراءة</Text>
-                        </View>
-                        <TouchableOpacity onPress={() => setShowSettings(false)}><Ionicons name="close-circle" size={30} color="#555" /></TouchableOpacity>
-                    </View>
-
+            {settingsTab === 'appearance' && (
+                <>
                     {/* Font Section */}
                     <View style={styles.designCard}>
                         <Text style={styles.cardSectionTitle}>نوع الخط</Text>
@@ -2235,6 +2296,14 @@ return (
                         <Text style={styles.cardSectionTitle}>حجم الخط</Text>
                         <View style={styles.sizeControlRow}>
                             <TouchableOpacity onPress={() => changeFontSize(-2)} style={styles.sizeBtn}><Ionicons name="remove" size={20} color="#fff" /></TouchableOpacity>
+                            <CustomSlider
+                                minimumValue={14}
+                                maximumValue={32}
+                                step={2}
+                                value={fontSize}
+                                onValueChange={(val) => { setFontSize(val); saveSettings({ fontSize: val }); }}
+                                activeColor="#8b95a5"
+                            />
                             <Text style={styles.sizeValue}>{fontSize}</Text>
                             <TouchableOpacity onPress={() => changeFontSize(2)} style={styles.sizeBtn}><Ionicons name="add" size={20} color="#fff" /></TouchableOpacity>
                         </View>
@@ -2243,7 +2312,7 @@ return (
                     {/* Background Color Section */}
                     <View style={styles.designCard}>
                         <Text style={styles.cardSectionTitle}>لون الخلفية</Text>
-                        <View style={{flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10}}>
+                        <View style={{flexDirection: 'row-reverse', alignItems: 'center', gap: 10, marginBottom: 10}}>
                             <View style={{width: 30, height: 30, backgroundColor: bgColor, borderRadius: 15, borderWidth: 1, borderColor: '#fff'}} />
                             <TextInput
                                 style={[styles.textInput, {flex: 1, textAlign: 'left'}]}
@@ -2269,7 +2338,7 @@ return (
                     {/* Text Color Section */}
                     <View style={styles.designCard}>
                         <Text style={styles.cardSectionTitle}>لون النص</Text>
-                        <View style={{flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10}}>
+                        <View style={{flexDirection: 'row-reverse', alignItems: 'center', gap: 10, marginBottom: 10}}>
                             <View style={{width: 30, height: 30, backgroundColor: textColor, borderRadius: 15, borderWidth: 1, borderColor: '#fff'}} />
                             <TextInput
                                 style={[styles.textInput, {flex: 1, textAlign: 'left'}]}
@@ -2281,7 +2350,7 @@ return (
                         </View>
                         <ScrollView horizontal showsHorizontalScrollIndicator={false}>
                             <View style={styles.colorPalette}>
-                                {ADVANCED_COLORS.filter(c => c.color !== '#000000' || true).map((c) => (
+                                {ADVANCED_COLORS.map((c) => (
                                     <TouchableOpacity
                                         key={c.color}
                                         style={[styles.paletteCircle, {backgroundColor: c.color}, textColor === c.color && styles.paletteCircleActive]}
@@ -2303,14 +2372,18 @@ return (
                                 step={0.05}
                                 value={textBrightness}
                                 onValueChange={(val) => { setTextBrightness(val); saveSettings({ textBrightness: val }); }}
-                                activeColor="#4a7cc7"
+                                activeColor="#8b95a5"
                             />
                             <Text style={styles.sliderTitle}>التعتيم</Text>
                         </View>
                     </View>
+                </>
+            )}
 
+            {settingsTab === 'format' && (
+                <>
                     {/* DIALOGUE FORMATTING CARD */}
-                    <View style={[styles.advancedCard, !enableDialogue && {opacity: 0.8}]}>
+                    <View style={[styles.advancedCard, !enableDialogue && {opacity: 0.85}]}>
                         <View style={styles.advancedHeader}>
                             <Switch
                                 value={enableDialogue}
@@ -2318,8 +2391,8 @@ return (
                                 trackColor={{ false: "#333", true: "#4ade80" }}
                                 thumbColor={"#fff"}
                             />
-                            <View style={{height: 1, flex: 1, backgroundColor: '#333', marginHorizontal: 15}} />
-                            <Text style={styles.advancedTitle}>تنسيق الحوار</Text>
+                            <View style={{height: 1, flex: 1, backgroundColor: '#2a2a2a', marginHorizontal: 15}} />
+                            <Text style={[styles.advancedTitle, {color: '#4ade80'}]}>تنسيق الحوار</Text>
                         </View>
 
                         {enableDialogue && (
@@ -2331,7 +2404,7 @@ return (
                                             key={style.id}
                                             style={[
                                                 styles.previewBox,
-                                                selectedQuoteStyle === style.id && {backgroundColor: '#1a4030', borderColor: '#4ade80'}
+                                                selectedQuoteStyle === style.id && {backgroundColor: '#12271c', borderColor: '#4ade80'}
                                             ]}
                                             onPress={() => { setSelectedQuoteStyle(style.id); saveSettings({ selectedQuoteStyle: style.id }); }}
                                         >
@@ -2381,7 +2454,7 @@ return (
                     </View>
 
                     {/* MARKDOWN FORMATTING CARD */}
-                    <View style={[styles.advancedCard, !enableMarkdown && {opacity: 0.8}]}>
+                    <View style={[styles.advancedCard, !enableMarkdown && {opacity: 0.85}]}>
                         <View style={styles.advancedHeader}>
                             <Switch
                                 value={enableMarkdown}
@@ -2389,8 +2462,8 @@ return (
                                 trackColor={{ false: "#333", true: "#fff" }}
                                 thumbColor={"#fff"}
                             />
-                            <View style={{height: 1, flex: 1, backgroundColor: '#333', marginHorizontal: 15}} />
-                            <Text style={styles.advancedTitle}>الخط العريض (BOLD)</Text>
+                            <View style={{height: 1, flex: 1, backgroundColor: '#2a2a2a', marginHorizontal: 15}} />
+                            <Text style={[styles.advancedTitle, {color: '#fff'}]}>الخط العريض (BOLD)</Text>
                         </View>
 
                         {enableMarkdown && (
@@ -2402,7 +2475,7 @@ return (
                                             key={style.id}
                                             style={[
                                                 styles.previewBox,
-                                                selectedMarkdownStyle === style.id && {backgroundColor: '#333', borderColor: '#fff'}
+                                                selectedMarkdownStyle === style.id && {backgroundColor: '#2a2a2a', borderColor: '#fff'}
                                             ]}
                                             onPress={() => { setSelectedMarkdownStyle(style.id); saveSettings({ selectedMarkdownStyle: style.id }); }}
                                         >
@@ -2414,6 +2487,17 @@ return (
                                     ))}
                                 </View>
 
+                                <Text style={styles.cardSectionTitle}>اللون</Text>
+                                <View style={styles.colorPalette}>
+                                    {ADVANCED_COLORS.map((c) => (
+                                        <TouchableOpacity
+                                            key={c.color}
+                                            style={[styles.paletteCircle, {backgroundColor: c.color}, markdownColor === c.color && styles.paletteCircleActive]}
+                                            onPress={() => { setMarkdownColor(c.color); saveSettings({ markdownColor: c.color }); }}
+                                        />
+                                    ))}
+                                </View>
+
                                 <View style={styles.sliderRow}>
                                     <Text style={styles.sliderLabel}>{markdownSize}%</Text>
                                     <CustomSlider
@@ -2422,7 +2506,7 @@ return (
                                         step={5}
                                         value={markdownSize}
                                         onValueChange={(val) => { setMarkdownSize(val); saveSettings({ markdownSize: val }); }}
-                                        activeColor="#fff"
+                                        activeColor="#8b95a5"
                                     />
                                     <Text style={styles.sliderTitle}>حجم الخط العريض</Text>
                                 </View>
@@ -2440,8 +2524,8 @@ return (
                         )}
                     </View>
 
-                    {/* NEW: BRACKET FORMATTING CARD */}
-                    <View style={[styles.advancedCard, !enableBracket && {opacity: 0.8}]}>
+                    {/* BRACKET FORMATTING CARD */}
+                    <View style={[styles.advancedCard, !enableBracket && {opacity: 0.85}]}>
                         <View style={styles.advancedHeader}>
                             <Switch
                                 value={enableBracket}
@@ -2449,7 +2533,7 @@ return (
                                 trackColor={{ false: "#333", true: "#3b82f6" }}
                                 thumbColor={"#fff"}
                             />
-                            <View style={{height: 1, flex: 1, backgroundColor: '#333', marginHorizontal: 15}} />
+                            <View style={{height: 1, flex: 1, backgroundColor: '#2a2a2a', marginHorizontal: 15}} />
                             <Text style={[styles.advancedTitle, {color: '#3b82f6'}]}>الأقواس المربعة [ ]</Text>
                         </View>
 
@@ -2462,7 +2546,7 @@ return (
                                             key={style.id}
                                             style={[
                                                 styles.previewBox,
-                                                selectedBracketStyle === style.id && {backgroundColor: '#1a2a40', borderColor: '#3b82f6'}
+                                                selectedBracketStyle === style.id && {backgroundColor: '#16202e', borderColor: '#3b82f6'}
                                             ]}
                                             onPress={() => { setSelectedBracketStyle(style.id); saveSettings({ selectedBracketStyle: style.id }); }}
                                         >
@@ -2511,8 +2595,8 @@ return (
                         )}
                     </View>
 
-                    {/* NEW: CUSTOM FORMATTING CARD */}
-                    <View style={[styles.advancedCard, !enableCustom && {opacity: 0.8}]}>
+                    {/* CUSTOM FORMATTING CARD */}
+                    <View style={[styles.advancedCard, !enableCustom && {opacity: 0.85}]}>
                         <View style={styles.advancedHeader}>
                             <Switch
                                 value={enableCustom}
@@ -2520,7 +2604,7 @@ return (
                                 trackColor={{ false: "#333", true: "#f97316" }}
                                 thumbColor={"#fff"}
                             />
-                            <View style={{height: 1, flex: 1, backgroundColor: '#333', marginHorizontal: 15}} />
+                            <View style={{height: 1, flex: 1, backgroundColor: '#2a2a2a', marginHorizontal: 15}} />
                             <Text style={[styles.advancedTitle, {color: '#f97316'}]}>تنسيق مخصص</Text>
                         </View>
 
@@ -2581,10 +2665,73 @@ return (
                             </>
                         )}
                     </View>
-
-                    <View style={{height: 50}} />
-                </ScrollView>
+                </>
             )}
+
+            {settingsTab === 'tools' && (
+                <>
+                    {/* Continuous scroll */}
+                    <View style={styles.designCard}>
+                        <View style={styles.toggleRow}>
+                            <Switch
+                                value={continuousMode}
+                                onValueChange={(val) => { setContinuousMode(val); saveSettings({ continuousMode: val }); if (Platform.OS !== 'android') { webViewRef.current?.injectJavaScript(`window.__continuous=${val ? 'true' : 'false'}; true;`); } }}
+                                trackColor={{ false: "#333", true: "#8b95a5" }}
+                                thumbColor={"#fff"}
+                            />
+                            <View style={{flex: 1}}>
+                                <Text style={[styles.toggleLabel, {fontWeight: 'bold', fontSize: 14, color: '#fff'}]}>التمرير المستمر</Text>
+                                <Text style={{color: '#666', fontSize: 11, marginTop: 3, textAlign: 'right'}}>جلب الفصل التالي تلقائياً لمتابعة القراءة دون توقف</Text>
+                            </View>
+                        </View>
+                    </View>
+
+                    {/* Replacements tool */}
+                    <TouchableOpacity style={styles.toolCard} onPress={() => openRightDrawer('replacements')}>
+                        <View style={[styles.toolIcon, {backgroundColor: 'rgba(139,149,165,0.12)'}]}>
+                            <Ionicons name="swap-horizontal" size={22} color="#8b95a5" />
+                        </View>
+                        <View style={{flex: 1}}>
+                            <Text style={styles.toolCardTitle}>استبدال الكلمات</Text>
+                            <Text style={styles.toolCardSub}>تغيير كلمات داخل الفصل عبر مجلدات</Text>
+                        </View>
+                        <Ionicons name="chevron-back" size={18} color="#555" />
+                    </TouchableOpacity>
+
+                    {/* Admin tools */}
+                    {isAdmin && (
+                        <>
+                            <TouchableOpacity style={[styles.toolCard, {borderColor: 'rgba(255,68,68,0.35)'}]} onPress={() => openRightDrawer('cleaner')}>
+                                <View style={[styles.toolIcon, {backgroundColor: 'rgba(255,68,68,0.1)'}]}>
+                                    <Ionicons name="trash-outline" size={22} color="#ff4444" />
+                                </View>
+                                <View style={{flex: 1}}>
+                                    <Text style={[styles.toolCardTitle, {color: '#ff4444'}]}>الحذف الشامل</Text>
+                                    <Text style={styles.toolCardSub}>حذف حقوق/نصوص من السيرفر</Text>
+                                </View>
+                                <Ionicons name="chevron-back" size={18} color="#555" />
+                            </TouchableOpacity>
+
+                            <TouchableOpacity style={[styles.toolCard, {borderColor: 'rgba(139,149,165,0.4)'}]} onPress={() => openRightDrawer('copyright')}>
+                                <View style={[styles.toolIcon, {backgroundColor: 'rgba(139,149,165,0.12)'}]}>
+                                    <Ionicons name="shield-checkmark-outline" size={22} color="#8b95a5" />
+                                </View>
+                                <View style={{flex: 1}}>
+                                    <Text style={styles.toolCardTitle}>حقوق التطبيق</Text>
+                                    <Text style={styles.toolCardSub}>إضافة نص في بداية ونهاية كل فصل</Text>
+                                </View>
+                                <Ionicons name="chevron-back" size={18} color="#555" />
+                            </TouchableOpacity>
+                        </>
+                    )}
+
+                    <Text style={{color: '#444', fontSize: 11, textAlign: 'center', marginTop: 20, lineHeight: 18}}>
+                        تُحفظ إعدادات القارئ تلقائياً على جهازك
+                    </Text>
+                </>
+            )}
+
+            </ScrollView>
         </View>
     </View>
   </Modal>
@@ -2596,133 +2743,200 @@ const styles = StyleSheet.create({
 container: { flex: 1 },
 loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
 loadingText: { marginTop: 15, fontSize: 16 },
-topBar: { position: 'absolute', top: 0, left: 0, right: 0, backgroundColor: 'rgba(15,15,15,0.97)', zIndex: 10, borderBottomWidth: 1, borderBottomColor: '#333' },
-topBarContent: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 15, paddingVertical: 12 },
-iconButton: { padding: 8, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.1)' },
-headerInfo: { flex: 1, alignItems: 'flex-end', marginRight: 15 },
-headerTitle: { color: '#fff', fontWeight: 'bold', fontSize: 17 },
-headerSubtitle: { color: '#999', fontSize: 13 },
-bottomBar: { position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: 'rgba(15,15,15,0.97)', zIndex: 10 },
-bottomBarContent: { flexDirection: 'column', paddingHorizontal: 20, paddingTop: 15, gap: 15 },
-topIconsRow: { flexDirection: 'row', justifyContent: 'space-between', width: '100%' },
-circleIconBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.1)', alignItems: 'center', justifyContent: 'center' },
-navigationGroup: { flexDirection: 'row', justifyContent: 'space-between', width: '100%', gap: 15 },
-navButton: { flex: 1, flexDirection: 'row', alignItems: 'center', paddingVertical: 12, paddingHorizontal: 20, borderRadius: 12, gap: 5, justifyContent: 'center' },
-prevButton: { backgroundColor: '#1a1a1a' },
-nextButton: { backgroundColor: '#fff' },
-prevText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
-nextText: { color: '#000', fontWeight: 'bold', fontSize: 16 },
-modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end', alignItems: 'center' },
-modalBackdrop: { ...StyleSheet.absoluteFillObject },
-settingsSheet: { backgroundColor: '#000', borderTopLeftRadius: 25, borderTopRightRadius: 25, paddingHorizontal: 20, width: '100%', minHeight: 500, maxHeight: '90%' },
-settingsHandle: { width: 40, height: 5, backgroundColor: '#333', borderRadius: 3, alignSelf: 'center', marginVertical: 12 },
-settingsHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
-settingsTitle: { color: '#fff', fontSize: 20, fontWeight: 'bold' },
-settingsGrid: { gap: 15 },
-settingsCard: { flexDirection: 'column', alignItems: 'center', backgroundColor: '#161616', padding: 20, borderRadius: 16, borderWidth: 1, borderColor: '#333' },
-cardIcon: { width: 60, height: 60, borderRadius: 30, backgroundColor: '#333', alignItems: 'center', justifyContent: 'center', marginBottom: 12 },
-cardTitle: { color: '#fff', fontSize: 16, fontWeight: 'bold', marginBottom: 4 },
-cardSub: { color: '#888', fontSize: 12 },
-settingSection: { marginBottom: 20 },
-settingLabel: { color: '#888', fontSize: 13, marginBottom: 12, textAlign: 'right' },
-settingRow: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 30 },
-fontSizeBtn: { backgroundColor: '#333', width: 45, height: 45, borderRadius: 22.5, alignItems: 'center', justifyContent: 'center' },
-fontSizeDisplay: { color: '#fff', fontSize: 22, fontWeight: 'bold', minWidth: 40, textAlign: 'center' },
-fontScroll: { flexDirection: 'row-reverse', paddingVertical: 5 },
-fontOptionBtn: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 12, backgroundColor: '#262626', marginLeft: 10, borderWidth: 1, borderColor: '#333' },
-fontOptionBtnActive: { backgroundColor: '#4a7cc7', borderColor: '#4a7cc7' },
-fontOptionText: { color: '#aaa', fontSize: 14 },
-fontOptionTextActive: { color: '#fff', fontWeight: 'bold' },
-themeRow: { flexDirection: 'row', justifyContent: 'space-around' },
-themeContainer: { alignItems: 'center', gap: 8 },
-themeOption: { width: 50, height: 50, borderRadius: 25 },
-themeName: { color: '#888', fontSize: 12 },
+
+// --- Reading progress indicator ---
+progressTrack: {
+    position: 'absolute', left: 0, right: 0, height: 3, zIndex: 50,
+    backgroundColor: 'rgba(128,128,128,0.15)'
+},
+progressFill: { height: '100%', backgroundColor: 'rgba(255,255,255,0.85)', borderRadius: 2 },
+
+// --- Floating top bar ---
+topBar: { position: 'absolute', left: 12, right: 12, zIndex: 200 },
+topBarCard: {
+    flexDirection: 'row-reverse', alignItems: 'center',
+    backgroundColor: 'rgba(18,18,18,0.94)',
+    borderRadius: 18, borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)',
+    paddingHorizontal: 14, paddingVertical: 10,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.35, shadowRadius: 12, elevation: 12
+},
+iconButton: { padding: 8, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.08)' },
+headerInfo: { flex: 1, alignItems: 'flex-end', marginHorizontal: 12 },
+headerTitle: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
+headerSubtitle: { color: '#999', fontSize: 12, marginTop: 2 },
+
+// --- Floating bottom dock ---
+bottomBar: { position: 'absolute', left: 12, right: 12, zIndex: 200 },
+dockCard: {
+    flexDirection: 'row-reverse', alignItems: 'center', gap: 8,
+    backgroundColor: 'rgba(18,18,18,0.94)',
+    borderRadius: 24, borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)',
+    padding: 8,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.4, shadowRadius: 14, elevation: 14
+},
+dockIconBtn: { width: 44, height: 44, borderRadius: 16, backgroundColor: 'rgba(255,255,255,0.08)', alignItems: 'center', justifyContent: 'center' },
+dockNavBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 3, paddingVertical: 10, paddingHorizontal: 10, borderRadius: 16 },
+dockNavPrev: { backgroundColor: 'rgba(255,255,255,0.08)' },
+dockNavNext: { backgroundColor: '#fff' },
+dockNavPrevText: { color: '#fff', fontWeight: 'bold', fontSize: 13 },
+dockNavNextText: { color: '#000', fontWeight: 'bold', fontSize: 13 },
+dockProgress: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 16, paddingVertical: 5, paddingHorizontal: 8, borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)' },
+dockProgressText: { color: '#fff', fontSize: 12, fontWeight: 'bold' },
+dockProgressSub: { flexDirection: 'row-reverse', alignItems: 'center', gap: 4, marginTop: 2 },
+dockProgressDot: { width: 5, height: 5, borderRadius: 3 },
+dockProgressLabel: { color: '#888', fontSize: 9 },
+
+// --- Chapters bottom sheet ---
+sheetContent: {
+    position: 'absolute',
+    backgroundColor: '#121212',
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.1)',
+    shadowColor: '#000', shadowOffset: { width: 0, height: -8 }, shadowOpacity: 0.5, shadowRadius: 16, elevation: 24
+},
+sheetHandle: { width: 44, height: 5, borderRadius: 3, backgroundColor: '#333', alignSelf: 'center', marginTop: 10, marginBottom: 4 },
+sheetHeader: { flexDirection: 'row-reverse', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 18, paddingVertical: 10 },
+sheetTitle: { color: '#fff', fontSize: 17, fontWeight: 'bold' },
+sheetClose: { padding: 6, backgroundColor: 'rgba(255,255,255,0.06)', borderRadius: 12 },
+sortChip: { flexDirection: 'row-reverse', alignItems: 'center', gap: 5, paddingHorizontal: 10, paddingVertical: 6, backgroundColor: 'rgba(255,255,255,0.06)', borderRadius: 12 },
+sortChipText: { color: '#ccc', fontSize: 11 },
+sheetSearchWrap: { paddingHorizontal: 16, paddingBottom: 10 },
+chapterRow: {
+    flexDirection: 'row-reverse', alignItems: 'center', gap: 12,
+    paddingVertical: 12, paddingHorizontal: 12, marginHorizontal: 10, marginBottom: 6,
+    borderRadius: 14, borderWidth: 1, borderColor: 'transparent', backgroundColor: 'rgba(255,255,255,0.03)'
+},
+chapterRowActive: {
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderColor: 'rgba(255,255,255,0.35)'
+},
+chapterRowNum: { color: '#666', fontSize: 13, fontWeight: 'bold', minWidth: 34, textAlign: 'center', backgroundColor: 'rgba(255,255,255,0.05)', paddingVertical: 4, borderRadius: 8, overflow: 'hidden' },
+chapterRowNumActive: { color: '#000', backgroundColor: '#fff' },
+chapterRowTitle: { color: '#ccc', fontSize: 14, textAlign: 'right', flex: 1 },
+chapterRowTitleActive: { color: '#fff', fontWeight: 'bold' },
+readingNowChip: { backgroundColor: '#fff', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 },
+readingNowText: { color: '#000', fontSize: 9, fontWeight: 'bold' },
+sheetList: { paddingBottom: 20 },
+
+// --- Right drawer ---
 drawerBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.7)' },
-drawerContent: { position: 'absolute', backgroundColor: '#161616', shadowColor: '#000', shadowOffset: { width: 5, height: 0 }, shadowOpacity: 0.5, shadowRadius: 10, elevation: 20 },
-drawerHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 15, paddingBottom: 15, borderBottomWidth: 1, borderBottomColor: '#2a2a2a', marginBottom: 5 },
+drawerContent: {
+    position: 'absolute', backgroundColor: '#121212',
+    shadowColor: '#000', shadowOffset: { width: -6, height: 0 }, shadowOpacity: 0.5, shadowRadius: 14, elevation: 24
+},
+drawerHeader: { flexDirection: 'row-reverse', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 15, paddingBottom: 15, borderBottomWidth: 1, borderBottomColor: '#242424', marginBottom: 5 },
 drawerTitle: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
-sortButton: { padding: 5, backgroundColor: 'rgba(74, 124, 199, 0.1)', borderRadius: 8 },
+sortButton: { padding: 5, backgroundColor: 'rgba(139, 149, 165, 0.12)', borderRadius: 8 },
 drawerList: { paddingHorizontal: 10 },
 drawerItem: { flexDirection: 'row-reverse', alignItems: 'center', paddingVertical: 14, paddingHorizontal: 10, borderBottomWidth: 1, borderBottomColor: '#222', justifyContent: 'space-between' },
-drawerItemActive: { backgroundColor: 'rgba(74, 124, 199, 0.15)', borderRadius: 8, borderBottomColor: 'transparent', borderWidth: 1, borderColor: 'rgba(74, 124, 199, 0.3)' },
 drawerItemTitle: { color: '#ccc', fontSize: 14, textAlign: 'right', marginBottom: 2 },
-drawerItemTextActive: { color: '#4a7cc7', fontWeight: 'bold' },
-drawerItemSubtitle: { color: '#666', fontSize: 11, textAlign: 'right' },
+
 commentsModalContainer: { flex: 1, justifyContent: 'flex-end' },
 commentsSheet: { height: '80%', backgroundColor: '#0a0a0a', borderTopLeftRadius: 20, borderTopRightRadius: 20, overflow: 'hidden' },
 commentsHandle: { width: 40, height: 5, backgroundColor: '#333', borderRadius: 3, alignSelf: 'center', marginTop: 10 },
-commentsHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 15, borderBottomWidth: 1, borderColor: '#222' },
+commentsHeader: { flexDirection: 'row-reverse', justifyContent: 'space-between', alignItems: 'center', padding: 15, borderBottomWidth: 1, borderColor: '#222' },
 commentsTitle: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
+
+// --- Android content ---
 androidTitle: { fontWeight: 'bold', textAlign: 'center', marginBottom: 30, borderBottomWidth: 1, borderBottomColor: 'rgba(128,128,128,0.3)', paddingBottom: 15 },
-androidAuthorCard: { backgroundColor: '#111', padding: 20, borderRadius: 12, marginBottom: 20, alignItems: 'center', borderWidth: 1, borderColor: '#333' },
-androidCommentBtn: { padding: 15, borderRadius: 8, borderWidth: 1, alignItems: 'center', marginBottom: 50 },
-inputContainer: { padding: 15, borderBottomWidth: 1, borderBottomColor: '#333', marginBottom: 10 },
+androidSepRow: { flexDirection: 'row-reverse', alignItems: 'center', justifyContent: 'center', marginVertical: 28 },
+androidSepLine: { width: 56, height: 1, backgroundColor: 'rgba(128,128,128,0.4)' },
+androidAuthorCard: { backgroundColor: '#141414', padding: 20, borderRadius: 14, marginBottom: 20, alignItems: 'center', borderWidth: 1, borderColor: '#2a2a2a' },
+androidCommentBtn: { padding: 15, borderRadius: 12, borderWidth: 1, alignItems: 'center', marginBottom: 50 },
+
+// --- Shared inputs & lists ---
+inputContainer: { padding: 15, borderBottomWidth: 1, borderBottomColor: '#242424', marginBottom: 10 },
 inputRow: { flexDirection: 'column', gap: 10, marginBottom: 15 },
-textInput: { backgroundColor: '#222', color: '#fff', borderRadius: 8, padding: 12, textAlign: 'right', fontSize: 14, borderWidth: 1, borderColor: '#333' },
-addButton: { backgroundColor: '#4a7cc7', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 12, borderRadius: 8, gap: 8 },
-addButtonText: { color: '#fff', fontWeight: 'bold' },
+textInput: { backgroundColor: '#1d1d1d', color: '#fff', borderRadius: 10, padding: 12, textAlign: 'right', fontSize: 14, borderWidth: 1, borderColor: '#2e2e2e' },
+addButton: { backgroundColor: '#fff', flexDirection: 'row-reverse', alignItems: 'center', justifyContent: 'center', padding: 12, borderRadius: 10, gap: 8 },
+addButtonText: { color: '#000', fontWeight: 'bold' },
 listLabel: { color: '#666', fontSize: 12, textAlign: 'right', marginRight: 15, marginBottom: 10 },
-replacementItem: { backgroundColor: '#1a1a1a', borderRadius: 8, padding: 12, marginBottom: 8, flexDirection: 'row-reverse', alignItems: 'center', justifyContent: 'space-between', borderWidth: 1, borderColor: '#333' },
-replacementItemEditing: { borderColor: '#4a7cc7', backgroundColor: '#1a2a3a' },
+replacementItem: { backgroundColor: '#181818', borderRadius: 10, padding: 12, marginBottom: 8, flexDirection: 'row-reverse', alignItems: 'center', justifyContent: 'space-between', borderWidth: 1, borderColor: '#2a2a2a' },
+replacementItemEditing: { borderColor: '#8b95a5', backgroundColor: '#1d2025' },
 replacementInfo: { flex: 1, alignItems: 'flex-end' },
 replacementText: { color: '#ddd', fontSize: 14, textAlign: 'right' },
-replacementActions: { flexDirection: 'column', gap: 8, paddingRight: 10, borderRightWidth: 1, borderRightColor: '#333' },
+replacementActions: { flexDirection: 'column', gap: 8, paddingRight: 10, borderRightWidth: 1, borderRightColor: '#2a2a2a' },
 actionBtn: { padding: 5 },
-emptyText: { color: '#555', textAlign: 'center', marginTop: 50, fontSize: 14 },
-alertBox: { backgroundColor: 'rgba(255, 68, 68, 0.1)', borderColor: '#ff4444', borderWidth: 1, borderRadius: 8, padding: 10, flexDirection: 'row-reverse', gap: 10, margin: 15, alignItems: 'center' },
-alertText: { color: '#ff4444', fontSize: 12, flex: 1, textAlign: 'right' },
-modalContent: { width: '80%', backgroundColor: '#1a1a1a', borderRadius: 12, padding: 20, alignItems: 'center', borderWidth: 1, borderColor: '#333' },
+
+// --- Folder modal ---
+modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end', alignItems: 'center' },
+modalBackdrop: { ...StyleSheet.absoluteFillObject },
+modalContent: { width: '80%', marginBottom: '30%', backgroundColor: '#181818', borderRadius: 16, padding: 20, alignItems: 'center', borderWidth: 1, borderColor: '#2e2e2e' },
 modalTitle: { color: '#fff', fontSize: 18, fontWeight: 'bold', marginBottom: 15 },
-modalInput: { width: '100%', backgroundColor: '#222', color: '#fff', borderRadius: 8, padding: 12, textAlign: 'right', marginBottom: 20, borderWidth: 1, borderColor: '#333' },
+modalInput: { width: '100%', backgroundColor: '#1d1d1d', color: '#fff', borderRadius: 10, padding: 12, textAlign: 'right', marginBottom: 20, borderWidth: 1, borderColor: '#2e2e2e' },
 modalButtons: { flexDirection: 'row', gap: 10, width: '100%' },
-modalBtn: { flex: 1, padding: 12, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+modalBtn: { flex: 1, padding: 12, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
 modalBtnText: { color: '#fff', fontWeight: 'bold' },
-searchBar: { flexDirection: 'row-reverse', alignItems: 'center', backgroundColor: '#222', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 8, gap: 5, borderWidth: 1, borderColor: '#333' },
+
+searchBar: { flexDirection: 'row-reverse', alignItems: 'center', backgroundColor: '#1d1d1d', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 9, gap: 6, borderWidth: 1, borderColor: '#2e2e2e' },
 searchInput: { flex: 1, color: '#fff', textAlign: 'right', fontSize: 14 },
 
-// --- REDESIGNED SETTINGS STYLES ---
-designCard: { backgroundColor: '#111', borderRadius: 16, padding: 15, marginBottom: 15, borderWidth: 1, borderColor: '#222' },
+// --- Settings sheet ---
+settingsSheet: {
+    backgroundColor: '#101010', borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.09)', borderBottomWidth: 0,
+    paddingHorizontal: 20, width: '100%', minHeight: 500, maxHeight: '90%', paddingBottom: 20
+},
+settingsHandle: { width: 44, height: 5, backgroundColor: '#333', borderRadius: 3, alignSelf: 'center', marginTop: 10, marginBottom: 8 },
+settingsHeader: { flexDirection: 'row-reverse', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+settingsTitle: { color: '#fff', fontSize: 19, fontWeight: 'bold' },
+segRow: { flexDirection: 'row-reverse', backgroundColor: '#1a1a1a', borderRadius: 14, padding: 4, marginBottom: 16, gap: 4 },
+segBtn: { flex: 1, flexDirection: 'row-reverse', alignItems: 'center', justifyContent: 'center', gap: 5, paddingVertical: 9, borderRadius: 11 },
+segBtnActive: { backgroundColor: '#fff' },
+segBtnText: { color: '#888', fontSize: 13, fontWeight: 'bold' },
+segBtnTextActive: { color: '#000' },
+
+// --- Appearance cards ---
+designCard: { backgroundColor: '#161616', borderRadius: 16, padding: 15, marginBottom: 14, borderWidth: 1, borderColor: '#242424' },
 cardSectionTitle: { color: '#888', fontSize: 13, marginBottom: 12, textAlign: 'right', fontWeight: '600', letterSpacing: 0.5 },
 fontList: { flexDirection: 'row-reverse', paddingVertical: 5 },
-fontPill: { paddingHorizontal: 16, paddingVertical: 10, borderRadius: 20, backgroundColor: '#1a1a1a', marginLeft: 10, borderWidth: 1, borderColor: '#333', minWidth: 80, alignItems: 'center' },
-fontPillActive: { backgroundColor: '#4a7cc7', borderColor: '#4a7cc7' },
+fontPill: { paddingHorizontal: 16, paddingVertical: 10, borderRadius: 20, backgroundColor: '#1c1c1c', marginLeft: 10, borderWidth: 1, borderColor: '#2e2e2e', minWidth: 80, alignItems: 'center' },
+fontPillActive: { backgroundColor: '#fff', borderColor: '#fff' },
 fontPillText: { color: '#888', fontSize: 13, fontWeight: '500' },
-fontPillTextActive: { color: '#fff', fontWeight: 'bold' },
-sizeControlRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#1a1a1a', borderRadius: 12, padding: 5 },
-sizeBtn: { width: 50, height: 45, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: '#222' },
-sizeValue: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
-themeGrid: { flexDirection: 'row-reverse', gap: 15, justifyContent: 'flex-start' },
-themeCircle: { width: 45, height: 45, borderRadius: 22.5, borderWidth: 2, borderColor: '#333', alignItems: 'center', justifyContent: 'center' },
-themeCircleActive: { borderColor: '#4a7cc7', borderWidth: 2 },
+fontPillTextActive: { color: '#000', fontWeight: 'bold' },
+sizeControlRow: { flexDirection: 'row-reverse', alignItems: 'center', gap: 12 },
+sizeBtn: { width: 44, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: '#242424' },
+sizeValue: { color: '#fff', fontSize: 17, fontWeight: 'bold', minWidth: 28, textAlign: 'center' },
 
-// --- ADVANCED FORMATTING STYLES ---
-advancedCard: { backgroundColor: '#0f0f0f', borderRadius: 20, padding: 20, marginBottom: 20, borderWidth: 1, borderColor: '#222' },
-advancedHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 },
-advancedTitle: { color: '#4ade80', fontSize: 16, fontWeight: 'bold', letterSpacing: 0.5 },
-previewRow: { flexDirection: 'row-reverse', justifyContent: 'space-between', marginBottom: 20, flexWrap: 'wrap', gap: 5 },
-previewBox: { flexGrow: 1, paddingVertical: 10, paddingHorizontal: 15, borderRadius: 10, backgroundColor: '#161616', borderWidth: 1, borderColor: '#333', alignItems: 'center', justifyContent: 'center', minWidth: '18%' },
+// --- Advanced formatting ---
+advancedCard: { backgroundColor: '#141414', borderRadius: 18, padding: 18, marginBottom: 18, borderWidth: 1, borderColor: '#242424' },
+advancedHeader: { flexDirection: 'row-reverse', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
+advancedTitle: { fontSize: 15, fontWeight: 'bold', letterSpacing: 0.5 },
+previewRow: { flexDirection: 'row-reverse', justifyContent: 'space-between', marginBottom: 18, flexWrap: 'wrap', gap: 5 },
+previewBox: { flexGrow: 1, paddingVertical: 10, paddingHorizontal: 14, borderRadius: 10, backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#2e2e2e', alignItems: 'center', justifyContent: 'center', minWidth: '18%' },
 previewText: { color: '#666', fontSize: 14, fontWeight: '600' },
-colorPalette: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 25, flexWrap: 'wrap', gap: 5 },
-paletteCircle: { width: 32, height: 32, borderRadius: 16 },
+colorPalette: { flexDirection: 'row-reverse', justifyContent: 'space-between', marginBottom: 22, flexWrap: 'wrap', gap: 6 },
+paletteCircle: { width: 30, height: 30, borderRadius: 15 },
 paletteCircleActive: { borderWidth: 2, borderColor: '#fff' },
-sliderRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 25, gap: 10 },
-sliderLabel: { color: '#4ade80', fontSize: 14, fontWeight: 'bold', width: 40 },
-sliderTitle: { color: '#888', fontSize: 12, width: 70, textAlign: 'right' },
-toggleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#161616', padding: 15, borderRadius: 12 },
-toggleLabel: { color: '#888', fontSize: 13 },
-alignBtn: { padding: 8, backgroundColor: '#1a1a1a', borderRadius: 8, borderWidth: 1, borderColor: '#333' },
-alignBtnActive: { backgroundColor: '#4a7cc7', borderColor: '#4a7cc7' },
-freqBtn: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#333' },
-freqBtnActive: { backgroundColor: '#4a7cc7', borderColor: '#4a7cc7' },
-freqBtnText: { color: '#888', fontSize: 12, fontWeight: 'bold' },
-scrollSettingsContainer: { paddingBottom: 50 },
+sliderRow: { flexDirection: 'row-reverse', alignItems: 'center', marginBottom: 22, gap: 10 },
+sliderLabel: { color: '#8b95a5', fontSize: 13, fontWeight: 'bold', width: 42, textAlign: 'center' },
+sliderTitle: { color: '#888', fontSize: 12, width: 74, textAlign: 'right' },
+toggleRow: { flexDirection: 'row-reverse', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#1a1a1a', padding: 14, borderRadius: 12 },
+toggleLabel: { color: '#999', fontSize: 13 },
 
-// --- ERROR STATE STYLES ---
+// --- Tools tab ---
+toolCard: {
+    flexDirection: 'row-reverse', alignItems: 'center', gap: 12,
+    backgroundColor: '#161616', borderRadius: 16, padding: 15, marginBottom: 12,
+    borderWidth: 1, borderColor: '#242424'
+},
+toolIcon: { width: 46, height: 46, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
+toolCardTitle: { color: '#fff', fontSize: 15, fontWeight: 'bold', textAlign: 'right' },
+toolCardSub: { color: '#666', fontSize: 11, marginTop: 3, textAlign: 'right' },
+
+// --- Copyright drawer bits ---
+alignBtn: { padding: 8, backgroundColor: '#1a1a1a', borderRadius: 8, borderWidth: 1, borderColor: '#2e2e2e' },
+alignBtnActive: { backgroundColor: '#8b95a5', borderColor: '#8b95a5' },
+freqBtn: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#2e2e2e' },
+freqBtnActive: { backgroundColor: '#8b95a5', borderColor: '#8b95a5' },
+freqBtnText: { color: '#888', fontSize: 12, fontWeight: 'bold' },
+
+// --- Error state ---
 errorContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 30 },
 errorTitle: { color: '#fff', fontSize: 22, fontWeight: 'bold', marginTop: 20, marginBottom: 10 },
 errorMessage: { color: '#999', fontSize: 15, textAlign: 'center', lineHeight: 24, marginBottom: 30 },
-errorBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#fff', paddingVertical: 14, paddingHorizontal: 30, borderRadius: 12, width: '100%', marginBottom: 12 },
-errorBtnSecondary: { backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#333' },
+errorBtn: { flexDirection: 'row-reverse', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#fff', paddingVertical: 14, paddingHorizontal: 30, borderRadius: 14, width: '100%', marginBottom: 12 },
+errorBtnSecondary: { backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#2e2e2e' },
 errorBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
 errorBtnTextDark: { color: '#000', fontWeight: 'bold', fontSize: 16 },
 });

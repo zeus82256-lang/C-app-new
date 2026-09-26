@@ -57,6 +57,8 @@ import EnglishNovelsSelectionScreen from './src/screens/EnglishNovelsSelectionSc
 import TranslationJobDetailScreen from './src/screens/TranslationJobDetailScreen';
 import GlossaryManagerScreen from './src/screens/GlossaryManagerScreen';
 import TranslatorSettingsScreen from './src/screens/TranslatorSettingsScreen';
+import MetadataTranslationHubScreen from './src/screens/MetadataTranslationHubScreen';
+import NovelMetadataTranslationScreen from './src/screens/NovelMetadataTranslationScreen';
 
 // 🔥 Title Generator Screens
 import TitleGeneratorHubScreen from './src/screens/TitleGeneratorHubScreen';
@@ -333,6 +335,8 @@ function NavigationRoot() {
                 
                 {/* Translator Screens */}
                 <Stack.Screen name="TranslatorHub" component={TranslatorHubScreen} options={{ animation: 'slide_from_right' }} />
+                <Stack.Screen name="MetadataTranslationHub" component={MetadataTranslationHubScreen} options={{ animation: 'slide_from_bottom' }} />
+                <Stack.Screen name="NovelMetadataTranslation" component={NovelMetadataTranslationScreen} options={{ animation: 'slide_from_bottom' }} />
                 <Stack.Screen name="EnglishNovelsSelection" component={EnglishNovelsSelectionScreen} options={{ animation: 'slide_from_bottom' }} />
                 <Stack.Screen name="TranslationJobDetail" component={TranslationJobDetailScreen} options={{ animation: 'fade_from_bottom' }} />
                 <Stack.Screen name="GlossaryManager" component={GlossaryManagerScreen} options={{ animation: 'slide_from_right' }} />
