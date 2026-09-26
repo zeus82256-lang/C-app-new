@@ -243,11 +243,11 @@ module.exports = function(app, verifyToken) {
                 const deepLink = state === 'mobile' ? `aplcionszeus://auth?token=${token}` : `${state}?token=${token}`;
                 res.redirect(deepLink);
             } else {
-                res.redirect(`https://c-production-f63f.up.railway.app/?token=${token}`);
+                res.redirect(`https://c-production-6948.up.railway.app/?token=${token}`);
             }
         } catch (error) {
             console.error('Auth error:', error);
-            res.redirect('https://c-production-f63f.up.railway.app/?auth_error=true');
+            res.redirect('https://c-production-6948.up.railway.app/?auth_error=true');
         }
     });
 
