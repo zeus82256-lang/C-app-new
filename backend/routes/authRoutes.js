@@ -181,7 +181,7 @@ module.exports = function(app, verifyToken) {
     const oauth2Client = new OAuth2Client(
         process.env.GOOGLE_CLIENT_ID,
         process.env.GOOGLE_CLIENT_SECRET,
-        "https://c-production-f63f.up.railway.app/auth/google/callback" 
+        "https://c-production-6948.up.railway.app/auth/google/callback" 
     );
 
     app.get('/auth/google', (req, res) => {
