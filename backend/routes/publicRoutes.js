@@ -1102,6 +1102,50 @@ module.exports = function(app, verifyToken, upload) {
         res.json(item || { isFavorite: false, progress: 0, lastChapterId: 0, readChapters: [] });
     });
 
+    // 🔔 Chapter reports (reader "إبلاغ" panel) — public submit, admin listing
+    const Report = require('../models/report.model.js');
+
+    app.post('/api/reports', async (req, res) => {
+        try {
+            const { novelId, novelTitle, chapterNumber, chapterTitle, types, details } = req.body || {};
+            let userId = null;
+            try {
+                const token = req.headers.authorization?.split(' ')[1];
+                if (token) {
+                    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+                    userId = decoded?.id || null;
+                }
+            } catch (e) { userId = null; }
+            const doc = await Report.create({
+                novelId: String(novelId || ''),
+                novelTitle: String(novelTitle || '').slice(0, 200),
+                chapterNumber: parseInt(chapterNumber) || 0,
+                chapterTitle: String(chapterTitle || '').slice(0, 300),
+                types: Array.isArray(types) ? types.slice(0, 8).map(t => String(t).slice(0, 60)) : [],
+                details: String(details || '').slice(0, 1500),
+                user: userId,
+            });
+            res.json({ success: true, id: doc._id });
+        } catch (error) {
+            console.error('Report submit error:', error.message);
+            res.status(500).json({ message: 'Failed' });
+        }
+    });
+
+    app.get('/api/reports', async (req, res) => {
+        try {
+            const role = getUserRole(req);
+            if (role !== 'admin' && role !== 'contributor') {
+                return res.status(403).json({ message: 'Admin access required' });
+            }
+            const list = await Report.find({}).sort({ createdAt: -1 }).limit(200).lean();
+            res.json(list);
+        } catch (error) {
+            res.status(500).json({ message: 'Failed' });
+        }
+    });
+
+
     // 🔥🔥🔥 OPTIMIZED NOTIFICATIONS USING AGGREGATION & VISIBLE LOGIC 🔥🔥🔥
     app.get('/api/notifications', verifyToken, async (req, res) => {
         try {
