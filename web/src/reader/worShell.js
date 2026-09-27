@@ -620,6 +620,84 @@ function bridgeScript() {
     }
     return cur;
   }
+  // ==================== DOM windowing (scroll round 3) ====================
+  // content-visibility:auto only skips offscreen layout/paint on iOS 18+. On
+  // older iOS the ever-growing continuous-mode document is still laid out in
+  // full every frame, so scrolling degrades chapter after chapter ("بصعوبة
+  // حتى أمرر لأسفل"). We keep only a WINDOW of chapters as real DOM: sections
+  // far above (already read) and far below (not yet reached) are unloaded into
+  // a string stash while their measured height is preserved via min-height —
+  // scroll geometry, the dock progress and the v2 resume protocol all stay
+  // stable. Sections entering the keep-window are restored one per frame, and
+  // a re-anchor scroll corrects any height delta for restores above the
+  // viewport. Works on every iOS version; on iOS 18+ it simply adds DOM-node
+  // savings on top of content-visibility.
+  var WOR_KEEP_ABOVE = 2, WOR_KEEP_BELOW = 3;
+  var WOR_UNLOAD_ABOVE = 5, WOR_UNLOAD_BELOW = 6;
+  var chapterHtmlStash = {};
+  function resetChapterStash() { chapterHtmlStash = {}; }
+  function sectionNum(s) { return parseInt(s.getAttribute('data-ch'), 10) || 0; }
+  function unloadSection(s) {
+    var num = sectionNum(s);
+    if (chapterHtmlStash[num]) return;
+    var prevMin = parseFloat(s.style.minHeight) || 0;
+    chapterHtmlStash[num] = s.innerHTML;
+    var h = s.offsetHeight;
+    if (!h || h < 200) h = prevMin || 6000; // never-rendered section → placeholder
+    s.style.minHeight = h + 'px';
+    s.setAttribute('data-wor-unloaded', '1');
+    s.innerHTML = '';
+  }
+  function restoreSection(s) {
+    var num = sectionNum(s);
+    var html = chapterHtmlStash[num];
+    if (!html) return 0;
+    var mh = parseFloat(s.style.minHeight) || 0;
+    s.innerHTML = html;
+    s.style.minHeight = '';
+    s.removeAttribute('data-wor-unloaded');
+    delete chapterHtmlStash[num];
+    return s.offsetHeight - mh; // height delta for scroll re-anchoring
+  }
+  function enforceWindow(y) {
+    var secs = $all('.wor-chapter-sec[data-ch]');
+    if (secs.length <= WOR_UNLOAD_ABOVE + WOR_UNLOAD_BELOW + 2) return;
+    var tops = getSectionTops();
+    var activeIdx = 0;
+    for (var i = 0; i < tops.length; i++) { if (tops[i].top - 90 <= y) activeIdx = i; else break; }
+    var changed = false;
+    // 1) unload everything outside the keep-window (heights preserved)
+    for (var j = 0; j < secs.length; j++) {
+      var rel = j - activeIdx;
+      if ((rel < -WOR_UNLOAD_ABOVE || rel > WOR_UNLOAD_BELOW) && !secs[j].getAttribute('data-wor-unloaded')) {
+        unloadSection(secs[j]);
+        changed = true;
+      }
+    }
+    // 2) restore the nearest unloaded section that entered the keep-window
+    //    (ONE per frame to keep the frame budget; hysteresis vs the unload
+    //    window means restores never thrash)
+    var best = -1, bestAbs = 1e9;
+    for (var k = 0; k < secs.length; k++) {
+      if (!secs[k].getAttribute('data-wor-unloaded')) continue;
+      var rel2 = k - activeIdx;
+      if (rel2 >= -WOR_KEEP_ABOVE && rel2 <= WOR_KEEP_BELOW) {
+        var d = Math.abs(rel2);
+        if (d < bestAbs) { bestAbs = d; best = k; }
+      }
+    }
+    if (best !== -1) {
+      var delta = restoreSection(secs[best]);
+      changed = true;
+      // section above the viewport grew/shrank → keep the reading view pinned
+      if (tops[best].top <= y && Math.abs(delta) > 2) {
+        y += delta;
+        window.scrollTo(0, y);
+      }
+    }
+    if (changed) invalidateSectionTops();
+  }
+
   function updateDockProgress(num) {
     // Mirror the live chapter into the dock progress while the user scrolls
     // through appended chapters (continuous mode) — the dock used to stay on
@@ -658,6 +736,8 @@ function bridgeScript() {
       var ratio = max > 0 ? clamp(y / max, 0, 1) : 0;
       var nearEnd = S.continuousMode && !window.__worEnd && !window.__worNeedLock
         && (y >= max - 1400);
+      // DOM windowing: unload far chapters / restore entering ones (all iOS)
+      if (S.continuousMode) enforceWindow(y);
 
       // WRITE phase
       var fill = $('[data-wor-reader-chapter-progress-fill]');
@@ -1481,6 +1561,7 @@ function bridgeScript() {
         if (h1) h1.textContent = msg.title || ('فصل ' + msg.number);
         var surface = $('#worTextSurface');
         if (surface) surface.innerHTML = msg.html || '';
+        resetChapterStash(); // full chapter swap — old stashed html is obsolete
         invalidateSectionTops();
         var strong = $('.wor-reader-dock__progress-copy strong');
         var pct = $('.wor-reader-dock__progress-copy span');
@@ -1533,6 +1614,8 @@ function bridgeScript() {
         if (surface2) surface2.insertAdjacentHTML('beforeend', msg.html || '');
         invalidateSectionTops();
         window.__worNeedLock = false;
+        // newly appended chapters push the doc size up — trim the far tail
+        if (S.continuousMode) enforceWindow(window.scrollY || 0);
       }
       else if (kind === 'endReached') {
         window.__worEnd = true;

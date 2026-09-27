@@ -1439,6 +1439,72 @@ const generateHTML = () => {
               return cur;
           }
           window.__continuous = ${continuousMode ? 'true' : 'false'};
+          // ==================== DOM windowing (scroll round 3) ====================
+          // content-visibility:auto only helps on iOS 18+. On older iOS the
+          // growing continuous-mode document is laid out in full every frame.
+          // Keep only a WINDOW of chapters as real DOM: far sections are
+          // unloaded into a string stash with their measured height preserved
+          // via min-height (scroll geometry + resume offsets stay stable).
+          // Entering sections are restored one per frame with re-anchoring.
+          var WOR_KEEP_ABOVE = 2, WOR_KEEP_BELOW = 3;
+          var WOR_UNLOAD_ABOVE = 5, WOR_UNLOAD_BELOW = 6;
+          var chapterStash = {};
+          function secNum(s) { return parseInt(s.getAttribute('data-ch')) || 0; }
+          function unloadSec(s) {
+              var num = secNum(s);
+              if (chapterStash[num]) return;
+              var prevMin = parseFloat(s.style.minHeight) || 0;
+              chapterStash[num] = s.innerHTML;
+              var h = s.offsetHeight;
+              if (!h || h < 200) h = prevMin || 6000; // never-rendered → placeholder
+              s.style.minHeight = h + 'px';
+              s.setAttribute('data-wor-unloaded', '1');
+              s.innerHTML = '';
+          }
+          function restoreSec(s) {
+              var num = secNum(s);
+              var html = chapterStash[num];
+              if (!html) return 0;
+              var mh = parseFloat(s.style.minHeight) || 0;
+              s.innerHTML = html;
+              s.style.minHeight = '';
+              s.removeAttribute('data-wor-unloaded');
+              delete chapterStash[num];
+              return s.offsetHeight - mh; // height delta for re-anchoring
+          }
+          function enforceWindow(y) {
+              var secs = document.querySelectorAll('section[data-ch]');
+              if (secs.length <= WOR_UNLOAD_ABOVE + WOR_UNLOAD_BELOW + 2) return;
+              var tops = getTops();
+              var activeIdx = 0;
+              for (var i = 0; i < tops.length; i++) { if (tops[i].top - 80 <= y) activeIdx = i; else break; }
+              var changed = false;
+              for (var j = 0; j < secs.length; j++) {
+                  var rel = j - activeIdx;
+                  if ((rel < -WOR_UNLOAD_ABOVE || rel > WOR_UNLOAD_BELOW) && !secs[j].getAttribute('data-wor-unloaded')) {
+                      unloadSec(secs[j]);
+                      changed = true;
+                  }
+              }
+              var best = -1, bestAbs = 1e9;
+              for (var k = 0; k < secs.length; k++) {
+                  if (!secs[k].getAttribute('data-wor-unloaded')) continue;
+                  var rel2 = k - activeIdx;
+                  if (rel2 >= -WOR_KEEP_ABOVE && rel2 <= WOR_KEEP_BELOW) {
+                      var d = Math.abs(rel2);
+                      if (d < bestAbs) { bestAbs = d; best = k; }
+                  }
+              }
+              if (best !== -1) {
+                  var delta = restoreSec(secs[best]);
+                  changed = true;
+                  if (tops[best].top <= y && Math.abs(delta) > 2) {
+                      y += delta;
+                      window.scrollTo(0, y);
+                  }
+              }
+              if (changed) invalidateTops();
+          }
           function maybeNeedNext() {
               if (!window.__continuous) return;
               if (window.__endReached || window.__needNextLock) return;
@@ -1457,6 +1523,7 @@ const generateHTML = () => {
               // v2: report the offset INSIDE the active chapter's section so the
               // saved position is per-chapter and resume lands on the exact line.
               var inOffset = Math.max(0, Math.round(y - act.top));
+              if (window.__continuous) enforceWindow(y);
               sendMessage(JSON.stringify({ type: 'readerScroll', offset: y, inOffset: inOffset, chapter: act.num }));
               maybeNeedNext();
           }, true);
@@ -1476,6 +1543,7 @@ const generateHTML = () => {
               while (wrap.firstChild) root.appendChild(wrap.firstChild);
               if (window.__worInvalidateTops) window.__worInvalidateTops();
               window.__needNextLock = false;
+              if (window.__continuous) enforceWindow(window.scrollY || 0);
           };
           window.__markEnd = function() { window.__endReached = true; window.__needNextLock = true; };
       })();
