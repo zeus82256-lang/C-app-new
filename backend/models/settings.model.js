@@ -69,16 +69,16 @@ RETURN ONLY JSON:` },
     // 🔥 ScraperAPI keys for the novel scraper service (multi-key rotation)
     scraperApiKeys: [{ type: String }],
 
-    // 🔥 NEW: Multi-provider translation support (including ChatGPT Android)
+    // 🔥 Multi-provider translation support (DeepSeek / Qwen / Gemini / OpenRouter / Cloudflare / custom)
     translationProviders: [{
-        providerId: { type: String, required: true }, // e.g., 'gemini', 'openrouter', 'chatgpt-android', 'custom1'
+        providerId: { type: String, required: true }, // e.g., 'gemini', 'openrouter', 'deepseek_...', 'qwen_...', 'custom1'
         name: { type: String, required: true }, // display name
         baseUrl: { type: String, default: '' }, // endpoint for custom/openrouter
         models: [{
             modelId: { type: String, required: true },
             modelName: { type: String, required: true }
         }],
-        apiKeys: [{ type: String }], // API keys for this provider (for ChatGPT Android, can be empty or placeholder)
+        apiKeys: [{ type: String }], // API keys for this provider (single source of truth for non-app providers)
         selectedModel: { type: String }, // the currently active model for this provider
         priority: { type: Number, default: 0 }, // order in fallback sequence
         thinkingEnabled: { type: Boolean, default: false }, // DeepSeek: enable reasoning fragments
@@ -86,7 +86,6 @@ RETURN ONLY JSON:` },
         deepSeekModelType: { type: String, enum: ['default', 'expert'], default: 'default' }, // DeepSeek: Default or Expert mode
         deepSeekTokens: [{ type: String }], // DeepSeek account tokens; falls back to default app token when empty
         qwenTokens: [{ type: String }], // Qwen account tokens; handled like DeepSeek tokens
-        chatGptTokens: [{ type: String }], // GPT Android account tokens; no fixed code token required
         powProviders: [{
             id: { type: String, required: true },
             name: { type: String, required: true },

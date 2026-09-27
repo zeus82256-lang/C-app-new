@@ -34,15 +34,9 @@ const PROVIDER_TEMPLATES = [
     icon: 'sparkles-outline'
   },
   {
-    type: 'chatgpt-android',
-    title: 'GPT Android',
-    subtitle: 'توكنات متعددة + محادثة مستمرة، بدون تقطيع الفصل',
-    icon: 'chatbubble-ellipses-outline'
-  },
-  {
     type: 'gemini',
-    title: 'Gemini / مخصص',
-    subtitle: 'مفاتيح API و Base URL اختياري',
+    title: 'مزوّد مخصص (OpenAI متوافق)',
+    subtitle: 'Base URL + مفاتيح + جلب النماذج تلقائياً من الرابط',
     icon: 'options-outline'
   }
 ];
@@ -60,28 +54,18 @@ const normalizePowProviderUrl = (url) => {
 const normalizePowProviders = (powProviders) => (powProviders && powProviders.length ? powProviders : DEFAULT_POW_PROVIDERS)
   .map((pow) => ({ ...pow, url: normalizePowProviderUrl(pow.url) }));
 
+// 🔥 PROVIDER CLASSIFICATION — by providerId ONLY (never by name/model text).
+// Old logic matched "name/model includes deepseek/qwen/gpt", which hijacked
+// custom (OpenAI-compatible) providers into the wrong engine and dropped their
+// keys. Custom providers are now completely independent.
 const isDeepSeekProvider = (provider) => {
-  const providerId = (provider.providerId || '').toLowerCase();
-  const name = (provider.name || '').toLowerCase();
-  const model = (provider.selectedModel || '').toLowerCase();
-  const hasDeepSeekModel = provider.models && provider.models.some(m => (m.modelId || '').toLowerCase().includes('deepseek'));
-  return providerId === 'deepseek' || name.includes('deepseek') || model.includes('deepseek') || hasDeepSeekModel;
+  const id = String(provider.providerId || '').toLowerCase();
+  return id === 'deepseek' || id.startsWith('deepseek_');
 };
 
 const isQwenProvider = (provider) => {
-  const providerId = (provider.providerId || '').toLowerCase();
-  const name = (provider.name || '').toLowerCase();
-  const model = (provider.selectedModel || '').toLowerCase();
-  const hasQwenModel = provider.models && provider.models.some(m => (m.modelId || '').toLowerCase().includes('qwen'));
-  return providerId === 'qwen' || name.includes('qwen') || model.includes('qwen') || hasQwenModel;
-};
-
-const isChatGPTAndroidProvider = (provider) => {
-  const providerId = (provider.providerId || '').toLowerCase();
-  const name = (provider.name || '').toLowerCase();
-  const model = (provider.selectedModel || '').toLowerCase();
-  const hasGptModel = provider.models && provider.models.some(m => /(gpt|chatgpt)/i.test(m.modelId || ''));
-  return providerId === 'chatgpt-android' || name.includes('chatgpt') || model.includes('gpt') || hasGptModel;
+  const id = String(provider.providerId || '').toLowerCase();
+  return id === 'qwen' || id.startsWith('qwen_');
 };
 
 const GlassContainer = ({ children, style }) => (
@@ -93,15 +77,23 @@ const GlassContainer = ({ children, style }) => (
 export default function TranslatorSettingsScreen({ navigation }) {
   const { showToast } = useToast();
   const [loading, setLoading] = useState(true);
-  
+
   // الحقول العامة
   const [transPrompt, setTransPrompt] = useState('');
   const [extractPrompt, setExtractPrompt] = useState('');
-  
+
   // المزوّدون
   const [providers, setProviders] = useState([]);
   const [expandedProvider, setExpandedProvider] = useState(null); // لمراقبة أي مزوّد مفعّل حالياً
   const [showProviderPicker, setShowProviderPicker] = useState(false);
+
+  // وضع التحديد المتعدد (ضغطة مطولة على مزوّد)
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState([]);
+
+  // جلب النماذج من Base URL
+  const [fetchingModelsFor, setFetchingModelsFor] = useState(null);
+  const [modelFilter, setModelFilter] = useState('');
 
   useEffect(() => {
       fetchSettings();
@@ -121,7 +113,7 @@ export default function TranslatorSettingsScreen({ navigation }) {
                   name: p.name || 'مزوّد جديد',
                   baseUrl: p.baseUrl || '',
                   models: p.models && p.models.length ? p.models : [{ modelId: 'gemini-2.5-flash', modelName: 'Gemini 2.5 Flash' }],
-                  apiKeys: (p.apiKeys && p.apiKeys.length ? p.apiKeys : (p.deepSeekTokens && p.deepSeekTokens.length ? p.deepSeekTokens : (p.qwenTokens && p.qwenTokens.length ? p.qwenTokens : (p.chatGptTokens || [])))),
+                  apiKeys: (p.apiKeys && p.apiKeys.length ? p.apiKeys : (p.deepSeekTokens && p.deepSeekTokens.length ? p.deepSeekTokens : (p.qwenTokens || []))),
                   selectedModel: p.selectedModel || (p.models && p.models[0]?.modelId) || 'gemini-2.5-flash',
                   priority: p.priority !== undefined ? p.priority : idx,
                   thinkingEnabled: Boolean(p.thinkingEnabled),
@@ -129,9 +121,9 @@ export default function TranslatorSettingsScreen({ navigation }) {
                   deepSeekModelType: p.deepSeekModelType === 'expert' ? 'expert' : 'default',
                   deepSeekTokens: p.deepSeekTokens || [],
                   qwenTokens: p.qwenTokens || [],
-                  chatGptTokens: p.chatGptTokens || [],
                   powProviders: normalizePowProviders(p.powProviders),
-                  selectedPowProviderId: p.selectedPowProviderId || 'railway'
+                  selectedPowProviderId: p.selectedPowProviderId || 'railway',
+                  modelsFetched: false
               }));
               setProviders(normalized);
           }
@@ -158,9 +150,9 @@ export default function TranslatorSettingsScreen({ navigation }) {
           deepSeekModelType: 'default',
           deepSeekTokens: [],
           qwenTokens: [],
-          chatGptTokens: [],
           powProviders: [],
-          selectedPowProviderId: ''
+          selectedPowProviderId: '',
+          modelsFetched: false
       };
 
       if (type === 'deepseek') {
@@ -185,21 +177,13 @@ export default function TranslatorSettingsScreen({ navigation }) {
               searchEnabled: true
           };
       }
-      if (type === 'chatgpt-android') {
-          return {
-              ...base,
-              providerId: id,
-              name: 'GPT Android',
-              models: [{ modelId: 'gpt-5-5', modelName: 'GPT 5.5' }],
-              selectedModel: 'gpt-5-5'
-          };
-      }
+      // مزوّد مخصص OpenAI-compatible — مستقل تماماً: رابطه ومفاتيحه ونماذجه
       return {
           ...base,
           providerId: id,
-          name: 'Gemini / مخصص',
-          models: [{ modelId: 'gemini-2.5-flash', modelName: 'Gemini 2.5 Flash' }],
-          selectedModel: 'gemini-2.5-flash'
+          name: 'مزوّد مخصص',
+          models: [{ modelId: '', modelName: '' }],
+          selectedModel: ''
       };
   };
 
@@ -210,14 +194,130 @@ export default function TranslatorSettingsScreen({ navigation }) {
       setShowProviderPicker(false);
   };
 
-  // حذف مزوّد
+  // ===== حفظ (يُستخدم أيضاً بعد الحذف حتى يثبت الحذف فوراً على السيرفر) =====
+  const saveProviders = async (list) => {
+      // تجهيز المزوّدين للإرسال: نظيف تنسيق النماذج والمفاتيح
+      const cleanedProviders = list.map(p => ({
+          providerId: p.providerId,
+          name: p.name,
+          baseUrl: p.baseUrl || '',
+          models: (p.models || []).filter(m => (m.modelId || '').trim() !== '').map(m => ({ modelId: m.modelId.trim(), modelName: (m.modelName || '').trim() || m.modelId.trim() })),
+          apiKeys: p.apiKeys || [],
+          selectedModel: p.selectedModel,
+          priority: p.priority,
+          thinkingEnabled: p.thinkingEnabled,
+          searchEnabled: p.searchEnabled,
+          deepSeekModelType: p.deepSeekModelType,
+          deepSeekTokens: isDeepSeekProvider(p) ? (p.apiKeys || []) : (p.deepSeekTokens || []),
+          qwenTokens: isQwenProvider(p) ? (p.apiKeys || []) : (p.qwenTokens || []),
+          powProviders: isDeepSeekProvider(p) ? normalizePowProviders(p.powProviders).filter(pow => (pow.url || '').trim() !== '').map(pow => ({
+              id: pow.id,
+              name: pow.name,
+              url: normalizePowProviderUrl(pow.url)
+          })) : [],
+          selectedPowProviderId: isDeepSeekProvider(p) ? (p.selectedPowProviderId || 'railway') : ''
+      }));
+
+      await api.post('/api/translator/settings', {
+          customPrompt: transPrompt,
+          translatorExtractPrompt: extractPrompt,
+          translationProviders: cleanedProviders
+      });
+  };
+
+  const handleSave = async () => {
+      try {
+          await saveProviders(providers);
+          showToast("تم حفظ الإعدادات بنجاح", "success");
+          navigation.goBack();
+      } catch (e) {
+          showToast("فشل الحفظ", "error");
+      }
+  };
+
+  // ===== الحذف: فردي (زر سلة) أو جماعي (وضع التحديد بالضغطة المطولة) =====
+  const persistDelete = async (ids) => {
+      const remaining = providers.filter(p => !ids.includes(p.providerId));
+      setProviders(remaining);
+      setSelectedIds([]);
+      setSelectionMode(false);
+      if (ids.includes(expandedProvider)) setExpandedProvider(null);
+      try {
+          await saveProviders(remaining);
+          showToast(`تم حذف ${ids.length} مزوّد وحفظ التغيير`, "success");
+      } catch (e) {
+          showToast("تم الحذف محلياً لكن فشل الحفظ على السيرفر", "warning");
+      }
+  };
+
   const deleteProvider = (providerId) => {
-      Alert.alert("تأكيد", "هل تريد حذف هذا المزود؟", [
+      Alert.alert("تأكيد", "هل تريد حذف هذا المزود نهائياً؟", [
           { text: "إلغاء", style: "cancel" },
-          { text: "حذف", onPress: () => {
-              setProviders(providers.filter(p => p.providerId !== providerId));
-          }}
+          { text: "حذف", style: "destructive", onPress: () => persistDelete([providerId]) }
       ]);
+  };
+
+  const deleteSelected = () => {
+      if (selectedIds.length === 0) return;
+      Alert.alert("تأكيد", `هل تريد حذف ${selectedIds.length} مزوّد محدد نهائياً؟`, [
+          { text: "إلغاء", style: "cancel" },
+          { text: "حذف الكل", style: "destructive", onPress: () => persistDelete([...selectedIds]) }
+      ]);
+  };
+
+  const toggleSelected = (providerId) => {
+      setSelectedIds(prev => prev.includes(providerId)
+          ? prev.filter(id => id !== providerId)
+          : [...prev, providerId]);
+  };
+
+  const enterSelectionMode = (providerId) => {
+      setSelectionMode(true);
+      setSelectedIds([providerId]);
+  };
+
+  const exitSelectionMode = () => {
+      setSelectionMode(false);
+      setSelectedIds([]);
+  };
+
+  // ===== جلب النماذج من Base URL (اختبار المزوّد + اختيار نموذج بدل الكتابة اليدوية) =====
+  const fetchModelsForProvider = async (providerId) => {
+      const p = providers.find(x => x.providerId === providerId);
+      if (!p) return;
+      if (!p.baseUrl || !p.baseUrl.trim()) {
+          showToast("أدخل Base URL أولاً ثم أعد المحاولة", "warning");
+          return;
+      }
+      try {
+          setFetchingModelsFor(providerId);
+          setModelFilter('');
+          const res = await api.post('/api/translator/providers/models', {
+              baseUrl: p.baseUrl,
+              apiKey: (p.apiKeys && p.apiKeys[0]) || ''
+          });
+          const models = (res.data && res.data.models) || [];
+          if (!models.length) {
+              showToast("المزوّد لم يُرجع أي نموذج", "warning");
+              return;
+          }
+          setProviders(prev => prev.map(x => {
+              if (x.providerId !== providerId) return x;
+              const mapped = models.map(m => ({ modelId: m.modelId, modelName: m.modelName || m.modelId }));
+              const stillThere = mapped.some(m => m.modelId === x.selectedModel);
+              return {
+                  ...x,
+                  models: mapped,
+                  selectedModel: stillThere ? x.selectedModel : mapped[0].modelId,
+                  modelsFetched: true
+              };
+          }));
+          showToast(`تم جلب ${models.length} نموذج — اختر نموذجاً`, "success");
+      } catch (e) {
+          showToast((e?.response?.data?.error) || "فشل جلب النماذج من المزوّد", "error");
+      } finally {
+          setFetchingModelsFor(null);
+      }
   };
 
   // تحديث حقل عام في مزوّد (name, baseUrl, selectedModel)
@@ -252,7 +352,7 @@ export default function TranslatorSettingsScreen({ navigation }) {
       if (!provider) return;
       const newModel = { modelId: '', modelName: '' };
       const updatedModels = [...provider.models, newModel];
-      setProviders(providers.map(p => p.providerId === providerId ? { ...p, models: updatedModels } : p));
+      setProviders(providers.map(p => p.providerId === providerId ? { ...p, models: updatedModels, modelsFetched: false } : p));
   };
 
   // حذف نموذج من مزوّد
@@ -292,44 +392,6 @@ export default function TranslatorSettingsScreen({ navigation }) {
       setProviders(newProviders);
   };
 
-  const handleSave = async () => {
-      try {
-          // تجهيز المزوّدين للإرسال: نظيف تنسيق النماذج والمفاتيح
-          const cleanedProviders = providers.map(p => ({
-              providerId: p.providerId,
-              name: p.name,
-              baseUrl: p.baseUrl,
-              models: p.models.filter(m => m.modelId.trim() !== '').map(m => ({ modelId: m.modelId.trim(), modelName: m.modelName.trim() || m.modelId.trim() })),
-              apiKeys: p.apiKeys,
-              selectedModel: p.selectedModel,
-              priority: p.priority,
-              thinkingEnabled: p.thinkingEnabled,
-              searchEnabled: p.searchEnabled,
-              deepSeekModelType: p.deepSeekModelType,
-              deepSeekTokens: isDeepSeekProvider(p) ? p.apiKeys : p.deepSeekTokens,
-              qwenTokens: isQwenProvider(p) ? p.apiKeys : p.qwenTokens,
-              chatGptTokens: isChatGPTAndroidProvider(p) ? p.apiKeys : p.chatGptTokens,
-              powProviders: isDeepSeekProvider(p) ? normalizePowProviders(p.powProviders).filter(pow => pow.url.trim() !== '').map(pow => ({
-                  id: pow.id,
-                  name: pow.name,
-                  url: normalizePowProviderUrl(pow.url)
-              })) : [],
-              selectedPowProviderId: isDeepSeekProvider(p) ? (p.selectedPowProviderId || 'railway') : ''
-          }));
-
-          await api.post('/api/translator/settings', {
-              customPrompt: transPrompt,
-              translatorExtractPrompt: extractPrompt,
-              translationProviders: cleanedProviders
-          });
-          
-          showToast("تم حفظ الإعدادات بنجاح", "success");
-          navigation.goBack();
-      } catch (e) {
-          showToast("فشل الحفظ", "error");
-      }
-  };
-
   if (loading) {
       return (
           <View style={[styles.container, {justifyContent:'center', alignItems:'center'}]}>
@@ -341,14 +403,14 @@ export default function TranslatorSettingsScreen({ navigation }) {
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" />
-      <ImageBackground 
-        source={require('../../assets/adaptive-icon.png')} 
+      <ImageBackground
+        source={require('../../assets/adaptive-icon.png')}
         style={styles.bgImage}
         blurRadius={20}
       >
           <LinearGradient colors={['rgba(0,0,0,0.6)', '#000000']} style={StyleSheet.absoluteFill} />
       </ImageBackground>
-      
+
       <SafeAreaView style={{flex: 1}} edges={['top']}>
         <View style={styles.header}>
             <Text style={styles.headerTitle}>إعدادات المترجم</Text>
@@ -358,7 +420,7 @@ export default function TranslatorSettingsScreen({ navigation }) {
         </View>
 
         <ScrollView contentContainerStyle={styles.content}>
-            
+
             {/* إضافة مزوّد جديد */}
             <TouchableOpacity style={styles.addProviderBtn} onPress={() => setShowProviderPicker(true)}>
                 <Ionicons name="add-circle" size={24} color="#fff" />
@@ -369,7 +431,7 @@ export default function TranslatorSettingsScreen({ navigation }) {
               <View style={styles.modalOverlay}>
                 <View style={styles.providerPickerBox}>
                   <Text style={styles.providerPickerTitle}>اختر نوع المزوّد</Text>
-                  <Text style={styles.providerPickerHint}>كل مزوّد سيُنشأ بإعداداته الخاصة فقط، بدون خلط إعدادات DeepSeek/Qwen/GPT.</Text>
+                  <Text style={styles.providerPickerHint}>كل مزوّد سيُنشأ بإعداداته الخاصة فقط، بدون خلط إعدادات DeepSeek/Qwen مع المزوّد المخصص.</Text>
                   {PROVIDER_TEMPLATES.map((template) => (
                     <TouchableOpacity key={template.type} style={styles.providerTemplateBtn} onPress={() => addProvider(template.type)}>
                       <Ionicons name={template.icon} size={22} color="#fff" />
@@ -386,23 +448,56 @@ export default function TranslatorSettingsScreen({ navigation }) {
               </View>
             </Modal>
 
+            {/* شريط وضع التحديد المتعدد */}
+            {selectionMode && (
+                <View style={styles.selectionBar}>
+                    <Text style={styles.selectionText}>تم تحديد {selectedIds.length}</Text>
+                    <View style={styles.selectionActions}>
+                        <TouchableOpacity style={styles.selectionBtn} onPress={() => setSelectedIds(providers.map(p => p.providerId))}>
+                            <Text style={styles.selectionBtnText}>تحديد الكل</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity style={[styles.selectionBtn, styles.selectionDeleteBtn]} onPress={deleteSelected} disabled={selectedIds.length === 0}>
+                            <Ionicons name="trash-outline" size={16} color="#fff" />
+                            <Text style={styles.selectionBtnText}>حذف ({selectedIds.length})</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity style={styles.selectionBtn} onPress={exitSelectionMode}>
+                            <Text style={styles.selectionBtnText}>إلغاء</Text>
+                        </TouchableOpacity>
+                    </View>
+                </View>
+            )}
+            {!selectionMode && providers.length > 0 && (
+                <Text style={styles.selectionHint}>💡 ضغطة مطولة على أي مزوّد تفعّل وضع التحديد لحذف عدة مزوّدين معاً</Text>
+            )}
 
             {/* عرض المزوّدين */}
             {[...providers].sort((a, b) => a.priority - b.priority).map((provider, index) => {
                 const isExpanded = expandedProvider === provider.providerId;
+                const isSelected = selectedIds.includes(provider.providerId);
+                const isChatTemplate = isDeepSeekProvider(provider) || isQwenProvider(provider);
                 return (
-                    <GlassContainer key={provider.providerId} style={styles.providerCard}>
+                    <GlassContainer key={provider.providerId} style={[styles.providerCard, isSelected && styles.providerCardSelected]}>
                         {/* رأس البطاقة */}
-                        <TouchableOpacity 
+                        <TouchableOpacity
                             style={styles.providerHeader}
-                            onPress={() => setExpandedProvider(isExpanded ? null : provider.providerId)}
+                            onPress={() => {
+                                if (selectionMode) { toggleSelected(provider.providerId); return; }
+                                setExpandedProvider(isExpanded ? null : provider.providerId);
+                                setModelFilter('');
+                            }}
+                            onLongPress={() => !selectionMode && enterSelectionMode(provider.providerId)}
+                            delayLongPress={400}
                             activeOpacity={0.8}
                         >
                             <View style={{flexDirection: 'row-reverse', alignItems: 'center'}}>
-                                <Ionicons name={isExpanded ? "chevron-up" : "chevron-down"} size={20} color="#ccc" style={{marginLeft: 10}} />
+                                {selectionMode ? (
+                                    <Ionicons name={isSelected ? "checkmark-circle" : "ellipse-outline"} size={22} color={isSelected ? "#10b981" : "#888"} style={{marginLeft: 10}} />
+                                ) : (
+                                    <Ionicons name={isExpanded ? "chevron-up" : "chevron-down"} size={20} color="#ccc" style={{marginLeft: 10}} />
+                                )}
                                 <View style={{flex: 1, alignItems: 'flex-end'}}>
                                     <Text style={styles.providerName}>{provider.name}</Text>
-                                    <Text style={styles.providerModel}>النموذج: {provider.selectedModel}</Text>
+                                    <Text style={styles.providerModel}>النموذج: {provider.selectedModel || 'غير محدد'}</Text>
                                 </View>
                             </View>
                             <View style={{flexDirection: 'row-reverse', gap: 8}}>
@@ -419,7 +514,7 @@ export default function TranslatorSettingsScreen({ navigation }) {
                         </TouchableOpacity>
 
                         {/* محتوى قابل للطي */}
-                        {isExpanded && (
+                        {isExpanded && !selectionMode && (
                             <View style={styles.providerBody}>
                                 {/* الاسم و الرابط الأساسي */}
                                 <Text style={styles.miniLabel}>اسم المزوّد</Text>
@@ -427,12 +522,12 @@ export default function TranslatorSettingsScreen({ navigation }) {
                                     style={styles.miniInput}
                                     value={provider.name}
                                     onChangeText={(text) => updateProviderField(provider.providerId, 'name', text)}
-                                    placeholder="مثل: Gemini, OpenRouter, ChatGPT Android"
+                                    placeholder="مثل: مزودي الخاص، OpenRouter"
                                     placeholderTextColor="#666"
                                 />
-                                {(!isDeepSeekProvider(provider) && !isQwenProvider(provider) && !isChatGPTAndroidProvider(provider)) && (
+                                {!isChatTemplate && (
                                   <>
-                                    <Text style={styles.miniLabel}>Base URL (اختياري)</Text>
+                                    <Text style={styles.miniLabel}>Base URL (رابط المزوّد المتوافق مع OpenAI)</Text>
                                     <TextInput
                                         style={styles.miniInput}
                                         value={provider.baseUrl}
@@ -440,6 +535,7 @@ export default function TranslatorSettingsScreen({ navigation }) {
                                         placeholder="https://api.openai.com/v1"
                                         placeholderTextColor="#666"
                                         autoCapitalize="none"
+                                        autoCorrect={false}
                                     />
                                   </>
                                 )}
@@ -475,12 +571,10 @@ export default function TranslatorSettingsScreen({ navigation }) {
                                   </View>
                                 )}
 
-
-
                                 {isQwenProvider(provider) && (
                                   <View style={styles.deepSeekBox}>
                                     <Text style={styles.miniLabel}>إعدادات Qwen</Text>
-                                    <Text style={styles.hintSmall}>مطابق لملف qwen.py: نموذج + تفكير + بحث، بدون خادم POW.</Text>
+                                    <Text style={styles.hintSmall}>نموذج + تفكير + بحث، بدون خادم POW.</Text>
                                     <View style={styles.switchRow}>
                                       <Switch value={Boolean(provider.thinkingEnabled)} onValueChange={(value) => updateProviderField(provider.providerId, 'thinkingEnabled', value)} />
                                       <Text style={styles.switchLabel}>تفعيل التفكير</Text>
@@ -525,12 +619,12 @@ export default function TranslatorSettingsScreen({ navigation }) {
                                 )}
 
                                 {/* المفاتيح */}
-                                <Text style={styles.miniLabel}>{isDeepSeekProvider(provider) ? 'توكنات DeepSeek (كل توكن في سطر)' : isQwenProvider(provider) ? 'توكنات Qwen (كل توكن في سطر)' : isChatGPTAndroidProvider(provider) ? 'توكنات GPT (كل توكن في سطر)' : 'مفاتيح API (كل مفتاح في سطر)'}</Text>
-                                <Text style={styles.hintSmall}>{isDeepSeekProvider(provider) ? '🔑 بالنسبة لـ DeepSeek: ضع توكنات الحساب هنا؛ سيتم استخدامها فعلياً بدل التوكن الافتراضي.' : isQwenProvider(provider) ? '🔑 بالنسبة لـ Qwen: ضع توكنات الحساب هنا وسيعاملها النظام مثل DeepSeek.' : isChatGPTAndroidProvider(provider) ? '🔑 بالنسبة لـ GPT: ضع كل توكن حساب في سطر؛ لا يوجد توكن ثابت في الكود.' : 'ضع كل مفتاح API في سطر.'}</Text>
+                                <Text style={styles.miniLabel}>{isDeepSeekProvider(provider) ? 'توكنات DeepSeek (كل توكن في سطر)' : isQwenProvider(provider) ? 'توكنات Qwen (كل توكن في سطر)' : 'مفاتيح API (كل مفتاح في سطر)'}</Text>
+                                <Text style={styles.hintSmall}>{isDeepSeekProvider(provider) ? '🔑 بالنسبة لـ DeepSeek: ضع توكنات الحساب هنا؛ سيتم استخدامها فعلياً بدل التوكن الافتراضي.' : isQwenProvider(provider) ? '🔑 بالنسبة لـ Qwen: ضع توكنات الحساب هنا وسيعاملها النظام مثل DeepSeek.' : '🔑 مفاتيح هذا المزوّد مستقلة تماماً ويُرسل معها الطلب إلى Base URL أعلاه.'}</Text>
                                 <TextInput
                                     style={styles.keysInputSmall}
                                     multiline
-                                    placeholder={isDeepSeekProvider(provider) ? "DeepSeek token 1\nDeepSeek token 2" : isQwenProvider(provider) ? "Qwen token 1\nQwen token 2" : isChatGPTAndroidProvider(provider) ? "GPT token 1\nGPT token 2" : "AIzaSy...\nsk-..."}
+                                    placeholder={isDeepSeekProvider(provider) ? "DeepSeek token 1\nDeepSeek token 2" : isQwenProvider(provider) ? "Qwen token 1\nQwen token 2" : "sk-...\nمفتاح آخر"}
                                     placeholderTextColor="#666"
                                     value={provider._keysText || provider.apiKeys.join('\n')}
                                     onChangeText={(text) => updateProviderKeys(provider.providerId, text)}
@@ -539,44 +633,101 @@ export default function TranslatorSettingsScreen({ navigation }) {
                                 />
 
                                 {/* النماذج */}
-                                <Text style={styles.miniLabel}>النماذج</Text>
-                                {provider.models.map((model, mIdx) => (
-                                    <View key={mIdx} style={styles.modelRow}>
-                                        <TouchableOpacity 
-                                            style={styles.removeModelBtn}
-                                            onPress={() => removeModelFromProvider(provider.providerId, mIdx)}
+                                <View style={styles.modelsHeaderRow}>
+                                    <Text style={styles.miniLabel}>النماذج</Text>
+                                    {!isChatTemplate && (
+                                        <TouchableOpacity
+                                            style={styles.fetchModelsBtn}
+                                            onPress={() => fetchModelsForProvider(provider.providerId)}
+                                            disabled={fetchingModelsFor === provider.providerId}
                                         >
-                                            <Ionicons name="remove-circle" size={22} color="#ff6666" />
+                                            {fetchingModelsFor === provider.providerId
+                                                ? <ActivityIndicator size="small" color="#fff" />
+                                                : <>
+                                                    <Ionicons name="cloud-download-outline" size={15} color="#fff" />
+                                                    <Text style={styles.fetchModelsText}>جلب النماذج من الرابط</Text>
+                                                  </>}
                                         </TouchableOpacity>
-                                        <View style={{flex: 1}}>
-                                            <TextInput
-                                                style={styles.modelInput}
-                                                placeholder="modelId"
-                                                placeholderTextColor="#666"
-                                                value={model.modelId}
-                                                onChangeText={(text) => updateModelField(provider.providerId, mIdx, 'modelId', text)}
-                                            />
-                                            <TextInput
-                                                style={styles.modelInput}
-                                                placeholder="اسم ودود"
-                                                placeholderTextColor="#666"
-                                                value={model.modelName}
-                                                onChangeText={(text) => updateModelField(provider.providerId, mIdx, 'modelName', text)}
-                                            />
+                                    )}
+                                </View>
+                                {!isChatTemplate && provider.modelsFetched && provider.models.length > 0 ? (
+                                    <>
+                                        <Text style={styles.hintSmall}>اختر النموذج المطلوب من {provider.models.length} نموذج تم جلبها:</Text>
+                                        <TextInput
+                                            style={styles.miniInput}
+                                            value={modelFilter}
+                                            onChangeText={setModelFilter}
+                                            placeholder="ابحث عن نموذج..."
+                                            placeholderTextColor="#666"
+                                            autoCapitalize="none"
+                                            autoCorrect={false}
+                                        />
+                                        <View style={styles.fetchedModelsList}>
+                                            {provider.models
+                                                .filter(m => !modelFilter.trim() || m.modelId.toLowerCase().includes(modelFilter.trim().toLowerCase()))
+                                                .slice(0, 200)
+                                                .map((m) => (
+                                                <TouchableOpacity
+                                                    key={m.modelId}
+                                                    style={styles.fetchedModelRow}
+                                                    onPress={() => updateProviderField(provider.providerId, 'selectedModel', m.modelId)}
+                                                >
+                                                    <Text style={styles.fetchedModelText} numberOfLines={1}>{m.modelId}</Text>
+                                                    <Ionicons
+                                                        name={provider.selectedModel === m.modelId ? "checkmark-circle" : "ellipse-outline"}
+                                                        size={20}
+                                                        color={provider.selectedModel === m.modelId ? "#10b981" : "#888"}
+                                                    />
+                                                </TouchableOpacity>
+                                            ))}
                                         </View>
-                                        {provider.selectedModel === model.modelId ? (
-                                            <Ionicons name="checkmark-circle" size={22} color="#fff" />
-                                        ) : (
-                                            <TouchableOpacity onPress={() => updateProviderField(provider.providerId, 'selectedModel', model.modelId)}>
-                                                <Ionicons name="ellipse-outline" size={22} color="#888" />
+                                        <TouchableOpacity style={styles.addModelBtn} onPress={() => updateProviderField(provider.providerId, 'modelsFetched', false)}>
+                                            <Text style={styles.addModelText}>التبديل للإدخال اليدوي</Text>
+                                        </TouchableOpacity>
+                                    </>
+                                ) : (
+                                    <>
+                                    {provider.models.map((model, mIdx) => (
+                                        <View key={mIdx} style={styles.modelRow}>
+                                            <TouchableOpacity
+                                                style={styles.removeModelBtn}
+                                                onPress={() => removeModelFromProvider(provider.providerId, mIdx)}
+                                            >
+                                                <Ionicons name="remove-circle" size={22} color="#ff6666" />
                                             </TouchableOpacity>
-                                        )}
-                                    </View>
-                                ))}
-                                <TouchableOpacity style={styles.addModelBtn} onPress={() => addModelToProvider(provider.providerId)}>
-                                    <Ionicons name="add-circle-outline" size={18} color="#ccc" />
-                                    <Text style={styles.addModelText}>إضافة نموذج</Text>
-                                </TouchableOpacity>
+                                            <View style={{flex: 1}}>
+                                                <TextInput
+                                                    style={styles.modelInput}
+                                                    placeholder="modelId"
+                                                    placeholderTextColor="#666"
+                                                    value={model.modelId}
+                                                    onChangeText={(text) => updateModelField(provider.providerId, mIdx, 'modelId', text)}
+                                                    autoCapitalize="none"
+                                                    autoCorrect={false}
+                                                />
+                                                <TextInput
+                                                    style={styles.modelInput}
+                                                    placeholder="اسم ودود"
+                                                    placeholderTextColor="#666"
+                                                    value={model.modelName}
+                                                    onChangeText={(text) => updateModelField(provider.providerId, mIdx, 'modelName', text)}
+                                                />
+                                            </View>
+                                            {provider.selectedModel === model.modelId ? (
+                                                <Ionicons name="checkmark-circle" size={22} color="#fff" />
+                                            ) : (
+                                                <TouchableOpacity onPress={() => updateProviderField(provider.providerId, 'selectedModel', model.modelId)}>
+                                                    <Ionicons name="ellipse-outline" size={22} color="#888" />
+                                                </TouchableOpacity>
+                                            )}
+                                        </View>
+                                    ))}
+                                    <TouchableOpacity style={styles.addModelBtn} onPress={() => addModelToProvider(provider.providerId)}>
+                                        <Ionicons name="add-circle-outline" size={18} color="#ccc" />
+                                        <Text style={styles.addModelText}>إضافة نموذج</Text>
+                                    </TouchableOpacity>
+                                    </>
+                                )}
                             </View>
                         )}
                     </GlassContainer>
@@ -587,7 +738,7 @@ export default function TranslatorSettingsScreen({ navigation }) {
             <GlassContainer>
                 <Text style={styles.sectionLabel}>تعليمات الترجمة</Text>
                 <Text style={styles.hint}>النبرة، الأسلوب، الضمائر...</Text>
-                <TextInput 
+                <TextInput
                     style={styles.input}
                     multiline
                     value={transPrompt}
@@ -601,8 +752,8 @@ export default function TranslatorSettingsScreen({ navigation }) {
             {/* استخراج المصطلحات */}
             <GlassContainer style={{marginTop: 20, borderColor: 'rgba(255,255,255,0.2)'}}>
                 <Text style={[styles.sectionLabel, {color: '#fff'}]}>استخراج المصطلحات</Text>
-                <Text style={styles.hint}>كيفية استخراج المصطلحات الجديدة للمسرد.</Text>
-                <TextInput 
+                <Text style={styles.hint}>كيفية استخراج المصطلحات الجديدة للمسرد. يتم الاستخراج دائماً بنفس مزوّد الترجمة الناجح.</Text>
+                <TextInput
                     style={styles.input}
                     multiline
                     value={extractPrompt}
@@ -629,18 +780,18 @@ const styles = StyleSheet.create({
   header: { flexDirection: 'row-reverse', justifyContent: 'space-between', padding: 20, alignItems: 'center' },
   headerTitle: { color: '#fff', fontSize: 20, fontWeight: 'bold' },
   iconBtn: { padding: 10, backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 12 },
-  
+
   content: { padding: 20 },
-  
-  glassContainer: { 
+
+  glassContainer: {
       backgroundColor: 'rgba(20, 20, 20, 0.75)',
-      borderRadius: 16, 
-      overflow: 'hidden', 
-      padding: 15, 
-      borderWidth: 1, 
-      borderColor: 'rgba(255,255,255,0.1)' 
+      borderRadius: 16,
+      overflow: 'hidden',
+      padding: 15,
+      borderWidth: 1,
+      borderColor: 'rgba(255,255,255,0.1)'
   },
-  
+
   sectionLabel: { color: '#fff', fontSize: 16, fontWeight: 'bold', marginBottom: 5, textAlign: 'right' },
   hint: { color: '#888', fontSize: 12, textAlign: 'right', marginBottom: 15 },
   hintSmall: { color: '#888', fontSize: 10, textAlign: 'right', marginBottom: 5 },
@@ -657,9 +808,43 @@ const styles = StyleSheet.create({
   cancelPickerBtn: { padding: 12, alignItems: 'center' },
   cancelPickerText: { color: '#ff8888', fontWeight: 'bold' },
 
+  // وضع التحديد المتعدد
+  selectionBar: {
+      flexDirection: 'row-reverse', alignItems: 'center', justifyContent: 'space-between', gap: 10,
+      backgroundColor: 'rgba(16, 185, 129, 0.12)', borderWidth: 1, borderColor: '#10b981',
+      borderRadius: 14, padding: 12, marginBottom: 12
+  },
+  selectionText: { color: '#fff', fontWeight: 'bold', fontSize: 14 },
+  selectionActions: { flexDirection: 'row-reverse', gap: 8, flexWrap: 'wrap' },
+  selectionBtn: {
+      flexDirection: 'row', alignItems: 'center', gap: 5,
+      backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 10, paddingVertical: 8, paddingHorizontal: 12
+  },
+  selectionDeleteBtn: { backgroundColor: 'rgba(239, 68, 68, 0.75)' },
+  selectionBtnText: { color: '#fff', fontSize: 12, fontWeight: 'bold' },
+  selectionHint: { color: '#777', fontSize: 11, textAlign: 'right', marginBottom: 12 },
+
+  // جلب النماذج
+  modelsHeaderRow: { flexDirection: 'row-reverse', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 },
+  fetchModelsBtn: {
+      flexDirection: 'row', alignItems: 'center', gap: 6,
+      backgroundColor: 'rgba(14, 165, 233, 0.18)', borderWidth: 1, borderColor: '#0ea5e9',
+      borderRadius: 10, paddingVertical: 7, paddingHorizontal: 10
+  },
+  fetchModelsText: { color: '#fff', fontSize: 11, fontWeight: 'bold' },
+  fetchedModelsList: {
+      maxHeight: 240, borderRadius: 10, borderWidth: 1, borderColor: '#333',
+      backgroundColor: 'rgba(0,0,0,0.4)', marginTop: 6, marginBottom: 4
+  },
+  fetchedModelRow: {
+      flexDirection: 'row-reverse', alignItems: 'center', justifyContent: 'space-between',
+      paddingVertical: 9, paddingHorizontal: 12, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.06)'
+  },
+  fetchedModelText: { color: '#ddd', fontSize: 12, flex: 1, textAlign: 'right' },
+
   // زر إضافة مزوّد
   addProviderBtn: {
-      marginBottom: 20, borderRadius: 12, overflow: 'hidden',
+      marginBottom: 14, borderRadius: 12, overflow: 'hidden',
       backgroundColor: 'rgba(16, 185, 129, 0.15)', borderWidth: 1, borderColor: '#10b981',
       flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 15, gap: 10
   },
@@ -667,6 +852,7 @@ const styles = StyleSheet.create({
 
   // بطاقة المزوّد
   providerCard: { marginBottom: 15 },
+  providerCardSelected: { borderColor: '#10b981', borderWidth: 1.5 },
   providerHeader: {
       flexDirection: 'row-reverse', justifyContent: 'space-between', alignItems: 'center',
       paddingVertical: 5
@@ -683,7 +869,7 @@ const styles = StyleSheet.create({
   modeChoiceTextActive: { color: '#000' },
   switchRow: { flexDirection: 'row-reverse', alignItems: 'center', justifyContent: 'space-between', marginTop: 10 },
   switchLabel: { color: '#ddd', fontSize: 12, textAlign: 'right' },
-  
+
   miniLabel: { color: '#ccc', fontSize: 12, marginBottom: 4, marginTop: 8, textAlign: 'right' },
   miniInput: {
       backgroundColor: 'rgba(0,0,0,0.5)', color: '#fff', borderRadius: 8, padding: 10,
@@ -721,8 +907,8 @@ const styles = StyleSheet.create({
 
   input: { backgroundColor: 'rgba(0,0,0,0.5)', color: '#ccc', borderRadius: 10, padding: 15, minHeight: 120, borderWidth: 1, borderColor: '#333', textAlign: 'left' },
 
-  saveBtn: { 
-      marginTop: 40, marginBottom: 50, borderRadius: 16, overflow: 'hidden', 
+  saveBtn: {
+      marginTop: 40, marginBottom: 50, borderRadius: 16, overflow: 'hidden',
       backgroundColor: 'rgba(255,255,255,0.08)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)',
       padding: 18, alignItems: 'center'
   },

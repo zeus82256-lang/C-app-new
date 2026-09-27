@@ -5,7 +5,6 @@ const jwt = require('jsonwebtoken');
 const axios = require('axios'); // 🔥 NEW: for custom/OpenRouter providers
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { askQwen } = require('../services/qwenAndroid.service.js');
-const { askChatGPTAndroid } = require('../services/chatgptAndroid.service.js');
 const { askDeepSeek } = require('../services/deepseekAndroid.service.js');
 
 // --- Config Imports ---
@@ -63,21 +62,13 @@ function findLLMModel(provider) {
     return provider.models.find(m => !isTranslationOnlyModel(m.modelId)) || null;
 }
 
-// 🔥 Helper to detect if a provider is ChatGPT Android (by name or model)
+// 🔥 PROVIDER CLASSIFICATION — by providerId ONLY (never by name/model substrings).
+// Mirrors translatorRoutes: custom (OpenAI-compatible) providers must never be
+// hijacked into the DeepSeek/Qwen app flows just because their model name
+// contains "deepseek"/"qwen"/"gpt".
 function isQwenProvider(provider) {
-    const providerId = (provider.providerId || '').toLowerCase();
-    const name = (provider.name || '').toLowerCase();
-    const model = (provider.selectedModel || '').toLowerCase();
-    const hasQwenModel = provider.models && provider.models.some(m => (m.modelId || '').toLowerCase().includes('qwen'));
-    return providerId === 'qwen' || name.includes('qwen') || model.includes('qwen') || hasQwenModel;
-}
-
-function isChatGPTAndroidProvider(provider) {
-    const providerId = (provider.providerId || '').toLowerCase();
-    const name = (provider.name || '').toLowerCase();
-    const model = (provider.selectedModel || '').toLowerCase();
-    const hasGptModel = provider.models && provider.models.some(m => /(gpt|chatgpt)/i.test(m.modelId || ''));
-    return providerId === 'chatgpt-android' || name.includes('chatgpt') || model.includes('gpt') || hasGptModel;
+    const providerId = String(provider.providerId || '').toLowerCase();
+    return providerId === 'qwen' || providerId.startsWith('qwen_');
 }
 
 // 🔥 NEW: DeepSeek Android helpers (mirror of translatorRoutes) – كانت مفقودة بالكامل
@@ -101,11 +92,8 @@ function resolveDeepSeekPowUrl(provider) {
 }
 
 function isDeepSeekProvider(provider) {
-    const providerId = (provider.providerId || '').toLowerCase();
-    const name = (provider.name || '').toLowerCase();
-    const model = (provider.selectedModel || '').toLowerCase();
-    const hasDeepSeekModel = provider.models && provider.models.some(m => (m.modelId || '').toLowerCase().includes('deepseek'));
-    return providerId === 'deepseek' || name.includes('deepseek') || model.includes('deepseek') || hasDeepSeekModel;
+    const providerId = String(provider.providerId || '').toLowerCase();
+    return providerId === 'deepseek' || providerId.startsWith('deepseek_');
 }
 
 function pickDeepSeekTokenSimple(provider, explicitToken) {
@@ -150,7 +138,6 @@ function extractJsonObject(rawText) {
 async function callTranslationProvider(provider, modelName, apiKey, prompt, options = {}) {
     const providerId = (provider.providerId || 'gemini').toLowerCase();
     const isCloudflare = (providerId === 'cloudflare');
-    const isChatGPT = isChatGPTAndroidProvider(provider);
     const isDeepSeek = isDeepSeekProvider(provider);
 
     // ---- DeepSeek Android API (كان مفقوداً هنا causing فشل جميع المفاتيح) ----
@@ -181,15 +168,6 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
             model: modelName || 'qwen3.8-max',
             thinkingEnabled: Boolean(provider.thinkingEnabled),
             searchEnabled: provider.searchEnabled !== false,
-            timeout: options.timeout || 500000
-        });
-    }
-
-    // ---- GPT Android API (service-backed from root gpt.py) ----
-    if (isChatGPT || providerId === 'chatgpt-android') {
-        return askChatGPTAndroid(prompt, {
-            token: apiKey && !apiKey.startsWith('dummy-key-for-') ? apiKey : provider.chatgptToken,
-            model: modelName || 'gpt-5-5',
             timeout: options.timeout || 500000
         });
     }
@@ -366,24 +344,24 @@ async function translateNovelMetadata(novelId, originalData, jobId = null) {
                 if (parsed) break;
                 const providerName = provider.name || provider.providerId;
                 const modelToUse = provider.selectedModel || (provider.models && provider.models[0]?.modelId) || 'gemini-1.5-flash';
-                let keys = provider.apiKeys || [];
-                
-                // 🔥 Allow ChatGPT Android provider to have empty keys
-                const isChatGPT = isChatGPTAndroidProvider(provider);
-                const isQwen = isQwenProvider(provider);
-                if (keys.length === 0 && !isChatGPT && !isQwen) {
-                    await logScraper(`⚠️ المزوّد ${providerName} ليس لديه مفاتيح – تخطيه`, 'warning');
-                    continue;
+                // Use the same key resolution as the translation worker (apiKeys for
+                // normal providers, token fields for the DeepSeek/Qwen app templates).
+                let keys = (Array.isArray(provider.apiKeys) ? provider.apiKeys : [])
+                    .concat(isDeepSeekProvider(provider) && Array.isArray(provider.deepSeekTokens) ? provider.deepSeekTokens : [])
+                    .concat(isQwenProvider(provider) && Array.isArray(provider.qwenTokens) ? provider.qwenTokens : [])
+                    .map(k => String(k || '').trim())
+                    .filter(Boolean);
+                if (keys.length === 0 && isDeepSeekProvider(provider)) {
+                    keys = ['dummy-key-for-deepseek'];
+                    await logScraper(`🔑 مزوّد DeepSeek: سيتم استخدام الرمز الافتراضي من تطبيق DeepSeek`, 'info');
                 }
-                
-                // For ChatGPT with empty keys, create a dummy key
-                if (isChatGPT && keys.length === 0) {
-                    keys = ['dummy-key-for-chatgpt-android'];
-                    await logScraper(`🔑 مزوّد GPT Android: سيتم استخدام مفتاح وهمي عند عدم توفر توكن`, 'info');
-                }
-                if (isQwen && keys.length === 0) {
+                if (keys.length === 0 && isQwenProvider(provider)) {
                     keys = ['dummy-key-for-qwen'];
                     await logScraper(`🔑 مزوّد Qwen: سيتم استخدام إعدادات البيئة/الافتراضي عند عدم توفر توكن`, 'info');
+                }
+                if (keys.length === 0) {
+                    await logScraper(`⚠️ المزوّد ${providerName} ليس لديه مفاتيح – تخطيه`, 'warning');
+                    continue;
                 }
 
                 for (let keyIdx = 0; keyIdx < keys.length; keyIdx++) {

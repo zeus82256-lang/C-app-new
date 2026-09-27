@@ -876,7 +876,10 @@ export default function WebReaderScreen({ route, navigation }) {
             if (autoScrollNextRef.current) {
                 autoScrollNextRef.current = false;
                 setTimeout(() => {
-                    webViewRef.current?.injectJavaScript(`var el=document.querySelector('section[data-ch="${nextNum}"]'); if(el){ window.scrollTo({top: el.offsetTop - 8, behavior:'smooth'}); } true;`);
+                    // Re-check the target's offset on the next 2 animation frames —
+                    // with content-visibility the far section first renders with an
+                    // estimated height, so the first scrollTo may be slightly off.
+                    webViewRef.current?.injectJavaScript(`(function(){var n=0;(function go(){var el=document.querySelector('section[data-ch="${nextNum}"]'); if(!el) return; window.scrollTo({top: el.offsetTop - 8, behavior:'smooth'}); if(++n<3) requestAnimationFrame(go);})();})(); true;`);
                 }, 350);
             }
         } catch (e) {
@@ -907,7 +910,9 @@ export default function WebReaderScreen({ route, navigation }) {
             const idx = secNums.indexOf(currentViewedChapter);
             const nextSec = idx !== -1 ? secNums[idx + 1] : (processedExtraSections.length ? null : undefined);
             if (nextSec) {
-                webViewRef.current?.injectJavaScript(`var el=document.querySelector('section[data-ch="${nextSec}"]'); if(el){ window.scrollTo({top: el.offsetTop - 8, behavior:'smooth'}); } true;`);
+                // Double-check the offset on the next frames (content-visibility
+                // renders the far section with an estimated height first).
+                webViewRef.current?.injectJavaScript(`(function(){var n=0;(function go(){var el=document.querySelector('section[data-ch="${nextSec}"]'); if(!el) return; window.scrollTo({top: el.offsetTop - 8, behavior:'smooth'}); if(++n<3) requestAnimationFrame(go);})();})(); true;`);
                 return;
             }
             if (endReached) {

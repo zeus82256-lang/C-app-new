@@ -31,7 +31,18 @@ export const WOR_APP_CSS = `
   /* ---- reading page typography (driven by --wor-reader-* vars) ---- */
   .wor-reader-text-surface { padding-bottom: 8px; }
   .wor-reader-text-surface p { margin: 0 0 1.45em; }
-  .wor-chapter-sec { display: block; }
+  /* Scrolling smoothness (round 2): in continuous mode the reader accumulates
+     many chapters in ONE document. iOS then has to lay out and paint ALL of
+     them every frame, so after a few appended chapters scrolling turns heavy
+     and sticky ("بصعوبة حتى أمرر لأسفل"). content-visibility lets the engine
+     SKIP offscreen chapters entirely (no layout, no paint) while the
+     contain-intrinsic-size keeps their scroll height and offsets stable; the
+     "auto" keyword remembers each chapter's real size once it has been shown. */
+  .wor-chapter-sec {
+    display: block;
+    content-visibility: auto;
+    contain-intrinsic-size: auto 6000px;
+  }
   .wor-chapter-title-block {
     font-size: calc(var(--wor-reader-font-size, 18px) + 7px);
     font-weight: 900; color: var(--wor-reader-effective-fg, var(--wor-text));
@@ -337,6 +348,9 @@ function bridgeScript() {
     var link = document.createElement('link');
     link.rel = 'stylesheet';
     link.href = 'https://fonts.googleapis.com/css2?family=' + f.google + '&display=swap';
+    // A late font swap reflows the whole document — the cached section tops
+    // must be recomputed or the saved offsets will point to the wrong lines.
+    link.addEventListener('load', function () { invalidateSectionTops(); });
     document.head.appendChild(link);
   }
   function preloadFonts() {
@@ -409,6 +423,7 @@ function bridgeScript() {
     root.style.setProperty('--wor-reader-text-direction', dir);
     root.style.setProperty('--wor-reader-text-align', align);
     root.style.setProperty('--wor-reader-font-family', fam);
+    invalidateSectionTops(); // font metrics changed → every section top moved
     var fmt = [
       ['--wor-fmt-dialogue-color', S.enableDialogue ? S.dialogueColor : null],
       ['--wor-fmt-dialogue-size', S.enableDialogue ? (S.dialogueSize + '%') : null],
@@ -577,15 +592,30 @@ function bridgeScript() {
   var lastSent = 0;
   var scrollRaf = 0;
   var lastDockNum = 0;
+  // Cache of [num, offsetTop] per section. Reading offsetTop for EVERY section
+  // on every scroll tick forces a synchronous layout of a potentially huge
+  // document (chapter sections + appended chapters) — a classic jank source.
+  // The cache is rebuilt only when chapters are appended/removed or the page
+  // size changes.
+  var sectionTopsCache = [];
+  function invalidateSectionTops() { sectionTopsCache = []; }
+  function getSectionTops() {
+    if (!sectionTopsCache.length) {
+      var secs = $all('.wor-chapter-sec[data-ch]');
+      sectionTopsCache = secs.map(function (s) {
+        return { num: parseInt(s.getAttribute('data-ch'), 10) || 0, top: s.offsetTop };
+      });
+    }
+    return sectionTopsCache;
+  }
   function activeSectionAt(y) {
     // Returns the section the reader is currently in + its absolute top, so the
     // saved offset can be stored PER CHAPTER (offset inside that chapter) —
     // this is what makes resume land exactly where the user stopped.
-    var secs = $all('.wor-chapter-sec[data-ch]');
-    var cur = { num: secs.length ? (parseInt(secs[0].getAttribute('data-ch'), 10) || 0) : 0, top: secs.length ? secs[0].offsetTop : 0 };
-    for (var i = 0; i < secs.length; i++) {
-      var t = secs[i].offsetTop;
-      if (t - 90 <= y) cur = { num: parseInt(secs[i].getAttribute('data-ch'), 10) || cur.num, top: t };
+    var tops = getSectionTops();
+    var cur = tops.length ? { num: tops[0].num, top: tops[0].top } : { num: 0, top: 0 };
+    for (var i = 0; i < tops.length; i++) {
+      if (tops[i].top - 90 <= y) cur = { num: tops[i].num, top: tops[i].top };
       else break;
     }
     return cur;
@@ -615,30 +645,37 @@ function bridgeScript() {
     if (scrollRaf) return;
     scrollRaf = requestAnimationFrame(function () {
       scrollRaf = 0;
+      // READ phase first (one layout), then WRITE phase — interleaving reads
+      // and writes here forces the engine to re-layout the document on every
+      // frame, which was another scroll-stutter source.
       var y = window.scrollY || window.pageYOffset || 0;
-      var fill = $('[data-wor-reader-chapter-progress-fill]');
       var doc = document.documentElement;
       var max = doc.scrollHeight - window.innerHeight;
-      var ratio = max > 0 ? clamp(y / max, 0, 1) : 0;
-      if (fill) fill.style.width = (ratio * 100).toFixed(2) + '%';
+      var act = null;
       var now = Date.now();
-      if (now - lastSent > 220) {
+      var needProgress = now - lastSent > 220;
+      if (needProgress) act = activeSectionAt(y);
+      var ratio = max > 0 ? clamp(y / max, 0, 1) : 0;
+      var nearEnd = S.continuousMode && !window.__worEnd && !window.__worNeedLock
+        && (y >= max - 1400);
+
+      // WRITE phase
+      var fill = $('[data-wor-reader-chapter-progress-fill]');
+      if (fill) {
+        var w = (ratio * 100).toFixed(2) + '%';
+        if (fill.style.width !== w) fill.style.width = w;
+      }
+      if (needProgress && act) {
         lastSent = now;
-        var act = activeSectionAt(y);
         var inOffset = Math.max(0, Math.round(y - act.top));
         send({ t: 'scroll', offset: Math.round(y), inOffset: inOffset, chapter: act.num, ratio: ratio });
         updateDockProgress(act.num);
       }
-      maybeNeedNext();
+      if (nearEnd) {
+        window.__worNeedLock = true;
+        send({ t: 'needNext' });
+      }
     });
-  }
-  function maybeNeedNext() {
-    if (!S.continuousMode || window.__worEnd || window.__worNeedLock) return;
-    var doc = document.documentElement;
-    if (window.scrollY + window.innerHeight >= doc.scrollHeight - 1400) {
-      window.__worNeedLock = true;
-      send({ t: 'needNext' });
-    }
   }
 
   // ============================ chapters sheet ============================
@@ -1410,6 +1447,9 @@ function bridgeScript() {
     });
     // scroll / touch
     window.addEventListener('scroll', onScroll, { passive: true });
+    // Size changes (rotation, font loading, toolbars) move every section top —
+    // drop the cache so progress tracking stays accurate.
+    window.addEventListener('resize', invalidateSectionTops, { passive: true });
     document.addEventListener('touchstart', function () {
       lastTouchAt = Date.now();
       userTouched = true;
@@ -1441,6 +1481,7 @@ function bridgeScript() {
         if (h1) h1.textContent = msg.title || ('فصل ' + msg.number);
         var surface = $('#worTextSurface');
         if (surface) surface.innerHTML = msg.html || '';
+        invalidateSectionTops();
         var strong = $('.wor-reader-dock__progress-copy strong');
         var pct = $('.wor-reader-dock__progress-copy span');
         if (strong) strong.textContent = msg.number + '/' + (msg.total || '—');
@@ -1490,6 +1531,7 @@ function bridgeScript() {
       else if (kind === 'appendChapter') {
         var surface2 = $('#worTextSurface');
         if (surface2) surface2.insertAdjacentHTML('beforeend', msg.html || '');
+        invalidateSectionTops();
         window.__worNeedLock = false;
       }
       else if (kind === 'endReached') {

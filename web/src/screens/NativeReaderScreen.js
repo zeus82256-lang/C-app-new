@@ -929,7 +929,9 @@ const fetchNextChapter = async () => {
             if (autoScrollNextRef.current) {
                 autoScrollNextRef.current = false;
                 webViewRef.current?.injectJavaScript(
-                    `setTimeout(function(){ var el = document.querySelector('section[data-ch="${nextNum}"]'); if (el) { window.scrollTo(0, el.offsetTop - 8); } }, 250); true;`
+                    // Re-check the offset on the next frames (content-visibility
+                    // renders the far section with an estimated height first).
+                    `(function(){var n=0;(function go(){var el=document.querySelector('section[data-ch="${nextNum}"]'); if(!el) return; window.scrollTo(0, el.offsetTop - 8); if(++n<3) requestAnimationFrame(go);})();})(); true;`
                 );
             }
         }
@@ -1064,7 +1066,7 @@ const navigateNextPrev = (offset) => {
                     androidListRef.current?.scrollToIndex({ index: itemIdx, viewPosition: 'start', animated: true });
                 }
             } else {
-                webViewRef.current?.injectJavaScript(`var el=document.querySelector('section[data-ch="${nextSec}"]'); if(el){ window.scrollTo({top: el.offsetTop - 8, behavior: 'smooth'}); } true;`);
+                webViewRef.current?.injectJavaScript(`(function(){var n=0;(function go(){var el=document.querySelector('section[data-ch="${nextSec}"]'); if(!el) return; window.scrollTo({top: el.offsetTop - 8, behavior: 'smooth'}); if(++n<3) requestAnimationFrame(go);})();})(); true;`);
             }
             return;
         }
@@ -1275,6 +1277,12 @@ const buildReaderCSS = () => `
         -webkit-overflow-scrolling: touch; overflow-x: hidden;
       }
       .container { padding: 25px 20px 120px 20px; width: 100%; max-width: 800px; margin: 0 auto; }
+      /* Scrolling smoothness: continuous mode accumulates chapters in one
+         document — skip layout/paint of offscreen chapters entirely (iOS). */
+      .chapter-sec {
+        content-visibility: auto;
+        contain-intrinsic-size: auto 6000px;
+      }
       .title {
         font-size: ${fontSize + 8}px; font-weight: bold; margin-bottom: 20px;
         color: ${effectiveTextColor};
@@ -1405,12 +1413,27 @@ const generateHTML = () => {
               setTimeout(__restore, 1000);
           }
           var lastSent = 0;
+          // Cache section tops — reading offsetTop of every section on every
+          // scroll tick forces a synchronous layout of the whole document.
+          var topsCache = null;
+          function invalidateTops() { topsCache = null; }
+          window.__worInvalidateTops = invalidateTops;
+          window.addEventListener('resize', invalidateTops, { passive: true });
+          function getTops() {
+              if (!topsCache) {
+                  var secs = document.querySelectorAll('section[data-ch]');
+                  topsCache = [];
+                  for (var i = 0; i < secs.length; i++) {
+                      topsCache.push({ num: parseInt(secs[i].getAttribute('data-ch')) || 0, top: secs[i].offsetTop });
+                  }
+              }
+              return topsCache;
+          }
           function activeSection(y) {
-              var secs = document.querySelectorAll('section[data-ch]');
-              var cur = { num: secs.length ? parseInt(secs[0].getAttribute('data-ch')) : 0, top: secs.length ? secs[0].offsetTop : 0 };
-              for (var i = 0; i < secs.length; i++) {
-                  var t = secs[i].offsetTop;
-                  if (t - 80 <= y) cur = { num: parseInt(secs[i].getAttribute('data-ch')) || cur.num, top: t };
+              var tops = getTops();
+              var cur = tops.length ? { num: tops[0].num, top: tops[0].top } : { num: 0, top: 0 };
+              for (var i = 0; i < tops.length; i++) {
+                  if (tops[i].top - 80 <= y) cur = { num: tops[i].num, top: tops[i].top };
                   else break;
               }
               return cur;
@@ -1451,6 +1474,7 @@ const generateHTML = () => {
               wrap.innerHTML = html;
               var root = document.getElementById('chapters-root');
               while (wrap.firstChild) root.appendChild(wrap.firstChild);
+              if (window.__worInvalidateTops) window.__worInvalidateTops();
               window.__needNextLock = false;
           };
           window.__markEnd = function() { window.__endReached = true; window.__needNextLock = true; };

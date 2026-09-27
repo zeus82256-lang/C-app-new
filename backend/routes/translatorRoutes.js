@@ -7,7 +7,6 @@ const TranslationJob = require('../models/translationJob.model.js');
 const Settings = require('../models/settings.model.js');
 const { askDeepSeek } = require('../services/deepseekAndroid.service.js');
 const { askQwen } = require('../services/qwenAndroid.service.js');
-const { askChatGPTAndroid } = require('../services/chatgptAndroid.service.js');
 
 const DEEPSEEK_CHAPTERS_PER_CONVERSATION = 100;
 const DEEPSEEK_MAX_ATTEMPTS_PER_TOKEN = 5;
@@ -90,6 +89,7 @@ function hashStringToIndex(value, size) {
 }
 
 function getProviderAuthKeys(provider) {
+    // DeepSeek/Qwen templates keep their own token fields (synced from apiKeys on save).
     if (isDeepSeekProvider(provider)) {
         const deepSeekTokens = Array.isArray(provider.deepSeekTokens)
             ? provider.deepSeekTokens.map(t => (t || '').trim()).filter(Boolean)
@@ -102,12 +102,7 @@ function getProviderAuthKeys(provider) {
             : [];
         if (qwenTokens.length > 0) return qwenTokens;
     }
-    if (isChatGPTAndroidProvider(provider)) {
-        const chatGptTokens = Array.isArray(provider.chatGptTokens)
-            ? provider.chatGptTokens.map(t => (t || '').trim()).filter(Boolean)
-            : [];
-        if (chatGptTokens.length > 0) return chatGptTokens;
-    }
+    // Everything else (Gemini/OpenRouter/Cloudflare/custom) uses its OWN apiKeys.
     return Array.isArray(provider.apiKeys) ? provider.apiKeys.map(k => (k || '').trim()).filter(Boolean) : [];
 }
 
@@ -212,33 +207,24 @@ function findLLMModel(provider) {
     return provider.models.find(m => !isTranslationOnlyModel(m.modelId)) || null;
 }
 
-// 🔥 Helper to detect if a provider is ChatGPT Android (by name or model)
+// 🔥 PROVIDER CLASSIFICATION — by providerId ONLY (never by name/model substrings).
+// Old logic matched "name/model includes deepseek/qwen/gpt", which HIJACKED custom
+// (OpenAI-compatible) providers: a custom provider with a gpt/qwen/deepseek model
+// was silently routed into the Android-app conversation flow, its baseUrl ignored
+// and its real API key replaced by a dummy token. Custom providers are now
+// completely independent: they always go through their own baseUrl with their own key.
 function isDeepSeekProvider(provider) {
-    const providerId = (provider.providerId || '').toLowerCase();
-    const name = (provider.name || '').toLowerCase();
-    const model = (provider.selectedModel || '').toLowerCase();
-    const hasDeepSeekModel = provider.models && provider.models.some(m => (m.modelId || '').toLowerCase().includes('deepseek'));
-    return providerId === 'deepseek' || name.includes('deepseek') || model.includes('deepseek') || hasDeepSeekModel;
+    const providerId = String(provider.providerId || '').toLowerCase();
+    return providerId === 'deepseek' || providerId.startsWith('deepseek_');
 }
 
 function isQwenProvider(provider) {
-    const providerId = (provider.providerId || '').toLowerCase();
-    const name = (provider.name || '').toLowerCase();
-    const model = (provider.selectedModel || '').toLowerCase();
-    const hasQwenModel = provider.models && provider.models.some(m => (m.modelId || '').toLowerCase().includes('qwen'));
-    return providerId === 'qwen' || name.includes('qwen') || model.includes('qwen') || hasQwenModel;
-}
-
-function isChatGPTAndroidProvider(provider) {
-    const providerId = (provider.providerId || '').toLowerCase();
-    const name = (provider.name || '').toLowerCase();
-    const model = (provider.selectedModel || '').toLowerCase();
-    const hasGptModel = provider.models && provider.models.some(m => /(gpt|chatgpt)/i.test(m.modelId || ''));
-    return providerId === 'chatgpt-android' || name.includes('chatgpt') || model.includes('gpt') || hasGptModel;
+    const providerId = String(provider.providerId || '').toLowerCase();
+    return providerId === 'qwen' || providerId.startsWith('qwen_');
 }
 
 function isStickyChatProvider(provider) {
-    return isDeepSeekProvider(provider) || isQwenProvider(provider) || isChatGPTAndroidProvider(provider);
+    return isDeepSeekProvider(provider) || isQwenProvider(provider);
 }
 
 const ARABIC_FULL_CHAPTER_WORD_THRESHOLD = 800;
@@ -532,12 +518,11 @@ ${sourceContent}
 `;
 }
 
-// 🔥 Unified provider caller supporting Gemini, OpenRouter, Cloudflare, custom APIs, and ChatGPT Android
+// 🔥 Unified provider caller supporting Gemini, OpenRouter, Cloudflare, custom APIs, DeepSeek and Qwen
 async function callTranslationProvider(provider, modelName, apiKey, prompt, options = {}) {
     const providerId = (provider.providerId || 'gemini').toLowerCase();
     const isCloudflare = (providerId === 'cloudflare');
     const isDeepSeek = isDeepSeekProvider(provider);
-    const isChatGPT = isChatGPTAndroidProvider(provider);
 
     // ---- DeepSeek Android/Web API (same flow as the standalone DeepSeek app) ----
     if (isDeepSeek) {
@@ -578,21 +563,6 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
             model: modelName || 'qwen3.8-max',
             thinkingEnabled: Boolean(provider.thinkingEnabled),
             searchEnabled: provider.searchEnabled !== false,
-            timeout: options.timeout || 500000,
-            context: getDeepSeekConversationContext(
-                options.conversationContexts,
-                options.conversationPurpose,
-                options.conversationBatchKey,
-                options.conversationScopeKey
-            )
-        });
-    }
-
-    // ---- ChatGPT Android API from root gpt.py (service-backed, no inline legacy code) ----
-    if (isChatGPT || providerId === 'chatgpt-android') {
-        return askChatGPTAndroid(prompt, {
-            token: apiKey && !apiKey.startsWith('dummy-key-for-') ? apiKey : provider.chatgptToken,
-            model: modelName || 'gpt-5-5',
             timeout: options.timeout || 500000,
             context: getDeepSeekConversationContext(
                 options.conversationContexts,
@@ -827,18 +797,13 @@ ${sourceContent}
                     const providerName = provider.name || provider.providerId;
                     const modelToUse = provider.selectedModel || (provider.models && provider.models[0]?.modelId) || 'gemini-2.5-flash';
                     let keys = getProviderAuthKeys(provider);
-                    const isChatGPT = isChatGPTAndroidProvider(provider);
                     const isDeepSeek = isDeepSeekProvider(provider);
                     const isQwen = isQwenProvider(provider);
                     const isStickyChat = isStickyChatProvider(provider);
 
-                    if (keys.length === 0 && !isChatGPT && !isDeepSeek && !isQwen) {
+                    if (keys.length === 0 && !isDeepSeek && !isQwen) {
                         await pushLog(jobId, `⚠️ المزوّد ${providerName} ليس لديه مفاتيح – تخطيه`, 'warning');
                         continue;
-                    }
-                    if (isChatGPT && keys.length === 0) {
-                        keys = ['dummy-key-for-chatgpt-android'];
-                        await pushLog(jobId, `🔑 مزوّد ChatGPT Android: سيتم استخدام مفتاح وهمي (لا يحتاج مفتاح حقيقي)`, 'info');
                     }
                     if (isDeepSeek && keys.length === 0) {
                         keys = ['dummy-key-for-deepseek'];
@@ -987,11 +952,41 @@ ${sourceContent}
             // 🔥🔥🔥 END TITLE EXTRACTION 🔥🔥🔥
 
             try {
-                await pushLog(jobId, `2️⃣ جاري استخراج المصطلحات...`, 'info');
-                
-                // 🔥 NEW: For extraction, pick the best LLM model from the same provider that succeeded,
-                // or fall back to any provider with an LLM.
+                // 🔥 GLOSSARY EXTRACTION — STRICTLY on the provider that succeeded in
+                // translating this chapter. Old logic treated "0 terms found" as a
+                // FAILURE and fell back to OTHER providers (e.g. DeepSeek), so with a
+                // successful Qwen translation the glossary still ran on a different
+                // provider. "0 new terms" is a SUCCESS (nothing new to learn), not a
+                // failure — only a thrown error (network/auth) may fall back.
                 let extractionDone = false;
+
+                // Helper: persist extracted terms into the glossary collection
+                const saveExtractedTerms = async (terms) => {
+                    let newTermsCount = 0;
+                    for (const termObj of terms) {
+                        const rawTerm = termObj.name || termObj.term;
+                        const translation = termObj.translation;
+                        if (rawTerm && translation) {
+                            let category = termObj.category ? termObj.category.toLowerCase() : 'other';
+                            if (category === 'character') category = 'characters';
+                            else if (category === 'location') category = 'locations';
+                            else if (category === 'item') category = 'items';
+                            else if (category === 'rank') category = 'ranks';
+                            else if (category === 'concept') category = 'other';
+                            if (!['characters', 'locations', 'items', 'ranks'].includes(category)) category = 'other';
+                            await Glossary.updateOne(
+                                { novelId: freshNovel._id, term: rawTerm },
+                                {
+                                    $set: { translation: translation, category: category, description: termObj.description || '' },
+                                    $setOnInsert: { autoGenerated: true }
+                                },
+                                { upsert: true }
+                            );
+                            newTermsCount++;
+                        }
+                    }
+                    return newTermsCount;
+                };
 
                 // Helper function to try extraction with a specific provider + model
                 const tryExtraction = async (extProvider, extModelId, extKey) => {
@@ -1005,7 +1000,8 @@ Arabic Text (Excerpt):
 """${translatedText.substring(0, 8000)}"""
 `;
                     let jsonText;
-                    if ((extProvider.providerId === 'gemini' || (!extProvider.baseUrl && extProvider.providerId !== 'openrouter' && extProvider.providerId !== 'cloudflare' && !isChatGPTAndroidProvider(extProvider) && !isDeepSeekProvider(extProvider))) && extProvider.providerId !== 'openrouter' && extProvider.providerId !== 'cloudflare' && !isChatGPTAndroidProvider(extProvider) && !isDeepSeekProvider(extProvider)) {
+                    const extId = String(extProvider.providerId || '').toLowerCase();
+                    if (extId === 'gemini' && !extProvider.baseUrl) {
                         // Gemini native with JSON mode
                         const genAI = new GoogleGenerativeAI(extKey);
                         const modelJSON = genAI.getGenerativeModel({ model: extModelId });
@@ -1014,7 +1010,7 @@ Arabic Text (Excerpt):
                         const responseExt = await resultExt.response;
                         jsonText = responseExt.text().trim();
                     } else {
-                        // OpenAI-compatible or Cloudflare LLM or ChatGPT Android
+                        // OpenAI-compatible / Cloudflare LLM / DeepSeek / Qwen (through their own callers)
                         const extPrompt = extractionInput + "\n\nRETURN ONLY JSON.";
                         jsonText = await callTranslationProvider(extProvider, extModelId, extKey, extPrompt, {
                             deepSeekJobId: jobId.toString(),
@@ -1024,7 +1020,7 @@ Arabic Text (Excerpt):
                             conversationScopeKey: getTokenConversationScope(extProvider, extKey, 0)
                         });
                     }
-                    
+
                     // Cleanup JSON string - ROBUST VERSION
 jsonText = jsonText.trim();
 
@@ -1064,102 +1060,43 @@ if (jsonMatch) {
                     return parsedTerms;
                 };
 
-                // ---- STEP 1: Use the same provider that translated successfully ----
+                const extractionKeysFor = (provider) => {
+                    const keys = getProviderAuthKeys(provider);
+                    if (keys.length === 0) {
+                        if (isDeepSeekProvider(provider)) return ['dummy-key-for-deepseek'];
+                        if (isQwenProvider(provider)) return ['dummy-key-for-qwen'];
+                    }
+                    return keys;
+                };
+
+                // ---- STEP 1: Use the SAME provider + model + key that translated successfully ----
                 if (usedProvider) {
-                    const providerId = usedProvider.providerId;
-                    // If the model used for translation is an LLM (not translation-only), use it directly
-                    if (!isTranslationOnlyModel(usedProvider.selectedModel)) {
-                        let keys = getProviderAuthKeys(usedProvider);
-                        if (isChatGPTAndroidProvider(usedProvider) && keys.length === 0) keys = ['dummy-key-for-chatgpt-android'];
-                        if (isDeepSeekProvider(usedProvider) && keys.length === 0) keys = ['dummy-key-for-deepseek'];
-                        if (isQwenProvider(usedProvider) && keys.length === 0) keys = ['dummy-key-for-qwen'];
-                        for (const key of keys) {
-                            try {
-                                const terms = await tryExtraction(usedProvider, usedProvider.selectedModel, key);
-                                if (terms.length > 0) {
-                                    // Save terms...
-                                    let newTermsCount = 0;
-                                    for (const termObj of terms) {
-                                        const rawTerm = termObj.name || termObj.term;
-                                        const translation = termObj.translation;
-                                        if (rawTerm && translation) {
-                                            let category = termObj.category ? termObj.category.toLowerCase() : 'other';
-                                            if (category === 'character') category = 'characters';
-                                            else if (category === 'location') category = 'locations';
-                                            else if (category === 'item') category = 'items';
-                                            else if (category === 'rank') category = 'ranks';
-                                            else if (category === 'concept') category = 'other';
-                                            if (!['characters', 'locations', 'items', 'ranks'].includes(category)) category = 'other';
-                                            await Glossary.updateOne(
-                                                { novelId: freshNovel._id, term: rawTerm }, 
-                                                { 
-                                                    $set: { translation: translation, category: category, description: termObj.description || '' },
-                                                    $setOnInsert: { autoGenerated: true }
-                                                },
-                                                { upsert: true }
-                                            );
-                                            newTermsCount++;
-                                        }
-                                    }
-                                    if (newTermsCount > 0) await pushLog(jobId, `✅ تم إضافة/تحديث ${newTermsCount} مصطلح للمسرد`, 'success');
-                                    else await pushLog(jobId, `ℹ️ لم يتم استخراج مصطلحات جديدة`, 'info');
-                                    extractionDone = true;
-                                    break;
-                                }
-                            } catch (extErr) {
-                                console.error("Extraction error with same provider:", extErr.message);
-                            }
-                        }
-                    } else {
-                        // Translation-only model – try to find an LLM model in the same provider
-                        const llmModel = findLLMModel(usedProvider);
-                        if (llmModel) {
-                            let keys = getProviderAuthKeys(usedProvider);
-                            if (isChatGPTAndroidProvider(usedProvider) && keys.length === 0) keys = ['dummy-key-for-chatgpt-android'];
-                            if (isDeepSeekProvider(usedProvider) && keys.length === 0) keys = ['dummy-key-for-deepseek'];
-                        if (isQwenProvider(usedProvider) && keys.length === 0) keys = ['dummy-key-for-qwen'];
-                            for (const key of keys) {
-                                try {
-                                    const terms = await tryExtraction(usedProvider, llmModel.modelId, key);
-                                    if (terms.length > 0) {
-                                        let newTermsCount = 0;
-                                        for (const termObj of terms) {
-                                            const rawTerm = termObj.name || termObj.term;
-                                            const translation = termObj.translation;
-                                            if (rawTerm && translation) {
-                                                let category = termObj.category ? termObj.category.toLowerCase() : 'other';
-                                                if (category === 'character') category = 'characters';
-                                                else if (category === 'location') category = 'locations';
-                                                else if (category === 'item') category = 'items';
-                                                else if (category === 'rank') category = 'ranks';
-                                                else if (category === 'concept') category = 'other';
-                                                if (!['characters', 'locations', 'items', 'ranks'].includes(category)) category = 'other';
-                                                await Glossary.updateOne(
-                                                    { novelId: freshNovel._id, term: rawTerm }, 
-                                                    { 
-                                                        $set: { translation: translation, category: category, description: termObj.description || '' },
-                                                        $setOnInsert: { autoGenerated: true }
-                                                    },
-                                                    { upsert: true }
-                                                );
-                                                newTermsCount++;
-                                            }
-                                        }
-                                        if (newTermsCount > 0) await pushLog(jobId, `✅ تم إضافة/تحديث ${newTermsCount} مصطلح للمسرد`, 'success');
-                                        else await pushLog(jobId, `ℹ️ لم يتم استخراج مصطلحات جديدة`, 'info');
-                                        extractionDone = true;
-                                        break;
-                                    }
-                                } catch (extErr) {
-                                    console.error("Extraction error with LLM model:", extErr.message);
-                                }
-                            }
+                    const extProviderName = usedProvider.name || usedProvider.providerId;
+                    const extModel = isTranslationOnlyModel(usedProvider.selectedModel)
+                        ? (findLLMModel(usedProvider)?.modelId || usedProvider.selectedModel)
+                        : usedProvider.selectedModel;
+                    await pushLog(jobId, `2️⃣ استخراج المصطلحات بنفس مزوّد الترجمة الناجح: ${extProviderName} | نموذج: ${extModel}`, 'info');
+
+                    const keys = extractionKeysFor(usedProvider);
+                    for (const key of keys) {
+                        try {
+                            const terms = await tryExtraction(usedProvider, extModel, key);
+                            // SUCCESS regardless of count: 0 terms = nothing new to learn.
+                            const newTermsCount = await saveExtractedTerms(terms);
+                            if (newTermsCount > 0) await pushLog(jobId, `✅ تم إضافة/تحديث ${newTermsCount} مصطلح للمسرد (${extProviderName})`, 'success');
+                            else await pushLog(jobId, `ℹ️ لم يتم استخراج مصطلحات جديدة (${extProviderName})`, 'info');
+                            extractionDone = true;
+                            break;
+                        } catch (extErr) {
+                            console.error("Extraction error with same provider:", extErr.message);
+                            await pushLog(jobId, `⚠️ فشل استخراج المصطلحات عبر ${extProviderName}: ${extErr.message}`, 'warning');
                         }
                     }
                 }
 
-                // ---- STEP 2: Fallback – any provider with an LLM ----
+                // ---- STEP 2: Fallback – any provider with an LLM (only if the successful provider errored) ----
                 if (!extractionDone) {
+                    await pushLog(jobId, `↪️ تعذر الاستخراج من مزوّد الترجمة الناجح — تجربة بقية المزوّدين احتياطاً`, 'warning');
                     const orderedProviders = stickySuccessRoute
                     ? [...providers.slice(stickySuccessRoute.providerIndex), ...providers.slice(0, stickySuccessRoute.providerIndex)]
                     : providers;
@@ -1168,42 +1105,16 @@ if (jsonMatch) {
                         if (extractionDone) break;
                         const llmModel = findLLMModel(provider);
                         if (!llmModel) continue;
-                        let keys = getProviderAuthKeys(provider);
-                        if (isChatGPTAndroidProvider(provider) && keys.length === 0) keys = ['dummy-key-for-chatgpt-android'];
-                        if (isDeepSeekProvider(provider) && keys.length === 0) keys = ['dummy-key-for-deepseek'];
-                        if (isQwenProvider(provider) && keys.length === 0) keys = ['dummy-key-for-qwen'];
+                        const providerName = provider.name || provider.providerId;
+                        const keys = extractionKeysFor(provider);
                         for (const key of keys) {
                             try {
                                 const terms = await tryExtraction(provider, llmModel.modelId, key);
-                                if (terms.length > 0) {
-                                    let newTermsCount = 0;
-                                    for (const termObj of terms) {
-                                        const rawTerm = termObj.name || termObj.term;
-                                        const translation = termObj.translation;
-                                        if (rawTerm && translation) {
-                                            let category = termObj.category ? termObj.category.toLowerCase() : 'other';
-                                            if (category === 'character') category = 'characters';
-                                            else if (category === 'location') category = 'locations';
-                                            else if (category === 'item') category = 'items';
-                                            else if (category === 'rank') category = 'ranks';
-                                            else if (category === 'concept') category = 'other';
-                                            if (!['characters', 'locations', 'items', 'ranks'].includes(category)) category = 'other';
-                                            await Glossary.updateOne(
-                                                { novelId: freshNovel._id, term: rawTerm }, 
-                                                { 
-                                                    $set: { translation: translation, category: category, description: termObj.description || '' },
-                                                    $setOnInsert: { autoGenerated: true }
-                                                },
-                                                { upsert: true }
-                                            );
-                                            newTermsCount++;
-                                        }
-                                    }
-                                    if (newTermsCount > 0) await pushLog(jobId, `✅ تم إضافة/تحديث ${newTermsCount} مصطلح للمسرد`, 'success');
-                                    else await pushLog(jobId, `ℹ️ لم يتم استخراج مصطلحات جديدة`, 'info');
-                                    extractionDone = true;
-                                    break;
-                                }
+                                const newTermsCount = await saveExtractedTerms(terms);
+                                if (newTermsCount > 0) await pushLog(jobId, `✅ تم إضافة/تحديث ${newTermsCount} مصطلح للمسرد (${providerName} — احتياطي)`, 'success');
+                                else await pushLog(jobId, `ℹ️ لم يتم استخراج مصطلحات جديدة (${providerName} — احتياطي)`, 'info');
+                                extractionDone = true;
+                                break;
                             } catch (extErr) {
                                 console.error("Extraction error fallback:", extErr.message);
                             }
@@ -1448,7 +1359,7 @@ module.exports = function(app, verifyToken, verifyAdmin) {
             
             // 🔥 CHECK providers instead of legacy keys
             const providers = userSettings?.translationProviders || [];
-            const anyKeys = providers.some(p => (p.apiKeys && p.apiKeys.length > 0) || isChatGPTAndroidProvider(p) || isDeepSeekProvider(p) || isQwenProvider(p));
+            const anyKeys = providers.some(p => (p.apiKeys && p.apiKeys.length > 0) || isDeepSeekProvider(p) || isQwenProvider(p));
             const legacyKeys = userSettings?.translatorApiKeys || [];
             
             if (!anyKeys && legacyKeys.length === 0) {
@@ -1648,22 +1559,105 @@ module.exports = function(app, verifyToken, verifyAdmin) {
         }
     });
 
+    // 🔥 Server-side provider normalization — guarantees keys are never dropped or
+    // hijacked by a wrong engine. Rules:
+    //   - deepseek_*  → tokens live in deepSeekTokens (synced with apiKeys)
+    //   - qwen_*      → tokens live in qwenTokens (synced with apiKeys)
+    //   - everything else (gemini/openrouter/cloudflare/custom) → apiKeys ONLY,
+    //     all chat-app token fields are cleared so a custom provider with a
+    //     gpt/qwen/deepseek model can never be misrouted again.
+    function normalizeProviderForStorage(p) {
+        const id = String(p.providerId || `provider_${Date.now()}`);
+        const apiKeys = Array.isArray(p.apiKeys)
+            ? p.apiKeys.map(k => String(k || '').trim()).filter(Boolean)
+            : [];
+        const models = Array.isArray(p.models)
+            ? p.models
+                .map(m => ({ modelId: String(m.modelId || '').trim(), modelName: String(m.modelName || m.modelId || '').trim() }))
+                .filter(m => m.modelId)
+            : [];
+        const isDeepSeek = id === 'deepseek' || id.startsWith('deepseek_');
+        const isQwen = id === 'qwen' || id.startsWith('qwen_');
+        const normalized = {
+            providerId: id,
+            name: String(p.name || 'مزوّد').trim() || 'مزوّد',
+            baseUrl: String(p.baseUrl || '').trim(),
+            models,
+            apiKeys,
+            selectedModel: String(p.selectedModel || (models[0]?.modelId) || '').trim(),
+            priority: Number.isFinite(+p.priority) ? +p.priority : 0,
+            thinkingEnabled: !!p.thinkingEnabled,
+            searchEnabled: p.searchEnabled !== false,
+            deepSeekModelType: p.deepSeekModelType === 'expert' ? 'expert' : 'default',
+            deepSeekTokens: [],
+            qwenTokens: [],
+            powProviders: [],
+            selectedPowProviderId: ''
+        };
+        if (isDeepSeek) {
+            const tokens = Array.isArray(p.deepSeekTokens) ? p.deepSeekTokens.map(t => String(t || '').trim()).filter(Boolean) : [];
+            normalized.deepSeekTokens = Array.from(new Set([...apiKeys, ...tokens]));
+            normalized.powProviders = Array.isArray(p.powProviders) && p.powProviders.length
+                ? p.powProviders.filter(pw => pw && pw.url).map(pw => ({ id: String(pw.id || 'pow'), name: String(pw.name || 'POW'), url: String(pw.url) }))
+                : DEFAULT_DEEPSEEK_POW_PROVIDERS;
+            normalized.selectedPowProviderId = String(p.selectedPowProviderId || 'railway');
+        } else if (isQwen) {
+            const tokens = Array.isArray(p.qwenTokens) ? p.qwenTokens.map(t => String(t || '').trim()).filter(Boolean) : [];
+            normalized.qwenTokens = Array.from(new Set([...apiKeys, ...tokens]));
+        }
+        return normalized;
+    }
+
     app.post('/api/translator/settings', verifyToken, verifyAdmin, async (req, res) => {
         try {
             const { customPrompt, translatorExtractPrompt, translatorModel, translatorApiKeys, translationProviders } = req.body;
-            
+
             let settings = await getGlobalSettings();
 
             if (customPrompt !== undefined) settings.customPrompt = customPrompt;
             if (translatorExtractPrompt !== undefined) settings.translatorExtractPrompt = translatorExtractPrompt;
             if (translatorModel !== undefined) settings.translatorModel = translatorModel;
             if (translatorApiKeys !== undefined) settings.translatorApiKeys = translatorApiKeys;
-            if (translationProviders !== undefined) settings.translationProviders = translationProviders; // 🔥 NEW
+            if (translationProviders !== undefined) {
+                settings.translationProviders = translationProviders.map(normalizeProviderForStorage); // 🔥 normalized server-side
+            }
 
             await settings.save();
             res.json({ success: true });
         } catch (e) {
             res.status(500).json({ error: e.message });
+        }
+    });
+
+    // 🔥 Fetch available models from a custom OpenAI-compatible base URL
+    // (GET {baseUrl}/models) — lets the user pick a model instead of typing it.
+    app.post('/api/translator/providers/models', verifyToken, verifyAdmin, async (req, res) => {
+        try {
+            const { baseUrl, apiKey } = req.body;
+            let base = String(baseUrl || '').trim();
+            if (!base) return res.status(400).json({ error: 'Base URL مطلوب' });
+            // tolerate pasting the full chat/completions endpoint
+            base = base.replace(/\/+$/, '').replace(/\/chat\/completions$/i, '');
+            const headers = { 'Content-Type': 'application/json' };
+            if (apiKey) headers['Authorization'] = `Bearer ${String(apiKey).trim()}`;
+
+            const response = await axios.get(`${base}/models`, { headers, timeout: 20000 });
+            const raw = response.data?.data || response.data?.models || response.data;
+            if (!Array.isArray(raw)) {
+                return res.status(502).json({ error: `استجابة غير متوقعة من المزوّد: ${JSON.stringify(response.data).substring(0, 200)}` });
+            }
+            const models = raw
+                .map(m => {
+                    const id = typeof m === 'string' ? m : (m.id || m.model || m.name || '');
+                    return { modelId: String(id).trim(), modelName: String(id).trim() };
+                })
+                .filter(m => m.modelId)
+                .sort((a, b) => a.modelId.localeCompare(b.modelId));
+            res.json({ models, baseUrl: base });
+        } catch (e) {
+            const status = e.response?.status;
+            const detail = status ? `HTTP ${status}` : e.message;
+            res.status(502).json({ error: `فشل جلب النماذج: ${detail}` });
         }
     });
 };
