@@ -1,22 +1,10 @@
-// حماية موحّدة للوحدات الاختيارية الأصلية (TTS / منع إطفاء الشاشة).
+// حماية موحّدة للوحدة الاختيارية الأصلية (منع إطفاء الشاشة).
 // إذا حُذفت الوحدة الأصلية أو تغيّر إصدارها بشكل غير متوافق، يبقى التطبيق
-// يعمل بالكامل وتُعطَّل هذه الميزتين فقط بدل انهيار التطبيق عند الإقلاع.
-let Speech = {
-    speak: () => { },
-    stop: () => { },
-    isSpeakingAsync: async () => false,
-};
+// يعمل بالكامل وتُعطَّل هذه الميزة فقط بدل انهيار التطبيق عند الإقلاع.
 let KeepAwake = {
     activateKeepAwakeAsync: async () => { },
     deactivateKeepAwake: () => { },
 };
-
-try {
-    const mod = require('expo-speech');
-    if (mod && typeof mod.speak === 'function' && typeof mod.stop === 'function') {
-        Speech = mod;
-    }
-} catch (e) { }
 
 try {
     const mod = require('expo-keep-awake');
@@ -25,4 +13,4 @@ try {
     }
 } catch (e) { }
 
-export { Speech, KeepAwake };
+export { KeepAwake };

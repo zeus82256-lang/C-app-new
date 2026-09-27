@@ -15,7 +15,7 @@ import {
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { Ionicons } from '@expo/vector-icons';
-import { Speech, KeepAwake } from '../reader/optionalModules';
+import { KeepAwake } from '../reader/optionalModules';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import api, { incrementView } from '../services/api';
@@ -305,7 +305,6 @@ export default function ReaderScreen({ route, navigation }) {
     const pendingRestoreRef = useRef(0);
     const loadingNextRef = useRef(false);
     const autoScrollNextRef = useRef(false);
-    const ttsStopRef = useRef(false);
 
     const novelId = novel._id || novel.id || novel.novelId;
     const isAdmin = userInfo?.role === 'admin';
@@ -439,7 +438,7 @@ export default function ReaderScreen({ route, navigation }) {
                     'enableMarkdown', 'markdownColor', 'markdownSize', 'hideMarkdownMarks', 'selectedMarkdownStyle',
                     'enableBracket', 'bracketColor', 'bracketSize', 'hideBracketMarks', 'selectedBracketStyle',
                     'enableCustom', 'customOpenMark', 'customCloseMark', 'customColor', 'customSize', 'hideCustomMarks',
-                    'showProgressBar', 'progressBarColor', 'continuousMode', 'autoScroll', 'ttsEnabled', 'keepAwake',
+                    'showProgressBar', 'progressBarColor', 'continuousMode', 'autoScroll', 'keepAwake',
                     'hideTitle', 'tapToToggle', 'enableSeparator', 'separatorText', 'dockOpen']
                     .forEach(k => { if (p[k] !== undefined) patch[k] = p[k]; });
                 // legacy v4 keys
@@ -1001,36 +1000,6 @@ export default function ReaderScreen({ route, navigation }) {
         }
     };
 
-    // ========================= TTS (القراءة الصوتية) =========================
-    const stripForTTS = (text) => String(text || '')
-        .replace(/\*\*/g, '')
-        .replace(/\[(\/?)[a-z]+\]/gi, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-
-    useEffect(() => {
-        ttsStopRef.current = false;
-        if (settings.ttsEnabled && chapter) {
-            const text = stripForTTS(getProcessedContent);
-            if (text) {
-                Speech.stop();
-                const chunks = [];
-                for (let i = 0; i < text.length; i += 2700) chunks.push(text.slice(i, i + 2700));
-                let idx = 0;
-                const speakNext = () => {
-                    if (ttsStopRef.current || idx >= chunks.length) return;
-                    const cur = chunks[idx];
-                    idx += 1;
-                    Speech.speak(cur, { language: 'ar', rate: 1.0, onDone: speakNext, onError: speakNext });
-                };
-                speakNext();
-            }
-        } else {
-            Speech.stop();
-        }
-        return () => { ttsStopRef.current = true; Speech.stop(); };
-    }, [settings.ttsEnabled, chapter, getProcessedContent]); // eslint-disable-line react-hooks/exhaustive-deps
-
     // ========================= keep awake =========================
     useEffect(() => {
         if (settings.keepAwake) {
@@ -1045,16 +1014,21 @@ export default function ReaderScreen({ route, navigation }) {
     const webAliveRef = useRef(0);
 
     useEffect(() => {
-        loadSettings();
-        loadFoldersAndPrefs();
-        if (!isOfflineMode) {
-            fetchAuthorData();
-            fetchFavoriteStatus();
-            if (isAdmin) {
-                fetchCleanerWords();
-                fetchCopyrights();
+        (async () => {
+            // الإعدادات ومجلدات الاستبدال أولاً حتى تكون جاهزة قبل أول جلب للفصل
+            await loadSettings();
+            await loadFoldersAndPrefs();
+            if (!isOfflineMode) {
+                fetchAuthorData();
+                fetchFavoriteStatus();
+                if (isAdmin) {
+                    fetchCleanerWords();
+                    fetchCopyrights();
+                }
             }
-        }
+            // جلب الفصل عند فتح القارئ (كان مفقوداً بعد إعادة التصميم → شاشة تحميل للأبد)
+            fetchChapter();
+        })();
         const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
             // if the web side has been silent for a while (JS failed to boot), leave directly
             if (Date.now() - webAliveRef.current > 4000 && webAliveRef.current !== 0) {
@@ -1074,7 +1048,6 @@ export default function ReaderScreen({ route, navigation }) {
         return () => {
             backHandler.remove();
             if (scrollSaveTimer.current) clearTimeout(scrollSaveTimer.current);
-            Speech.stop();
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);

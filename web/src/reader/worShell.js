@@ -100,8 +100,9 @@ export const WOR_APP_CSS = `
   /* ---- continuous-scroll footer ---- */
   .wor-continuous-footer { text-align: center; color: var(--wor-muted); font-size: .85rem; font-weight: 700; padding: 14px 0 6px; user-select: none; }
 
-  /* ---- reading-area padding under the fixed topbar / above the dock ---- */
-  .wor-reader-main { padding-top: calc(var(--wor-topbar-h, 58px) + var(--wor-safe-top, 0px) + 14px); padding-bottom: calc(var(--wor-reader-dock-height, 242px) + var(--wor-safe-bottom, 0px) + 30px); }
+  /* ---- reading-area padding above the dock (no fixed topbar) ---- */
+  :root { --wor-topbar-h: 0px; }
+  .wor-reader-main { padding-top: calc(var(--wor-topbar-h, 0px) + var(--wor-safe-top, 0px) + 14px); padding-bottom: calc(var(--wor-reader-dock-height, 242px) + var(--wor-safe-bottom, 0px) + 30px); }
   body.wor-reader-dock-collapsed .wor-reader-main { padding-bottom: calc(96px + var(--wor-safe-bottom, 0px)); }
 
   /* ---- toast ---- */
@@ -371,7 +372,6 @@ function bridgeScript() {
     setSwitch('[data-wor-chapter-progress-toggle]', S.showProgressBar !== false);
     setSwitch('[data-wor-switch="continuous"]', !!S.continuousMode);
     setSwitch('[data-wor-switch="autoscroll"]', !!S.autoScroll);
-    setSwitch('[data-wor-switch="tts"]', !!S.ttsEnabled);
     setSwitch('[data-wor-switch="keepawake"]', !!S.keepAwake);
     setSwitch('[data-wor-switch="hidetitle"]', !!S.hideTitle);
     setSwitch('[data-wor-switch="taptoggle"]', S.tapToToggle !== false);
@@ -988,7 +988,7 @@ function bridgeScript() {
     $all('[data-wor-switch]').forEach(function (sw) {
       sw.addEventListener('click', function () {
         var key = sw.getAttribute('data-wor-switch');
-        var map = { continuous: 'continuousMode', autoscroll: 'autoScroll', tts: 'ttsEnabled', keepawake: 'keepAwake', hidetitle: 'hideTitle', taptoggle: 'tapToToggle' };
+        var map = { continuous: 'continuousMode', autoscroll: 'autoScroll', keepawake: 'keepAwake', hidetitle: 'hideTitle', taptoggle: 'tapToToggle' };
         var prop = map[key];
         if (!prop) return;
         S[prop] = !S[prop];
@@ -1236,30 +1236,6 @@ export function buildWorShell({ safeTop = 0, safeBottom = 0, novelTitle = '', no
 
 <!-- boot loader -->
 <div class="wor-boot-loading" id="worBootLoading"><div class="wor-boot-spinner"></div></div>
-
-<!-- topbar -->
-<header class="wor-topbar" role="banner">
-  <div class="wor-topbar__actions wor-topbar__actions--start">
-    <button class="wor-icon-btn" type="button" data-wor-drawer-toggle aria-controls="wor-drawer" aria-expanded="false" aria-label="فتح القائمة الجانبية">
-      <span aria-hidden="true"><svg class="wor-ui-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 6h16v2H4V6zm0 5h16v2H4v-2zm0 5h16v2H4v-2z"></path></svg></span>
-    </button>
-    <button class="wor-icon-btn" type="button" data-wor-search-toggle aria-controls="wor-search" aria-expanded="false" aria-label="فتح البحث">
-      <span aria-hidden="true"><svg class="wor-ui-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M10 18a8 8 0 1 1 6.32-3.1l4.39 4.38-1.42 1.42-4.38-4.39A7.96 7.96 0 0 1 10 18zm0-2a6 6 0 1 0 0-12 6 6 0 0 0 0 12z"></path></svg></span>
-    </button>
-  </div>
-  <a class="wor-brand" href="#" data-wor-nav="novel" aria-label="${title}">
-    <span>${title}</span>
-  </a>
-  <div class="wor-topbar__actions wor-topbar__actions--end">
-    <button class="wor-icon-btn" type="button" data-wor-theme-toggle aria-label="تبديل المظهر" title="تبديل المظهر">
-      <span class="wor-theme-icon" aria-hidden="true"><svg class="wor-ui-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3a8 8 0 1 0 8 8 8 8 0 0 0-8-8zm0 14a6 6 0 1 1 6-6 6 6 0 0 1-6 6z"></path><path d="M2.5 14.5c5.6-4.2 13.4-6.2 19-6l.5 1c-5.1-.2-13.1 1.9-18.2 5.8l-1.3-.8z"></path></svg></span>
-    </button>
-    <button class="wor-icon-btn" type="button" data-wor-comments-btn aria-label="التعليقات">
-      <span aria-hidden="true"><svg class="wor-ui-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5.2 4h13.6A3.2 3.2 0 0 1 22 7.2v8.1a3.2 3.2 0 0 1-3.2 3.2h-6.2L7.2 22v-3.5h-2A3.2 3.2 0 0 1 2 15.3V7.2A3.2 3.2 0 0 1 5.2 4z"></path></svg></span>
-      <span class="wor-notify-badge" data-wor-comments-badge hidden></span>
-    </button>
-  </div>
-</header>
 
 <!-- drawer -->
 <div class="wor-drawer-backdrop" data-wor-drawer-backdrop hidden></div>
@@ -1576,13 +1552,6 @@ export function buildWorShell({ safeTop = 0, safeBottom = 0, novelTitle = '', no
           <button type="button" class="wor-reader-switch" data-wor-switch="autoscroll">مغلق</button>
         </div>
         <p>يمرر الفصل للأسفل ببطء تلقائياً أثناء القراءة.</p>
-      </div>
-      <div class="wor-reader-extra-card wor-reader-extra-card--compact">
-        <div class="wor-reader-extra-card__head">
-          <h3>القراءة الصوتية</h3>
-          <button type="button" class="wor-reader-switch" data-wor-switch="tts">مغلق</button>
-        </div>
-        <p>يقرأ التطبيق نص الفصل بصوت عالٍ.</p>
       </div>
       <div class="wor-reader-extra-card wor-reader-extra-card--compact">
         <div class="wor-reader-extra-card__head">
