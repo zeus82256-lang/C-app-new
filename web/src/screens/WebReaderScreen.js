@@ -329,6 +329,10 @@ export default function WebReaderScreen({ route, navigation }) {
     const [errorInfo, setErrorInfo] = useState(null);
 
     const [showComments, setShowComments] = useState(false);
+    // Mirrors the shell's dock state — the NATIVE system status bar (battery bar)
+    // hides while the dock is hidden (immersive reading) and shows when it opens.
+    // The shell boots with the dock open, hence the default.
+    const [dockOpen, setDockOpen] = useState(true);
 
     const insets = useSafeAreaInsets();
     const webViewRef = useRef(null);
@@ -1082,6 +1086,9 @@ export default function WebReaderScreen({ route, navigation }) {
             if (last && last.chapter) {
                 saveScrollPosition(last.chapter, last.offset, last.global);
             }
+            // Restore the system status bar if the reader is left in immersive
+            // mode (dock closed) — never leak the hidden bar to other screens.
+            StatusBar.setHidden(false);
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
@@ -1171,6 +1178,11 @@ export default function WebReaderScreen({ route, navigation }) {
             case 'novelPage':
                 navigation.goBack();
                 break;
+            case 'dock':
+                // The shell reports every dock open/close (toggle button, tap on
+                // content) — keep the system status bar in sync with it.
+                setDockOpen(!!data.open);
+                break;
             case 'comments':
                 setShowComments(true);
                 break;
@@ -1252,6 +1264,8 @@ export default function WebReaderScreen({ route, navigation }) {
             <StatusBar
                 barStyle={lightBg ? 'dark-content' : 'light-content'}
                 backgroundColor={settings.bgColor}
+                hidden={!dockOpen}
+                animated
             />
 
             <WebView

@@ -172,10 +172,22 @@ export const WOR_APP_CSS = `
      The bundled stylesheet assumed an in-dock toggle as a 4th row, so with our
      DOM the panel sat on an "auto" row (growing with its content and pushing /
      squeezing the tab bar). Pinning the rows fixes tabs that moved or vanished. */
-  .wor-reader-dock:is([data-wor-reader-active-panel="text"],[data-wor-reader-active-panel="font"],[data-wor-reader-active-panel="background"],[data-wor-reader-active-panel="color"],[data-wor-reader-active-panel="settings"],[data-wor-reader-active-panel="report"]) {
+  .wor-reader-dock:is([data-wor-reader-active-panel="book"],[data-wor-reader-active-panel="text"],[data-wor-reader-active-panel="font"],[data-wor-reader-active-panel="background"],[data-wor-reader-active-panel="color"],[data-wor-reader-active-panel="settings"],[data-wor-reader-active-panel="report"]) {
     grid-template-rows: auto minmax(0, 1fr) auto;
   }
   .wor-reader-dock__panel { min-block-size: 0; }
+  /* The bundled scroll rule (overflow:auto + overscroll-behavior:contain) only
+     covers text/font/background/settings/report — Galaxy never shipped the
+     coloring panel, so its content could NOT scroll at all: every drag fell
+     through to the chapter behind the dock. The book panel had the same hole. */
+  .wor-reader-dock:is([data-wor-reader-active-panel="color"],[data-wor-reader-active-panel="book"]) > .wor-reader-dock__panel {
+    min-block-size: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    padding-inline-end: 2px;
+  }
   .wor-reader-dock__tabs { grid-template-columns: repeat(7, minmax(0, 1fr)); }
 
   /* Text brightness (سطوع الخط) is implemented by computing the effective text
@@ -522,6 +534,9 @@ function bridgeScript() {
     if (!dockEl) return;
     dockEl.setAttribute('data-wor-reader-dock-state', dockOpen ? 'open' : 'closed');
     document.body.classList.toggle('wor-reader-dock-collapsed', !dockOpen);
+    // Tell React so the NATIVE system status bar follows the dock:
+    // dock hidden → immersive reading (status bar hidden), dock open → visible.
+    send({ t: 'dock', open: dockOpen });
     if (dockOpen) {
       dockEl.style.transform = '';
       dockEl.style.opacity = '';
