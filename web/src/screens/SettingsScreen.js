@@ -24,6 +24,8 @@ import { AuthContext } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import api from '../services/api';
 import CustomAlert from '../components/CustomAlert';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { READER_STRUCTURE_KEY } from './ReaderScreen';
 
 const GlassContainer = ({ children, style }) => (
     <View style={[styles.glassContainer, style]}>
@@ -52,6 +54,19 @@ export default function SettingsScreen({ navigation }) {
   // Custom Alert
   const [alertVisible, setAlertVisible] = useState(false);
   const [alertConfig, setAlertConfig] = useState({});
+  const [readerStructure, setReaderStructure] = useState('web');
+  const isAdmin = userInfo?.role === 'admin';
+
+  useEffect(() => {
+    AsyncStorage.getItem(READER_STRUCTURE_KEY)
+      .then((v) => { if (v === 'native' || v === 'web') setReaderStructure(v); })
+      .catch(() => {});
+  }, []);
+
+  const changeReaderStructure = async (value) => {
+    setReaderStructure(value);
+    try { await AsyncStorage.setItem(READER_STRUCTURE_KEY, value); } catch (e) {}
+  };
 
   const uploadImage = async (uri, type) => {
       setUploading(true);
@@ -309,6 +324,44 @@ export default function SettingsScreen({ navigation }) {
                         <Text style={styles.switchLabel}>سجل القراءة عام</Text>
                     </View>
                 </GlassContainer>
+
+                {/* Admin-only: reader engine structure */}
+                {isAdmin && (
+                    <GlassContainer>
+                        <Text style={styles.sectionTitle}>هيكلية القارئ (للمشرف)</Text>
+                        <Text style={styles.securitySub}>
+                            اختر محرك عرض الفصول: عارض الويب بتصميم Galaxy، أو القارئ الأصلي (كلاسيكي). يُطبق عند فتح أي فصل.
+                        </Text>
+                        <View style={{ flexDirection: 'row-reverse', gap: 10, marginTop: 12 }}>
+                            <TouchableOpacity
+                                style={{
+                                    flex: 1, paddingVertical: 12, borderRadius: 12, alignItems: 'center',
+                                    backgroundColor: readerStructure === 'web' ? '#4a7cc7' : '#1c1c1e',
+                                    borderWidth: 1, borderColor: readerStructure === 'web' ? '#5b8bd4' : '#333',
+                                }}
+                                onPress={() => changeReaderStructure('web')}
+                            >
+                                <Ionicons name="globe-outline" size={18} color={readerStructure === 'web' ? '#fff' : '#999'} />
+                                <Text style={{ color: readerStructure === 'web' ? '#fff' : '#999', fontWeight: 'bold', marginTop: 4, fontSize: 13 }}>
+                                    عارض ويب (Galaxy)
+                                </Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                                style={{
+                                    flex: 1, paddingVertical: 12, borderRadius: 12, alignItems: 'center',
+                                    backgroundColor: readerStructure === 'native' ? '#4a7cc7' : '#1c1c1e',
+                                    borderWidth: 1, borderColor: readerStructure === 'native' ? '#5b8bd4' : '#333',
+                                }}
+                                onPress={() => changeReaderStructure('native')}
+                            >
+                                <Ionicons name="phone-portrait-outline" size={18} color={readerStructure === 'native' ? '#fff' : '#999'} />
+                                <Text style={{ color: readerStructure === 'native' ? '#fff' : '#999', fontWeight: 'bold', marginTop: 4, fontSize: 13 }}>
+                                    أصلي (كلاسيكي)
+                                </Text>
+                            </TouchableOpacity>
+                        </View>
+                    </GlassContainer>
+                )}
 
                 <TouchableOpacity style={styles.saveBtn} onPress={handleSave} disabled={uploading}>
                     {uploading ? <ActivityIndicator color="#fff" /> : <Text style={styles.saveBtnText}>حفظ التغييرات</Text>}

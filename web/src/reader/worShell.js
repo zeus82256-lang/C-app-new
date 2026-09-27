@@ -151,6 +151,67 @@ export const WOR_APP_CSS = `
   /* ---- misc ---- */
   .wor-icon-btn[disabled], .wor-reader-dock__nav[disabled] { opacity: .35; pointer-events: none; }
   #worTextSurface { min-height: 40dvh; }
+
+  /* ==========================================================================
+     18e fixes & polish
+     ========================================================================== */
+
+  /* The panel UI must always use the modern UI font — never the reading font.
+     (The shell body was also missing the "wor-body" class, which left the whole
+     chrome on the browser default serif.) */
+  :root { --wor-ui-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Arabic", system-ui, "Segoe UI", Tahoma, Arial, sans-serif; }
+  .wor-reader-dock, .wor-reader-dock button, .wor-reader-dock input, .wor-reader-dock output,
+  .wor-reader-chapters-sheet, .wor-reader-words-sheet, .wor-search, .wor-drawer,
+  .wor-chapter-report-modal, .wor-mini-toast, .wor-boot-loading {
+    font-family: var(--wor-ui-font);
+  }
+
+  /* Dock grid: [nav][panel -> the ONE flexible/scrollable row][tabs fixed].
+     The bundled stylesheet assumed an in-dock toggle as a 4th row, so with our
+     DOM the panel sat on an "auto" row (growing with its content and pushing /
+     squeezing the tab bar). Pinning the rows fixes tabs that moved or vanished. */
+  .wor-reader-dock:is([data-wor-reader-active-panel="text"],[data-wor-reader-active-panel="font"],[data-wor-reader-active-panel="background"],[data-wor-reader-active-panel="color"],[data-wor-reader-active-panel="settings"],[data-wor-reader-active-panel="report"]) {
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+  .wor-reader-dock__panel { min-block-size: 0; }
+  .wor-reader-dock__tabs { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+
+  /* Text brightness slider was dead — the bundle hardcodes filter:none on the
+     surface and nothing consumed --wor-reader-text-brightness. Wire it up. */
+  .wor-reader-text-surface { filter: brightness(var(--wor-reader-text-brightness, 1)); transition: filter .25s ease; }
+
+  /* Scrolling smoothness: no CSS smooth-scroll fighting the finger, and no
+     permanent backdrop blur repaint over the whole dock while the page moves. */
+  html { scroll-behavior: auto !important; }
+  .wor-reader-dock {
+    -webkit-backdrop-filter: none; backdrop-filter: none;
+    background: linear-gradient(150deg, color-mix(in srgb, var(--wor-surface-solid) 99%, transparent), color-mix(in srgb, var(--wor-surface) 97%, transparent));
+  }
+
+  /* Panel switch animation (keyframes ship with the bundle) */
+  .wor-reader-dock__panel.is-entering { animation: worReaderPanelIn 150ms ease-out both; }
+
+  /* ---- coloring panel (التلوين) ---- */
+  .wor-color-wrap { display: grid; gap: 9px; align-content: start; padding-block-end: 4px; }
+  .wor-color-hint { margin: 0 2px; color: var(--wor-muted); font-size: .74rem; font-weight: 700; line-height: 1.6; }
+  .wor-fmt-card { display: grid; gap: 10px; padding: 12px; border: 1px solid color-mix(in srgb, var(--wor-border) 88%, transparent); border-radius: 15px; background: color-mix(in srgb, var(--wor-surface) 89%, transparent); transition: opacity .25s ease; }
+  .wor-fmt-card.is-off { opacity: .62; }
+  .wor-fmt-card__head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .wor-fmt-card__head h3 { margin: 0; color: var(--wor-text); font-size: .82rem; font-weight: 950; }
+  .wor-fmt-card__sub { margin: 0; color: var(--wor-muted); font-size: .7rem; font-weight: 850; }
+  .wor-fmt-card__label { color: var(--wor-muted); font-size: .72rem; font-weight: 900; margin-inline: 2px; }
+  .wor-color-grid { display: flex; flex-wrap: wrap; gap: 7px; }
+  .wor-color-dot { inline-size: 30px; block-size: 30px; padding: 0; border-radius: 50%; border: 2px solid color-mix(in srgb, var(--wor-border) 90%, transparent); cursor: pointer; transition: transform 90ms ease, border-color 150ms ease, box-shadow 150ms ease; }
+  .wor-color-dot:active { transform: scale(.9); }
+  .wor-color-dot.is-active { border-color: var(--wor-text); box-shadow: 0 0 0 2px color-mix(in srgb, var(--wor-accent) 55%, transparent), 0 2px 10px rgba(0,0,0,.28); }
+  .wor-style-row { display: flex; flex-wrap: wrap; gap: 7px; }
+  .wor-style-chip { min-block-size: 40px; padding: 8px 12px; border: 1px solid var(--wor-border); border-radius: 12px; background: var(--wor-surface-soft); color: var(--wor-text); font: inherit; font-size: .78rem; font-weight: 900; cursor: pointer; transition: transform 90ms ease, border-color 150ms ease, color 150ms ease, background-color 150ms ease; }
+  .wor-style-chip:active { transform: scale(.97); }
+  .wor-style-chip.is-active { border-color: var(--wor-accent); background: var(--wor-accent-soft); color: var(--wor-accent); }
+  .wor-custom-marks { display: grid; grid-template-columns: 1fr auto 1fr; gap: 8px; align-items: center; }
+  .wor-custom-marks input { min-block-size: 42px; padding: 8px 10px; border: 1px solid var(--wor-border); border-radius: 12px; background: var(--wor-surface-soft); color: var(--wor-text); font: inherit; font-size: .95rem; font-weight: 800; text-align: center; outline: none; }
+  .wor-custom-marks input:focus { border-color: color-mix(in srgb, var(--wor-accent) 55%, var(--wor-border)); }
+  .wor-custom-marks__arrow { color: var(--wor-muted); font-weight: 900; }
 `;
 
 // ---------------------------------------------------------------------------
@@ -164,6 +225,9 @@ export const WOR_BG_PRESETS = [
   { value: 'gray',     name: 'رمادي',     bg: '#2e2e2e', text: '#f5f5f5' },
   { value: 'darker',   name: 'داكن جداً', bg: '#0b0b0b', text: '#ededed' },
 ];
+
+// Palette offered by the coloring panel (same swatches as the classic reader)
+export const WOR_FORMAT_COLORS = ['#ffffff', '#f97316', '#ec4899', '#a855f7', '#fbbf24', '#ef4444', '#3b82f6', '#4ade80', '#06b6d4', '#8b5cf6', '#f472b6', '#34d399', '#f87171', '#facc15', '#818cf8', '#888888', '#000000'];
 
 const REPORT_TYPES = [
   'مشكلة في عرض النص',
@@ -200,6 +264,8 @@ function bridgeScript() {
   var dockEl = null;
   var autoScrollRaf = null;
   var lastTouchAt = 0;
+  var userTouched = false;
+  var touchStartScrollY = 0;
   var favOn = false;
   var customColors = false;
   var pickers = {};
@@ -254,7 +320,11 @@ function bridgeScript() {
     document.head.appendChild(link);
   }
   function preloadFonts() {
-    ['cairo', 'tajawal', 'amiri', 'noto-naskh-arabic', 'readex-pro', 'scheherazade-new'].forEach(ensureFont);
+    // Load ONLY the active font at boot. Preloading six Google-Font stylesheets
+    // caused several late font swaps right while the reader starts scrolling,
+    // and every swap reflows the whole chapter (stutter / sudden scroll stops).
+    // Other fonts lazy-load the moment they are picked from the font panel.
+    if (S.fontValue && S.fontValue !== 'default') ensureFont(S.fontValue);
   }
 
   // ============================ theme ============================
@@ -357,6 +427,18 @@ function bridgeScript() {
     el.textContent = on ? 'مفعّل' : 'مغلق';
   }
 
+  function updateColorDots(key, val) {
+    $all('[data-wor-color-for="' + key + '"] .wor-color-dot').forEach(function (d) {
+      d.classList.toggle('is-active', String(d.getAttribute('data-value') || '').toLowerCase() === String(val || '').toLowerCase());
+    });
+  }
+  function updateFmtCards() {
+    [['dialogue', 'enableDialogue'], ['markdown', 'enableMarkdown'], ['bracket', 'enableBracket'], ['custom', 'enableCustom']].forEach(function (p) {
+      var card = $('.wor-fmt-card[data-wor-fmt-card="' + p[0] + '"]');
+      if (card) card.classList.toggle('is-off', !S[p[1]]);
+    });
+  }
+
   function applySettingsUI() {
     applyTheme();
     applyTypography();
@@ -375,6 +457,30 @@ function bridgeScript() {
     setSwitch('[data-wor-switch="keepawake"]', !!S.keepAwake);
     setSwitch('[data-wor-switch="hidetitle"]', !!S.hideTitle);
     setSwitch('[data-wor-switch="taptoggle"]', S.tapToToggle !== false);
+    // coloring panel (التلوين)
+    setSwitch('[data-wor-switch="dialogue"]', !!S.enableDialogue);
+    setSwitch('[data-wor-switch="markdown"]', !!S.enableMarkdown);
+    setSwitch('[data-wor-switch="bracket"]', !!S.enableBracket);
+    setSwitch('[data-wor-switch="custom"]', !!S.enableCustom);
+    setSwitch('[data-wor-switch="hidequotes"]', !!S.hideQuotes);
+    setSwitch('[data-wor-switch="hidemarkdown"]', !!S.hideMarkdownMarks);
+    setSwitch('[data-wor-switch="hidebrackets"]', !!S.hideBracketMarks);
+    setSwitch('[data-wor-switch="hidecustom"]', !!S.hideCustomMarks);
+    setRangeValue('worRangeDialogueSize', S.dialogueSize || 100, '%');
+    setRangeValue('worRangeMarkdownSize', S.markdownSize || 100, '%');
+    setRangeValue('worRangeBracketSize', S.bracketSize || 110, '%');
+    setRangeValue('worRangeCustomSize', S.customSize || 105, '%');
+    setActiveChoice('[data-wor-fmt-style="quote"]', S.selectedQuoteStyle || 'all');
+    setActiveChoice('[data-wor-fmt-style="markdown"]', S.selectedMarkdownStyle || 'all');
+    setActiveChoice('[data-wor-fmt-style="bracket"]', S.selectedBracketStyle || 'all');
+    updateColorDots('dialogueColor', S.dialogueColor);
+    updateColorDots('markdownColor', S.markdownColor);
+    updateColorDots('bracketColor', S.bracketColor);
+    updateColorDots('customColor', S.customColor);
+    var coIn = $('#worCustomOpenMark'), ccIn = $('#worCustomCloseMark');
+    if (coIn && document.activeElement !== coIn) coIn.value = S.customOpenMark || '';
+    if (ccIn && document.activeElement !== ccIn) ccIn.value = S.customCloseMark || '';
+    updateFmtCards();
     var ct = $('[data-wor-background-custom-toggle]');
     if (ct) {
       ct.classList.toggle('is-active', !!customColors);
@@ -783,7 +889,9 @@ function bridgeScript() {
         var panel = tab.getAttribute('data-wor-tab');
         $all('.wor-reader-dock__tab').forEach(function (x) { x.classList.toggle('is-active', x === tab); });
         $all('.wor-reader-dock__panel').forEach(function (p) {
-          p.style.display = (p.getAttribute('data-wor-reader-panel') === panel) ? '' : 'none';
+          var on = p.getAttribute('data-wor-reader-panel') === panel;
+          p.style.display = on ? '' : 'none';
+          if (on) { p.classList.remove('is-entering'); void p.offsetWidth; p.classList.add('is-entering'); }
         });
         dockEl && dockEl.setAttribute('data-wor-reader-active-panel', panel);
         setTimeout(function () { if (dockOpen) setDock(true); }, 30);
@@ -813,6 +921,11 @@ function bridgeScript() {
       if (window.getSelection && String(window.getSelection()).length > 1) return;
       if (e.target.closest && e.target.closest('a, button, input, textarea, .wor-author-card, .wor-comments-trigger, [data-wor-goto]')) return;
       if (S.tapToToggle === false) return;
+      // Ignore taps that were actually (small) scroll gestures: scrolling moved
+      // the page between touchstart and the synthetic click. Toggling the dock
+      // mid-gesture changes the page height and instantly kills the scroll.
+      if (!userTouched || Date.now() - lastTouchAt > 700) return;
+      if (Math.abs((window.scrollY || 0) - touchStartScrollY) > 8) return;
       setDock(!dockOpen);
     });
     // chapters sheet
@@ -896,8 +1009,9 @@ function bridgeScript() {
       repSub.disabled = true;
       closeReport();
     });
-    // text panel ranges (± buttons + drag)
-    [['worRangeFontSize', 'fontSize', 0], ['worRangeLineHeight', 'lineHeight', 2], ['worRangeWordSpacing', 'wordSpacing', 0], ['worRangeBrightness', 'brightness', 2]].forEach(function (cfg) {
+    // text panel ranges (± buttons + drag) — also the coloring panel size ranges
+    [['worRangeFontSize', 'fontSize', 0, 'px'], ['worRangeLineHeight', 'lineHeight', 2, ''], ['worRangeWordSpacing', 'wordSpacing', 0, 'px'], ['worRangeBrightness', 'brightness', 2, ''],
+     ['worRangeDialogueSize', 'dialogueSize', 0, '%'], ['worRangeMarkdownSize', 'markdownSize', 0, '%'], ['worRangeBracketSize', 'bracketSize', 0, '%'], ['worRangeCustomSize', 'customSize', 0, '%']].forEach(function (cfg) {
       var el = document.getElementById(cfg[0]);
       if (!el) return;
       var push = debounce(function (v) { var p = {}; p[cfg[1]] = v; send({ t: 'settings', patch: p }); }, 260);
@@ -906,7 +1020,7 @@ function bridgeScript() {
         S[cfg[1]] = v;
         el.value = v;
         var out = el.parentElement.querySelector('output');
-        if (out) out.textContent = el.value;
+        if (out) out.textContent = v + (cfg[3] || '');
         applyTypography();
         push(v);
       }
@@ -988,17 +1102,56 @@ function bridgeScript() {
     $all('[data-wor-switch]').forEach(function (sw) {
       sw.addEventListener('click', function () {
         var key = sw.getAttribute('data-wor-switch');
-        var map = { continuous: 'continuousMode', autoscroll: 'autoScroll', keepawake: 'keepAwake', hidetitle: 'hideTitle', taptoggle: 'tapToToggle' };
+        var map = {
+          continuous: 'continuousMode', autoscroll: 'autoScroll', keepawake: 'keepAwake', hidetitle: 'hideTitle', taptoggle: 'tapToToggle',
+          dialogue: 'enableDialogue', markdown: 'enableMarkdown', bracket: 'enableBracket', custom: 'enableCustom',
+          hidequotes: 'hideQuotes', hidemarkdown: 'hideMarkdownMarks', hidebrackets: 'hideBracketMarks', hidecustom: 'hideCustomMarks'
+        };
         var prop = map[key];
         if (!prop) return;
         S[prop] = !S[prop];
         setSwitch('[data-wor-switch="' + key + '"]', S[prop]);
         if (prop === 'autoScroll') updateAutoScroll();
         if (prop === 'hideTitle') document.body.classList.toggle('wor-hide-chapter-title', !!S.hideTitle);
+        if (['enableDialogue', 'enableMarkdown', 'enableBracket', 'enableCustom'].indexOf(prop) !== -1) updateFmtCards();
         var p = {}; p[prop] = S[prop];
         send({ t: 'settings', patch: p });
       });
     });
+    // coloring panel: delimiter style chips (quote / markdown / bracket)
+    var FMT_STYLE_KEYS = { quote: 'selectedQuoteStyle', markdown: 'selectedMarkdownStyle', bracket: 'selectedBracketStyle' };
+    $all('[data-wor-fmt-style]').forEach(function (wrap) {
+      var group = wrap.getAttribute('data-wor-fmt-style');
+      var key = FMT_STYLE_KEYS[group];
+      if (!key) return;
+      $all('.wor-style-chip', wrap).forEach(function (b) {
+        b.addEventListener('click', function () {
+          S[key] = b.getAttribute('data-value');
+          setActiveChoice('[data-wor-fmt-style="' + group + '"]', S[key]);
+          var p = {}; p[key] = S[key];
+          send({ t: 'settings', patch: p });
+        });
+      });
+    });
+    // coloring panel: color swatches
+    document.addEventListener('click', function (e) {
+      var d = e.target.closest && e.target.closest('[data-wor-color-dot]');
+      if (!d) return;
+      var key = d.getAttribute('data-key');
+      var val = d.getAttribute('data-value');
+      if (!key || !val) return;
+      S[key] = val;
+      updateColorDots(key, val);
+      var p = {}; p[key] = val;
+      send({ t: 'settings', patch: p });
+    });
+    // coloring panel: custom delimiter marks
+    var coInput = $('#worCustomOpenMark'), ccInput = $('#worCustomCloseMark');
+    var pushCustomMarks = debounce(function () {
+      send({ t: 'settings', patch: { customOpenMark: (coInput && coInput.value) || '', customCloseMark: (ccInput && ccInput.value) || '' } });
+    }, 600);
+    coInput && coInput.addEventListener('input', pushCustomMarks);
+    ccInput && ccInput.addEventListener('input', pushCustomMarks);
     var progToggle = $('[data-wor-chapter-progress-toggle]');
     progToggle && progToggle.addEventListener('click', function () {
       S.showProgressBar = S.showProgressBar === false;
@@ -1012,7 +1165,11 @@ function bridgeScript() {
     });
     // scroll / touch
     window.addEventListener('scroll', onScroll, { passive: true });
-    document.addEventListener('touchstart', function () { lastTouchAt = Date.now(); }, { passive: true });
+    document.addEventListener('touchstart', function () {
+      lastTouchAt = Date.now();
+      userTouched = true;
+      touchStartScrollY = window.scrollY || 0;
+    }, { passive: true });
     // author card click
     var authorCard = $('[data-wor-author-card]');
     authorCard && authorCard.addEventListener('click', function () { send({ t: 'profile' }); });
@@ -1030,6 +1187,9 @@ function bridgeScript() {
       else if (kind === 'chapter') {
         CH = msg;
         favOn = !!msg.isFavorite;
+        // when the chapter is re-rendered in place (formatting change), keep the
+        // reader at the exact position they were reading instead of resetting
+        var keepY = msg.keepScroll ? (window.scrollY || window.pageYOffset || 0) : 0;
         var link = $('#worNovelLink');
         if (link) link.textContent = msg.novelTitle || '';
         var h1 = $('#worChapterTitle');
@@ -1070,8 +1230,13 @@ function bridgeScript() {
         var foot = $('#worContinuousFooter');
         if (foot) foot.textContent = '';
         window.__worEnd = false; window.__worNeedLock = false;
-        pendingScroll = msg.scrollOffset || 0;
-        restoreScroll();
+        if (msg.keepScroll) {
+          pendingScroll = 0;
+          window.scrollTo(0, keepY);
+        } else {
+          pendingScroll = msg.scrollOffset || 0;
+          restoreScroll();
+        }
         updateFavUI();
         renderChapters();
         renderSearch();
@@ -1154,9 +1319,12 @@ function bridgeScript() {
   function restoreScroll() {
     if (!pendingScroll || pendingScroll <= 0) return;
     var y = pendingScroll;
-    setTimeout(function () { window.scrollTo(0, y); }, 60);
-    setTimeout(function () { window.scrollTo(0, y); }, 320);
-    setTimeout(function () { window.scrollTo(0, y); }, 900);
+    // never fight the reader's own finger: if they already touched the page,
+    // skip the remaining restore attempts instead of yanking the scroll away
+    function go() { if (!userTouched) window.scrollTo(0, y); }
+    setTimeout(go, 60);
+    setTimeout(go, 320);
+    setTimeout(go, 900);
     pendingScroll = 0;
   }
 
@@ -1221,6 +1389,10 @@ export function buildWorShell({ safeTop = 0, safeBottom = 0, novelTitle = '', no
     ? `<img src="${cover}" alt="" width="64" height="64" loading="lazy" decoding="async">`
     : '';
 
+  const colorDots = (key) => WOR_FORMAT_COLORS.map(c => (
+    `<button type="button" class="wor-color-dot" style="background:${c}" data-wor-color-dot data-key="${key}" data-value="${c}" aria-label="${c}"></button>`
+  )).join('');
+
   return `<!DOCTYPE html>
 <html dir="rtl" lang="ar" data-wor-theme="custom">
 <head>
@@ -1232,7 +1404,7 @@ export function buildWorShell({ safeTop = 0, safeBottom = 0, novelTitle = '', no
 <style>${WOR_CSS}</style>
 <style>${WOR_APP_CSS}</style>
 </head>
-<body class="single-wor_chapter wor_chapter-template-default">
+<body class="wor-body single-wor_chapter wor_chapter-template-default">
 
 <!-- boot loader -->
 <div class="wor-boot-loading" id="worBootLoading"><div class="wor-boot-spinner"></div></div>
@@ -1427,7 +1599,7 @@ export function buildWorShell({ safeTop = 0, safeBottom = 0, novelTitle = '', no
       </label>
       <div class="wor-reader-font-settings" id="worFontChoices">
         ${WOR_FONTS.map((f, i) => `
-        <button class="wor-reader-font-choice${i === 0 ? ' is-active' : ''}" type="button" data-wor-font-choice data-value="${f.value}" data-name="${f.name}" aria-pressed="${i === 0}">
+        <button class="wor-reader-font-choice${i === 0 ? ' is-active' : ''}" type="button" data-wor-font-choice data-value="${f.value}" data-name="${f.name}" aria-pressed="${i === 0}" style="font-family:${escHtml(f.family === 'inherit' ? 'var(--wor-ui-font)' : f.family)}">
           <strong>${f.name}</strong>
         </button>`).join('')}
       </div>
@@ -1589,6 +1761,123 @@ export function buildWorShell({ safeTop = 0, safeBottom = 0, novelTitle = '', no
     </div>
   </div>
 
+  <!-- panel: coloring (التلوين) -->
+  <div class="wor-reader-dock__panel wor-reader-dock__panel--color" id="wor-reader-panel-color" data-wor-reader-panel="color" role="tabpanel" style="display:none">
+    <div class="wor-color-wrap">
+      <p class="wor-color-hint">لوّن الكلمات المحصورة بين علامات تنصيص تختارها بنفسك، ويُطبق التنسيق فوراً على الفصل أثناء القراءة.</p>
+
+      <div class="wor-fmt-card" data-wor-fmt-card="dialogue">
+        <div class="wor-fmt-card__head">
+          <h3>الحوار (علامات التنصيص)</h3>
+          <button type="button" class="wor-reader-switch" data-wor-switch="dialogue">مغلق</button>
+        </div>
+        <span class="wor-fmt-card__label">نمط التنصيص</span>
+        <div class="wor-style-row" data-wor-fmt-style="quote">
+          <button type="button" class="wor-style-chip" data-value="all">بدون</button>
+          <button type="button" class="wor-style-chip" data-value="guillemets">« »</button>
+          <button type="button" class="wor-style-chip" data-value="curly">“ ”</button>
+          <button type="button" class="wor-style-chip" data-value="straight">" "</button>
+          <button type="button" class="wor-style-chip" data-value="single">‘ ’</button>
+        </div>
+        <span class="wor-fmt-card__label">اللون</span>
+        <div class="wor-color-grid" data-wor-color-for="dialogueColor">${colorDots('dialogueColor')}</div>
+        <span class="wor-fmt-card__label">حجم الحوار</span>
+        <div class="wor-reader-range-control">
+          <button type="button" data-wor-range-step="worRangeDialogueSize:-5">−</button>
+          <input id="worRangeDialogueSize" type="range" min="80" max="150" step="5" value="100">
+          <output>100%</output>
+          <button type="button" data-wor-range-step="worRangeDialogueSize:5">+</button>
+        </div>
+        <div class="wor-fmt-card__head">
+          <h3 class="wor-fmt-card__sub">إخفاء علامات التنصيص</h3>
+          <button type="button" class="wor-reader-switch" data-wor-switch="hidequotes">مغلق</button>
+        </div>
+      </div>
+
+      <div class="wor-fmt-card" data-wor-fmt-card="markdown">
+        <div class="wor-fmt-card__head">
+          <h3>العريض (علامات **)</h3>
+          <button type="button" class="wor-reader-switch" data-wor-switch="markdown">مغلق</button>
+        </div>
+        <span class="wor-fmt-card__label">نمط العلامات</span>
+        <div class="wor-style-row" data-wor-fmt-style="markdown">
+          <button type="button" class="wor-style-chip" data-value="all">بدون</button>
+          <button type="button" class="wor-style-chip" data-value="guillemets">« »</button>
+          <button type="button" class="wor-style-chip" data-value="curly">“ ”</button>
+          <button type="button" class="wor-style-chip" data-value="straight">" "</button>
+          <button type="button" class="wor-style-chip" data-value="single">‘ ’</button>
+        </div>
+        <span class="wor-fmt-card__label">اللون</span>
+        <div class="wor-color-grid" data-wor-color-for="markdownColor">${colorDots('markdownColor')}</div>
+        <span class="wor-fmt-card__label">حجم العريض</span>
+        <div class="wor-reader-range-control">
+          <button type="button" data-wor-range-step="worRangeMarkdownSize:-5">−</button>
+          <input id="worRangeMarkdownSize" type="range" min="80" max="150" step="5" value="100">
+          <output>100%</output>
+          <button type="button" data-wor-range-step="worRangeMarkdownSize:5">+</button>
+        </div>
+        <div class="wor-fmt-card__head">
+          <h3 class="wor-fmt-card__sub">إخفاء علامات **</h3>
+          <button type="button" class="wor-reader-switch" data-wor-switch="hidemarkdown">مغلق</button>
+        </div>
+      </div>
+
+      <div class="wor-fmt-card" data-wor-fmt-card="bracket">
+        <div class="wor-fmt-card__head">
+          <h3>الأقواس [ ]</h3>
+          <button type="button" class="wor-reader-switch" data-wor-switch="bracket">مغلق</button>
+        </div>
+        <span class="wor-fmt-card__label">نمط العلامات الداخلية</span>
+        <div class="wor-style-row" data-wor-fmt-style="bracket">
+          <button type="button" class="wor-style-chip" data-value="all">بدون</button>
+          <button type="button" class="wor-style-chip" data-value="guillemets">« »</button>
+          <button type="button" class="wor-style-chip" data-value="curly">“ ”</button>
+          <button type="button" class="wor-style-chip" data-value="straight">" "</button>
+          <button type="button" class="wor-style-chip" data-value="single">‘ ’</button>
+        </div>
+        <span class="wor-fmt-card__label">اللون</span>
+        <div class="wor-color-grid" data-wor-color-for="bracketColor">${colorDots('bracketColor')}</div>
+        <span class="wor-fmt-card__label">حجم الأقواس</span>
+        <div class="wor-reader-range-control">
+          <button type="button" data-wor-range-step="worRangeBracketSize:-5">−</button>
+          <input id="worRangeBracketSize" type="range" min="80" max="150" step="5" value="110">
+          <output>110%</output>
+          <button type="button" data-wor-range-step="worRangeBracketSize:5">+</button>
+        </div>
+        <div class="wor-fmt-card__head">
+          <h3 class="wor-fmt-card__sub">إخفاء علامات [ ]</h3>
+          <button type="button" class="wor-reader-switch" data-wor-switch="hidebrackets">مغلق</button>
+        </div>
+      </div>
+
+      <div class="wor-fmt-card" data-wor-fmt-card="custom">
+        <div class="wor-fmt-card__head">
+          <h3>علامات مخصصة</h3>
+          <button type="button" class="wor-reader-switch" data-wor-switch="custom">مغلق</button>
+        </div>
+        <span class="wor-fmt-card__label">حدد علامتي الفتح والإغلاق كما تريد</span>
+        <div class="wor-custom-marks">
+          <input id="worCustomOpenMark" type="text" placeholder="علامة الفتح" autocomplete="off">
+          <span class="wor-custom-marks__arrow">←</span>
+          <input id="worCustomCloseMark" type="text" placeholder="علامة الإغلاق" autocomplete="off">
+        </div>
+        <span class="wor-fmt-card__label">اللون</span>
+        <div class="wor-color-grid" data-wor-color-for="customColor">${colorDots('customColor')}</div>
+        <span class="wor-fmt-card__label">الحجم</span>
+        <div class="wor-reader-range-control">
+          <button type="button" data-wor-range-step="worRangeCustomSize:-5">−</button>
+          <input id="worRangeCustomSize" type="range" min="80" max="150" step="5" value="105">
+          <output>105%</output>
+          <button type="button" data-wor-range-step="worRangeCustomSize:5">+</button>
+        </div>
+        <div class="wor-fmt-card__head">
+          <h3 class="wor-fmt-card__sub">إخفاء العلامات المخصصة</h3>
+          <button type="button" class="wor-reader-switch" data-wor-switch="hidecustom">مغلق</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- panel: report -->
   <div class="wor-reader-dock__panel wor-reader-dock__panel--report" id="wor-reader-panel-report" data-wor-reader-panel="report" role="tabpanel" style="display:none">
     <div class="wor-reader-report-card">
@@ -1624,6 +1913,10 @@ export function buildWorShell({ safeTop = 0, safeBottom = 0, novelTitle = '', no
     <button class="wor-reader-dock__tab" type="button" data-wor-tab="settings" id="wor-reader-tab-settings">
       <span class="wor-reader-dock__tab-icon" aria-hidden="true"><svg class="wor-reader-dock__svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 7h9m3.5 0H19M5 12h3m3.5 0H19M5 17h9m3.5 0H19" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path><circle cx="15.5" cy="7" r="1.7" fill="none" stroke="currentColor" stroke-width="1.7"></circle><circle cx="9.5" cy="12" r="1.7" fill="none" stroke="currentColor" stroke-width="1.7"></circle><circle cx="15.5" cy="17" r="1.7" fill="none" stroke="currentColor" stroke-width="1.7"></circle></svg></span>
       <span class="wor-reader-dock__tab-label">الإعدادات</span>
+    </button>
+    <button class="wor-reader-dock__tab" type="button" data-wor-tab="color" id="wor-reader-tab-color">
+      <span class="wor-reader-dock__tab-icon" aria-hidden="true"><svg class="wor-reader-dock__svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3.2a8.8 8.8 0 1 0 0 17.6h1.6a2.1 2.1 0 0 0 0-4.2H12a1.7 1.7 0 0 1 0-3.4h5.8A3.2 3.2 0 0 0 21 10C21 6.2 16.9 3.2 12 3.2Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"></path><circle cx="7.4" cy="10.6" r="1.25" fill="currentColor"></circle><circle cx="11.4" cy="7.2" r="1.25" fill="currentColor"></circle><circle cx="15.8" cy="9.4" r="1.25" fill="currentColor"></circle></svg></span>
+      <span class="wor-reader-dock__tab-label">التلوين</span>
     </button>
     <button class="wor-reader-dock__tab" type="button" data-wor-tab="report" id="wor-reader-tab-report">
       <span class="wor-reader-dock__tab-icon" aria-hidden="true"><svg class="wor-reader-dock__svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 4 21 19H3L12 4Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"></path><path d="M12 10v4.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path><circle cx="12" cy="16.6" r="1.1" fill="currentColor"></circle></svg></span>
