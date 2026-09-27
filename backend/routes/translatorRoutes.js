@@ -154,7 +154,7 @@ async function getGlobalSettings() {
 
 // 🔥 New Default Prompt as provided by user
 const DEFAULT_EXTRACT_PROMPT = `ROLE: Expert Web Novel Terminology Extractor.
-TASK: Analyze the "English Text" and "Arabic Translation" below. Extract key proper nouns, unique concepts, and specific terminology for a comprehensive Glossary (Codex).
+TASK: Analyze the "Source Text" (any language: English/Chinese/Korean/Japanese/Russian/...) and "Arabic Translation" below. Extract key proper nouns, unique concepts, and specific terminology for a comprehensive Glossary (Codex).
 
 STRICT RULES:
 1.  Categories: Classify each extracted term into one of: 'character', 'location', 'item', 'rank', 'concept', 'other'.
@@ -166,7 +166,7 @@ STRICT RULES:
     *   other: Any other important term that doesn't fit the above categories.
 2.  Format: Return a clean JSON array of objects.
 3.  Content:
-    *   "name": The exact English name (Capitalized where appropriate).
+    *   "name": The exact original term as written in the source (any language: English/Chinese/Korean/...). Capitalized where appropriate.
     *   "translation": The exact Arabic translation used in the text.
     *   "description": وصف قصير جداً باللغة العربية (2-4 كلمات)، مثل: "البطل الرئيسي", "مهارة سيف", "طريقة زراعة", "طاقة روحية".
 4.  Filtering & Exclusion (قواعد التصفية والاستبعاد):
@@ -178,7 +178,7 @@ STRICT RULES:
         *   الأفعال والصفات العادية (مثال: run, fast, big, eat, go).
         *   الكلمات الشائعة جداً التي لا تعتبر مصطلحات خاصة.
 5.  Accuracy (الدقة):
-    *   Each extracted English term must be unique.
+    *   Each extracted term must be unique (in its original language).
     *   The Arabic translation must exactly match the word or phrase used in the provided Arabic text.
     *   Extracted terms must be meaningful within their context.
 
@@ -266,6 +266,32 @@ function getEnglishWordCount(text) {
     return ((text || '').match(/\b[A-Za-z][A-Za-z'’\-]*\b/g) || []).length;
 }
 
+// 🔥 MULTILINGUAL: any non-Arabic, non-Latin script that must NEVER survive
+// translation — Chinese/Japanese (Han + Kana), Korean (Hangul), Cyrillic,
+// Greek, Hebrew, Thai, Devanagari... Unlike Latin there are NO exceptions
+// for these scripts (the user asked: "بلا استثناءات").
+const FOREIGN_SCRIPT_RUNS = /([㐀-䶿一-鿿豈-﫿぀-ヿㇰ-ㇿ가-힯ᄀ-ᇿ㄰-㆏Ѐ-ӿͰ-Ͽ֐-׿฀-๿ऀ-ॿ]+)/g;
+
+function getForeignScriptRuns(text) {
+    return (text || '').match(FOREIGN_SCRIPT_RUNS) || [];
+}
+
+function isLatinWord(word) {
+    return /^[A-Za-z][A-Za-z'’\-]*$/.test(word || '');
+}
+
+// Estimate of how much "content" the source carries, used by the Arabic-ratio
+// check. English counts words; CJK counts characters (≈2 chars per word);
+// space-delimited scripts (Korean/Cyrillic/...) count words.
+function getSourceMagnitude(text) {
+    const value = String(text || '');
+    const englishWords = getEnglishWordCount(value);
+    const cjkChars = (value.match(/[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff]/g) || []).length;
+    const hangulWords = (value.match(/[\uac00-\ud7af]+/g) || []).length;
+    const otherWords = (value.replace(/[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\u31f0-\u31ff\uac00-\ud7af]/g, ' ').match(/\b[A-Za-z\u0400-\u04ff\u0370-\u03ff\u0590-\u05ff\u0e00-\u0e7f]{2,}\b/g) || []).length;
+    return englishWords + Math.ceil(cjkChars / 2) + hangulWords + otherWords;
+}
+
 function escapeRegex(value) {
     return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -301,14 +327,36 @@ function extractEnglishResidues(text) {
     return residues;
 }
 
-function getEnglishResidueContexts(text, residues, contextChars = 45) {
+// 🔥 MULTILINGUAL: leftover Chinese/Korean/Japanese/Russian/... fragments in the
+// "translated" output. استثناءات ممنوعة — every foreign run must be translated.
+function extractForeignResidues(text) {
+    const cleaned = stripCodeBlocks(removeDeepSeekFinishedMarker(text));
+    const matches = getForeignScriptRuns(cleaned);
+    const seen = new Set();
+    const residues = [];
+    for (const run of matches) {
+        const normalized = (run || '').trim();
+        if (!normalized) continue;
+        if (seen.has(normalized)) continue;
+        seen.add(normalized);
+        residues.push(normalized);
+    }
+    return residues;
+}
+
+function getResidueContexts(text, residues, contextChars = 45) {
     const value = text || '';
-    return residues.slice(0, 80).map(word => {
-        const match = new RegExp(`\\b${escapeRegex(word)}\\b`, 'i').exec(value);
-        if (!match) return { word, context: word };
-        const start = Math.max(0, match.index - contextChars);
-        const end = Math.min(value.length, match.index + word.length + contextChars);
-        return { word, context: value.substring(start, end).replace(/\s+/g, ' ').trim() };
+    return residues.slice(0, 80).map(item => {
+        let start = -1, len = item.length;
+        if (isLatinWord(item)) {
+            const match = new RegExp(`\\b${escapeRegex(item)}\\b`, 'i').exec(value);
+            if (match) { start = match.index; }
+        } else {
+            start = value.indexOf(item);
+        }
+        if (start === -1) return { word: item, context: item };
+        const end = Math.min(value.length, start + len + contextChars);
+        return { word: item, context: value.substring(Math.max(0, start - contextChars), end).replace(/\s+/g, ' ').trim() };
     });
 }
 
@@ -342,8 +390,9 @@ function validateTranslatedChapter(translatedText, sourceContent) {
     const source = (sourceContent || '').trim();
     const reasons = [];
     const englishResidues = extractEnglishResidues(text);
+    const foreignResidues = extractForeignResidues(text);
     const arabicWords = getArabicWordCount(text);
-    const sourceWords = getEnglishWordCount(source);
+    const sourceWords = getSourceMagnitude(source);
     const wordRatio = sourceWords > 0 ? arabicWords / sourceWords : 0;
     const sourceLooksShort = sourceWords > 0 && sourceWords < SHORT_CHAPTER_SOURCE_WORD_THRESHOLD;
 
@@ -351,25 +400,28 @@ function validateTranslatedChapter(translatedText, sourceContent) {
     if (!sourceLooksShort && source.length >= 500 && text.length < source.length * 0.20) reasons.push('الناتج أقصر بكثير من الفصل الأصلي');
     if (getArabicLetterCount(text) < 50) reasons.push('الناتج لا يحتوي على نص عربي كافٍ');
     if (englishResidues.length > 0) reasons.push(`الناتج يحتوي على كلمات إنجليزية غير مترجمة: ${englishResidues.slice(0, 12).join(', ')}`);
+    if (foreignResidues.length > 0) reasons.push(`الناتج يحتوي على نص أجنبي غير مترجم (صيني/كوري/ياباني/غيره): ${foreignResidues.slice(0, 8).map(r => r.length > 24 ? r.substring(0, 24) + '…' : r).join(' ، ')}`);
     if (isLikelyAiRefusalOrMeta(text)) reasons.push('الناتج يبدو كرسالة من الذكاء الاصطناعي أو تعليمات وليس فصلاً مترجماً');
     if (!sourceLooksShort && sourceWords >= SHORT_CHAPTER_SOURCE_WORD_THRESHOLD && arabicWords > 0 && arabicWords < ARABIC_FULL_CHAPTER_WORD_THRESHOLD && wordRatio < MIN_ARABIC_TO_ENGLISH_WORD_RATIO) {
-        reasons.push(`الناتج العربي قصير مقارنة بالأصل: ${arabicWords} كلمة عربية مقابل ${sourceWords} كلمة إنجليزية تقريباً`);
+        reasons.push(`الناتج العربي قصير مقارنة بالأصل: ${arabicWords} كلمة عربية مقابل ${sourceWords} كلمة/رمز في الأصل تقريباً`);
     }
 
-    return { ok: reasons.length === 0, reasons, englishResidues, arabicWords, sourceWords, wordRatio };
+    return { ok: reasons.length === 0, reasons, englishResidues, foreignResidues, residues: [...englishResidues, ...foreignResidues], arabicWords, sourceWords, wordRatio };
 }
 
-async function translateEnglishResiduesOnly(provider, modelToUse, key, translatedText, residues, options) {
+async function translateResiduesOnly(provider, modelToUse, key, translatedText, residues, options) {
     if (!residues.length) return translatedText;
-    const contexts = getEnglishResidueContexts(translatedText, residues);
+    const contexts = getResidueContexts(translatedText, residues);
     const prompt = `
-أنت مدقق ترجمة عربية. توجد كلمات إنجليزية متبقية داخل فصل عربي.
-المطلوب: ترجم كل كلمة إنجليزية فقط اعتماداً على السياق المجاور، ولا تترجم الجملة كاملة.
-إذا كانت الكلمة رمزاً لاتينياً قصيراً يمثل رتبة/تصنيفاً مثل A أو S أو LV أو HP فلا تُرجعها أصلاً.
+أنت مدقق ترجمة عربية محترف. بقي داخل فصل عربي مقاطع غير مترجمة بلغات أجنبية (إنجليزية/صينية/كورية/يابانية/روسية أو أي لغة أخرى).
+المطلوب:
+- ترجم كل مقطع إلى العربية ONLY اعتماداً على السياق المجاور، ولا تعِد ترجمة الجملة كاملة.
+- الكلمات الإنجليزية: الكلمات المستقلة القصيرة التي تمثل رتبة/تصنيف مثل A أو S أو LV أو HP تُترك كما هي (أعدها كما هي في حقل translation).
+- اللغات الأخرى (الصينية/الكورية/اليابانية/الروسية/غيرها): لا توجد أي استثناءات إطلاقاً — كل مقطع يجب أن يُترجم إلى العربية.
 أعد JSON فقط بالشكل:
-[{"word":"EnglishWord","translation":"الترجمة العربية"}]
+[{"word":"المقطع الأصلي كما هو","translation":"الترجمة العربية"}]
 
-الكلمات والسياقات:
+المقاطع والسياقات:
 ${JSON.stringify(contexts, null, 2)}
 `;
     const response = await callTranslationProvider(provider, modelToUse, key, prompt, options);
@@ -378,20 +430,25 @@ ${JSON.stringify(contexts, null, 2)}
         const parsed = parseJsonFromAiText(response);
         replacements = Array.isArray(parsed) ? parsed : (parsed.replacements || []);
     } catch (e) {
-        throw new Error(`فشل تحليل بدائل الكلمات الإنجليزية: ${e.message}`);
+        throw new Error(`فشل تحليل بدائل الكلمات الأجنبية: ${e.message}`);
     }
 
     let fixedText = translatedText;
     for (const item of replacements) {
         const word = (item.word || '').trim();
         const translation = (item.translation || '').trim();
-        if (!word || !translation || word.length <= 1) continue;
-        // 🔥 SAFETY: only Latin words may be replaced, and '$' in the replacement must be
-        // escaped — otherwise JS treats $&/$' as special patterns which corrupts the text
-        // and leaves letter fragments behind (the "missing words / letter remnants" bug).
-        if (!/^[A-Za-z][A-Za-z'\u2019\-]*$/.test(word)) continue;
+        if (!word || !translation) continue;
+        if (word.length <= 1 && isLatinWord(word)) continue;
+        // 🔥 SAFETY: Latin words are replaced with word boundaries; foreign scripts
+        // (Chinese/Korean/...) have no word boundaries so they are replaced with a
+        // literal split/join. '$' in replacements must be escaped either way.
+        const safeTranslation = translation.replace(/\$/g, '$$$$');
         try {
-            fixedText = fixedText.replace(new RegExp(`\\b${escapeRegex(word)}\\b`, 'g'), translation.replace(/\$/g, '$$$$'));
+            if (isLatinWord(word)) {
+                fixedText = fixedText.replace(new RegExp(`\\b${escapeRegex(word)}\\b`, 'g'), safeTranslation);
+            } else {
+                fixedText = fixedText.split(word).join(safeTranslation);
+            }
         } catch (e) { /* skip malformed term */ }
     }
     return fixedText;
@@ -399,13 +456,13 @@ ${JSON.stringify(contexts, null, 2)}
 
 async function reviewQuestionableChapter(provider, modelToUse, key, translatedText, sourceContent, validation, options) {
     const prompt = `
-أنت مراجع جودة لترجمة فصول روايات من الإنجليزية إلى العربية.
-قارن النص الإنجليزي الأصلي بالنص العربي الناتج.
+أنت مراجع جودة لترجمة فصول روايات من أي لغة (إنجليزية/صينية/كورية/يابانية/روسية أو غيرها) إلى العربية.
+قارن النص الأصلي بالنص العربي الناتج.
 
 مؤشرات آلية:
-- كلمات الأصل الإنجليزية تقريباً: ${validation.sourceWords}
+- كلمات/رموز الأصل تقريباً: ${validation.sourceWords}
 - كلمات النص العربي تقريباً: ${validation.arabicWords}
-- نسبة العربي إلى الإنجليزي تقريباً: ${validation.wordRatio.toFixed(2)}
+- نسبة العربي إلى الأصل تقريباً: ${validation.wordRatio.toFixed(2)}
 - الملاحظات:
 - ${validation.reasons.join('\n- ')}
 
@@ -416,7 +473,7 @@ async function reviewQuestionableChapter(provider, modelToUse, key, translatedTe
 - إذا كان النص العربي يغطي أحداث الأصل فعلاً فالإجابة نعم حتى لو كان عدد الكلمات أقل.
 - إذا كان النص العربي مجرد سطرين أو جزء صغير من الفصل فالإجابة لا.
 
-النص الإنجليزي الأصلي للمقارنة:
+النص الأصلي للمقارنة (قد يكون بأي لغة):
 """${sourceContent.substring(0, 7000)}"""
 
 النص العربي للمراجعة:
@@ -455,20 +512,21 @@ ${basePrompt}
 مراجعة صارمة: الترجمة السابقة فشلت للأسباب التالية:
 - ${reasons.join('\n- ')}
 
-أعد ترجمة الفصل كاملاً من النص الإنجليزي الأصلي أدناه إلى العربية فقط.
-مسموح فقط برموز لاتينية قصيرة للرتب/التصنيفات/المستويات مثل A أو S أو LV أو HP عند الحاجة.
-ممنوع ترك أي كلمة إنجليزية كاملة داخل السرد. ممنوع الاعتذار أو شرح ما فعلته. ممنوع إخراج JSON أو مصطلحات فقط.
+أعد ترجمة الفصل كاملاً من النص الأصلي أدناه إلى العربية فقط مهما كانت لغة الأصل (إنجليزية/صينية/كورية/يابانية/روسية أو غيرها).
+الإنجليزية فقط: يُسمح برموز لاتينية قصيرة للرتب/التصنيفات/المستويات مثل A أو S أو LV أو HP عند الحاجة.
+أي لغة أخرى غير العربية: لا استثناءات إطلاقاً — كل حرف صيني/كوري/ياباني/روسي/أجنبي يجب أن يُترجم إلى العربية.
+ممنوع ترك أي كلمة أو مقطع أجنبي كامل داخل السرد. ممنوع الاعتذار أو شرح ما فعلته. ممنوع إخراج JSON أو مصطلحات فقط.
 أخرج الفصل المترجم كاملاً فقط.
 
 --- GLOSSARY (Use these strictly) ---
 ${glossaryText}
 -------------------------------------
 
---- PREVIOUS FAILED OUTPUT (Do not copy its English/meta errors) ---
+--- PREVIOUS FAILED OUTPUT (Do not copy its foreign/meta errors) ---
 ${(previousTranslation || '').substring(0, 5000)}
 -------------------------------------
 
---- ENGLISH Text TO TRANSLATE ---
+--- SOURCE Text TO TRANSLATE (any language) ---
 ${sourceContent}
 ---------------------------------
 `;
@@ -669,7 +727,7 @@ async function processTranslationJob(jobId) {
         // Sort by priority ascending
         providers.sort((a, b) => (a.priority || 0) - (b.priority || 0));
 
-        const transPrompt = settings?.customPrompt || "You are a professional translator. Translate the novel chapter from English to Arabic. Output ONLY the Arabic translation. Use the glossary provided.";
+        const transPrompt = settings?.customPrompt || "You are a professional translator. Translate the novel chapter into Arabic. The source may be in ANY language (English, Chinese, Korean, Japanese, Russian, etc.) — translate ALL of it into Arabic with no exceptions. Output ONLY the Arabic translation. Use the glossary provided.";
         const extractPrompt = settings?.translatorExtractPrompt || DEFAULT_EXTRACT_PROMPT;
 
         const chaptersToProcess = job.targetChapters.sort((a, b) => a - b);
@@ -719,9 +777,10 @@ async function processTranslationJob(jobId) {
             const noOmissionRules = `
 --- قواعد إلزامية (تنطبق دائماً) ---
 1. ترجم الفصل كاملاً فقرة بفقرة. ممنوع حذف أو تلخيص أو دمج أي جملة أو فقرة أو حوار.
-2. كل جملة في النص الإنجليزي يجب أن يكون لها مقابل عربي بنفس الترتيب وبنفس الفقرة.
+2. كل جملة في النص الأصلي (أي كانت لغته: إنجليزية/صينية/كورية/يابانية/روسية أو غيرها) يجب أن يكون لها مقابل عربي بنفس الترتيب وبنفس الفقرة.
 3. أخرج الترجمة العربية فقط: بدون مقدمات، بدون شرح، بدون عناوين إضافية، بدون JSON.
-4. لا تضف أي كلمة إنجليزية في الناتج النهائي إلا للرموز القصيرة مثل A أو S أو LV أو HP.
+4. لا تترك أي نص أجنبي في الناتج النهائي: اللغات غير الإنجليزية (الصينية/الكورية/اليابانية/الروسية...) لا استثناءات لها إطلاقاً — كل مقطع يُترجم إلى العربية.
+5. الاستثناء الوحيد المسموح: رموز لاتينية قصيرة تمثل رتباً/تصنيفات مثل A أو S أو LV أو HP.
 -------------------------------------`;
             const translationInput = `
 ${transPrompt}
@@ -731,7 +790,7 @@ ${glossaryText}
 -------------------------------------
 ${noOmissionRules}
 
---- ENGLISH Text TO TRANSLATE ---
+--- SOURCE Text TO TRANSLATE (any language) ---
 ${sourceContent}
 ---------------------------------
 `;
@@ -751,7 +810,7 @@ ${sourceContent}
                 if (!freshAttemptJob || freshAttemptJob.status !== 'active') break;
 
                 if (attempt > 1) {
-                    await pushLog(jobId, `🔄 محاولة ${attempt}: إعادة ترجمة الفصل ${chapterNum} حتى ينجح ولا يبقى إنجليزياً`, 'info');
+                    await pushLog(jobId, `🔄 محاولة ${attempt}: إعادة ترجمة الفصل ${chapterNum} حتى ينجح ولا يبقى نصاً أجنبياً`, 'info');
                 }
 
                 const promptForAttempt = lastValidationReasons.length > 0
@@ -820,10 +879,10 @@ ${sourceContent}
                             }
                             let validation = validateTranslatedChapter(candidateTextForReview, sourceContent);
 
-                            if (validation.englishResidues.length > 0) {
-                                await pushLog(jobId, `🔎 وُجدت كلمات إنجليزية في الفصل ${chapterNum}: ${validation.englishResidues.slice(0, 8).join(', ')} — ترجمة الكلمات فقط ثم استبدالها`, 'warning');
+                            if (validation.residues.length > 0) {
+                                await pushLog(jobId, `🔎 وُجد نص غير مترجم في الفصل ${chapterNum}: ${validation.residues.slice(0, 8).map(r => String(r).length > 18 ? String(r).substring(0, 18) + '…' : r).join(' ، ')} — ترجمة المقاطع فقط ثم استبدالها`, 'warning');
                                 try {
-                                    candidateTextForReview = await translateEnglishResiduesOnly(provider, modelToUse, key, candidateTextForReview, validation.englishResidues, {
+                                    candidateTextForReview = await translateResiduesOnly(provider, modelToUse, key, candidateTextForReview, validation.residues, {
                                         deepSeekJobId: jobId.toString(),
                                         conversationContexts,
                                         conversationPurpose: 'chapter_review',
@@ -832,7 +891,7 @@ ${sourceContent}
                                     });
                                     validation = validateTranslatedChapter(candidateTextForReview, sourceContent);
                                 } catch (replaceErr) {
-                                    await pushLog(jobId, `⚠️ فشل استبدال الكلمات الإنجليزية فقط: ${replaceErr.message}`, 'warning');
+                                    await pushLog(jobId, `⚠️ فشل استبدال المقاطع الأجنبية فقط: ${replaceErr.message}`, 'warning');
                                 }
                             }
 
@@ -939,7 +998,7 @@ ${sourceContent}
                     const extractionInput = `
 ${extractPrompt}
 
-English Text (Excerpt):
+English/Source Text (Excerpt):
 """${sourceContent.substring(0, 8000)}"""
 
 Arabic Text (Excerpt):

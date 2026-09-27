@@ -117,7 +117,9 @@ export default function AdminDashboardScreen({ route, navigation }) {
           // Setting limit high to get all chapters for management
           const res = await api.get(`/api/novels/${id}/chapters-list?limit=5000`);
           if (res.data) {
-              setNovelChapters(res.data);
+              // Response may be the new { chapters, total, totalPages } object or a legacy array
+              const list = Array.isArray(res.data) ? res.data : (res.data?.chapters || []);
+              setNovelChapters(list);
           }
       } catch (e) { 
           console.log("Failed to fetch novel chapters", e); 

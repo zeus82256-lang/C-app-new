@@ -754,7 +754,9 @@ module.exports = function(app, verifyToken, upload) {
             const limit = parseInt(req.query.limit) || 25;
             const sortOrder = req.query.sort === 'desc' ? -1 : 1; // Default Ascending (1, 2, 3...)
             const skip = (page - 1) * limit;
-            
+            // 🔥 NEW: optional search — matches chapter number (prefix) OR title (substring)
+            const search = String(req.query.search || '').trim();
+
             const role = getUserRole(req);
 
             // جلب بيانات الرواية الأساسية
@@ -783,7 +785,7 @@ module.exports = function(app, verifyToken, upload) {
                 try {
                     const chaptersRef = firestore.collection('novels').doc(id).collection('chapters');
                     const snapshot = await chaptersRef.get();
-                    
+
                     const firestoreChapters = [];
                     snapshot.forEach(doc => {
                         const data = doc.data();
@@ -824,13 +826,36 @@ module.exports = function(app, verifyToken, upload) {
                 uniqueChapters = uniqueChapters.filter(ch => !isChapterHidden(ch.title));
             }
 
+            // 🔥 5.5 البحث: برقم الفصل (تطابق جزئي) أو بعنوانه (جزئي غير حساس للحالة)
+            if (search) {
+                const q = search.toLowerCase();
+                const qNum = String(parseInt(search, 10));
+                uniqueChapters = uniqueChapters.filter(ch => {
+                    const numStr = String(ch.number);
+                    const numMatch = !isNaN(parseInt(search, 10)) && (numStr === qNum || numStr.startsWith(qNum));
+                    const titleMatch = String(ch.title || '').toLowerCase().includes(q);
+                    return numMatch || titleMatch;
+                });
+            }
+
+            const totalMatches = uniqueChapters.length;
+            const totalPages = Math.ceil(totalMatches / limit) || 1;
+
             // 6. التقسيم (Pagination)
             const paginatedChapters = uniqueChapters.slice(skip, skip + limit);
 
             // 7. إزالة حقل `source` قبل الإرسال للواجهة
             const responseChapters = paginatedChapters.map(({ source, ...rest }) => rest);
 
-            res.json(responseChapters);
+            // 🔥 Response now carries paging metadata (totalPages computed AFTER
+            // search filtering so the novel page pagination stays correct).
+            res.json({
+                chapters: responseChapters,
+                total: totalMatches,
+                page,
+                limit,
+                totalPages
+            });
 
         } catch (error) {
             console.error("Chapters List Error:", error);

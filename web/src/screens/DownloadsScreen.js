@@ -116,7 +116,9 @@ export default function DownloadsScreen({ navigation }) {
                   showToast("جاري فحص الفصول...", "info");
                   // Get full chapter list from API
                   const res = await api.get(`/api/novels/${novel._id}/chapters-list?limit=10000`);
-                  const allChapters = res.data;
+                  // Response may be the new { chapters, total, totalPages } object or a legacy array
+                  const payload = res.data;
+                  const allChapters = Array.isArray(payload) ? payload : (payload?.chapters || []);
                   
                   if (!allChapters || allChapters.length === 0) {
                       showToast("لا توجد فصول", "error");

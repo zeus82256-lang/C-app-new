@@ -108,7 +108,9 @@ export default function EnglishNovelsSelectionScreen({ navigation }) {
           // 🔥 FIX: Use chapters-list endpoint to ensure chapters are fetched
           const res = await api.get(`/api/novels/${novelId}/chapters-list?limit=10000`);
           if (res.data) {
-              setChapters(res.data);
+              // Response may be the new { chapters, total, totalPages } object or a legacy array
+              const list = Array.isArray(res.data) ? res.data : (res.data?.chapters || []);
+              setChapters(list);
           }
       } catch(e) { 
           console.log(e); 

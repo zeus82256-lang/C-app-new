@@ -270,6 +270,8 @@ const [separatorText, setSeparatorText] = useState('____________________________
 
 // Chapters list state
 const [chaptersList, setChaptersList] = useState([]);
+const chaptersListRef = useRef([]);
+useEffect(() => { chaptersListRef.current = chaptersList; }, [chaptersList]);
 const [loadingChapters, setLoadingChapters] = useState(false);
 
 const [drawerMode, setDrawerMode] = useState('none');
@@ -411,9 +413,13 @@ useEffect(() => {
 const fetchChapters = async () => {
     setLoadingChapters(true);
     try {
-        const res = await api.get(`/api/novels/${novelId}/chapters`);
-        if (res.data && Array.isArray(res.data)) {
-            setChaptersList(res.data);
+        // /chapters-list is the real endpoint (the old /chapters route never
+        // existed — that is why the in-reader chapter list stayed empty).
+        const res = await api.get(`/api/novels/${novelId}/chapters-list`, { params: { page: 1, limit: 100000, sort: 'asc' } });
+        const payload = res.data;
+        const list = Array.isArray(payload) ? payload : (payload?.chapters || []);
+        if (Array.isArray(list) && list.length > 0) {
+            setChaptersList(list);
         }
     } catch (error) {
         console.log("Failed to fetch chapters list", error);
@@ -736,11 +742,20 @@ const processedExtraSections = useMemo(() => (
 
 // ----- Scroll position persistence (per novel + chapter) -----
 const scrollKeyFor = (chNum) => `@reader_scroll_v1_${novelId}_${chNum}`;
+// Novel-level marker of the EXACT position (chapter + offset inside it) —
+// fresher than the server record; the novel page uses it for "استئناف القراءة".
+const lastPosKeyFor = () => `@reader_last_pos_v1_${novelId}`;
 
-const saveScrollPosition = async (chNum, offset) => {
+// Latest live position (kept in a ref so it can be flushed synchronously on exit)
+const lastScrollPosRef = useRef(null);
+const sectionTitlesRef = useRef({});
+
+const saveScrollPosition = async (chNum, offset, globalOffset) => {
     try {
         if (!chNum || offset == null || offset < 0) return;
-        await AsyncStorage.setItem(scrollKeyFor(chNum), JSON.stringify({ offset: Math.round(offset), savedAt: Date.now() }));
+        const payload = JSON.stringify({ offset: Math.round(offset), global: Math.round(globalOffset || 0), v: 2, savedAt: Date.now() });
+        await AsyncStorage.setItem(scrollKeyFor(chNum), payload);
+        await AsyncStorage.setItem(lastPosKeyFor(), JSON.stringify({ chapter: parseInt(chNum), offset: Math.round(offset), savedAt: Date.now() }));
     } catch (e) {}
 };
 
@@ -749,14 +764,30 @@ const loadScrollPosition = async (chNum) => {
         const raw = await AsyncStorage.getItem(scrollKeyFor(chNum));
         if (!raw) return 0;
         const parsed = JSON.parse(raw);
+        // v1 saves stored a GLOBAL page offset — treating it as an in-chapter
+        // offset would overshoot to the end of the document (and open the next
+        // chapter). Ignore legacy saves: resume lands at the top of the saved
+        // chapter instead of at its end.
+        if (parsed?.v !== 2) return 0;
         return parsed?.offset || 0;
     } catch (e) { return 0; }
 };
 
-const queueSaveScroll = (chNum, offset) => {
+const queueSaveScroll = (chNum, offset, globalOffset) => {
     if (!continuousMode && parseInt(chNum) !== parseInt(chapterId)) return;
     if (scrollSaveTimer.current) clearTimeout(scrollSaveTimer.current);
-    scrollSaveTimer.current = setTimeout(() => saveScrollPosition(chNum, offset), 600);
+    scrollSaveTimer.current = setTimeout(() => saveScrollPosition(chNum, offset, globalOffset), 600);
+};
+
+// Resolve the title of whichever chapter the user is actually viewing
+// (the anchor chapter OR any appended continuous-mode section).
+const titleForChapter = (chNum) => {
+    const n = parseInt(chNum);
+    if (sectionTitlesRef.current[n]) return sectionTitlesRef.current[n];
+    if (chapter && n === parseInt(chapterId)) return chapter.title;
+    const fromList = (chaptersListRef.current || []).find(c => parseInt(c.number) === n);
+    if (fromList) return fromList.title;
+    return `فصل ${n}`;
 };
 
 const updateProgressOnServer = async (currentChapter, chapterNum) => {
@@ -768,7 +799,7 @@ const updateProgressOnServer = async (currentChapter, chapterNum) => {
       cover: novel.cover,
       author: novel.author || novel.translator,
       lastChapterId: parseInt(chapterNum) || parseInt(chapterId),
-      lastChapterTitle: currentChapter.title
+      lastChapterTitle: titleForChapter(chapterNum)
     });
   } catch (error) {
     console.error("Failed to update progress on server");
@@ -803,6 +834,9 @@ const fetchChapter = async () => {
         }
 
         setChapter(chapterData);
+        if (chapterData) {
+            sectionTitlesRef.current = { ...sectionTitlesRef.current, [parseInt(chapterId) || 1]: chapterData.title || `فصل ${chapterId}` };
+        }
         if (availableChapters) {
              setRealTotalChapters(availableChapters.length);
         } else if (chapterData.totalChapters) {
@@ -878,6 +912,7 @@ const fetchNextChapter = async () => {
             copyrightEnd: nextData.copyrightEnd,
             copyrightStyles: nextData.copyrightStyles
         };
+        sectionTitlesRef.current = { ...sectionTitlesRef.current, [nextNum]: section.title };
         setExtraSections(prev => [...prev, section]);
         if (Platform.OS !== 'android') {
             // Append the new chapter into the LIVE WebView DOM (no reload => scroll kept)
@@ -1204,20 +1239,45 @@ const buildSectionHTML = (sec, idx) => {
     return `<section class="chapter-sec" data-ch="${sec.number}">${sepHTML}${titleHTML}${customSep}${startHTML}<div class="content-area">${paragraphs}</div>${endHTML}</section>`;
 };
 
+// Compute the brightness-adjusted text color in JS — replaces the old CSS
+// `filter: brightness()` on body/html which forced iOS to re-composite the
+// WHOLE document on every scroll frame (the main stutter cause).
+const shadeTextColor = (hex, brightness) => {
+    const parse = (h) => {
+        h = String(h || '#ffffff').replace('#', '');
+        if (h.length === 3) h = h.split('').map(c => c + c).join('');
+        const n = parseInt(h || 'ffffff', 16);
+        if (isNaN(n)) return { r: 255, g: 255, b: 255 };
+        return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+    };
+    const toHex = (v) => ('0' + Math.round(Math.max(0, Math.min(255, v))).toString(16)).slice(-2);
+    let { r, g, b } = parse(hex);
+    const bb = parseFloat(brightness);
+    if (isNaN(bb)) return '#' + toHex(r) + toHex(g) + toHex(b);
+    const target = bb < 1 ? 0 : 255;
+    const t = bb < 1 ? Math.min(1 - bb, 0.92) : Math.min((bb - 1) * 0.85, 0.85);
+    r = r + (target - r) * t;
+    g = g + (target - g) * t;
+    b = b + (target - b) * t;
+    return '#' + toHex(r) + toHex(g) + toHex(b);
+};
+
+// Brightness-adjusted text color (see shadeTextColor) — used directly in the CSS
+const effectiveTextColor = shadeTextColor(textColor, textBrightness);
+
 // ----- Full CSS (re-injected on every settings change WITHOUT reloading the WebView,
 // which is what keeps the scroll position intact when changing colors/fonts/sizes) -----
 const buildReaderCSS = () => `
       * { -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; box-sizing: border-box; }
       body, html {
-        margin: 0; padding: 0; background-color: ${bgColor}; color: ${textColor};
+        margin: 0; padding: 0; background-color: ${bgColor}; color: ${effectiveTextColor};
         font-family: ${fontFamily.family}; line-height: 1.8;
         -webkit-overflow-scrolling: touch; overflow-x: hidden;
-        filter: brightness(${textBrightness});
       }
       .container { padding: 25px 20px 120px 20px; width: 100%; max-width: 800px; margin: 0 auto; }
       .title {
         font-size: ${fontSize + 8}px; font-weight: bold; margin-bottom: 20px;
-        color: ${bgColor === '#fff' || bgColor === '#ffffff' ? '#000' : '#fff'};
+        color: ${effectiveTextColor};
         padding-bottom: 10px; font-family: ${fontFamily.family}; text-align: right;
       }
       .sub-title { font-size: ${fontSize + 4}px; margin-top: 35px; }
@@ -1260,7 +1320,7 @@ const buildReaderCSS = () => `
 
       body { user-select: none; -webkit-user-select: none; }
       .author-section-wrapper { margin-top: 50px; margin-bottom: 20px; border-top: 1px solid #222; padding-top: 20px; }
-      .section-title { color: ${bgColor === '#fff' || bgColor === '#ffffff' ? '#000' : '#fff'}; font-size: 18px; font-weight: bold; margin-bottom: 12px; text-align: right; }
+      .section-title { color: ${effectiveTextColor}; font-size: 18px; font-weight: bold; margin-bottom: 12px; text-align: right; }
       .author-card { border-radius: 16px; overflow: hidden; margin-top: 10px; border: 1px solid #222; position: relative; height: 140px; width: 100%; cursor: pointer; }
       .author-banner { position: absolute; width: 100%; height: 100%; background-size: cover; background-position: center; }
       .author-overlay { position: absolute; inset: 0; background: linear-gradient(to bottom, rgba(0,0,0,0.2), rgba(0,0,0,0.8)); z-index: 1; }
@@ -1324,18 +1384,33 @@ const generateHTML = () => {
               if (window.ReactNativeWebView) { window.ReactNativeWebView.postMessage(msg); }
               else if (window.parent) { window.parent.postMessage(msg, '*'); }
           }
-          window.__readerScrollTo = function(y) { setTimeout(function(){ window.scrollTo(0, y); }, 80); };
+          window.__readerScrollTo = function(y) {
+              setTimeout(function(){
+                  var sec = document.querySelector('section[data-ch="${parseInt(chapterId) || 1}"]');
+                  var top = sec ? sec.offsetTop : 0;
+                  var max = document.documentElement.scrollHeight - window.innerHeight;
+                  window.scrollTo(0, Math.min(top + y, Math.max(0, max)));
+              }, 80);
+          };
           var initialScroll = ${initialScroll};
           if (initialScroll > 0) {
-              setTimeout(function(){ window.scrollTo(0, initialScroll); }, 150);
-              setTimeout(function(){ window.scrollTo(0, initialScroll); }, 500);
+              var __restore = function() {
+                  var sec = document.querySelector('section[data-ch="${parseInt(chapterId) || 1}"]');
+                  var top = sec ? sec.offsetTop : 0;
+                  var max = document.documentElement.scrollHeight - window.innerHeight;
+                  window.scrollTo(0, Math.min(top + initialScroll, Math.max(0, max)));
+              };
+              setTimeout(__restore, 150);
+              setTimeout(__restore, 500);
+              setTimeout(__restore, 1000);
           }
           var lastSent = 0;
-          function currentChapterNumber(y) {
+          function activeSection(y) {
               var secs = document.querySelectorAll('section[data-ch]');
-              var cur = secs.length ? parseInt(secs[0].getAttribute('data-ch')) : 0;
+              var cur = { num: secs.length ? parseInt(secs[0].getAttribute('data-ch')) : 0, top: secs.length ? secs[0].offsetTop : 0 };
               for (var i = 0; i < secs.length; i++) {
-                  if (secs[i].offsetTop - 80 <= y) cur = parseInt(secs[i].getAttribute('data-ch'));
+                  var t = secs[i].offsetTop;
+                  if (t - 80 <= y) cur = { num: parseInt(secs[i].getAttribute('data-ch')) || cur.num, top: t };
                   else break;
               }
               return cur;
@@ -1355,7 +1430,11 @@ const generateHTML = () => {
               if (now - lastSent < 250) return;
               lastSent = now;
               var y = window.scrollY || 0;
-              sendMessage(JSON.stringify({ type: 'readerScroll', offset: y, chapter: currentChapterNumber(y) }));
+              var act = activeSection(y);
+              // v2: report the offset INSIDE the active chapter's section so the
+              // saved position is per-chapter and resume lands on the exact line.
+              var inOffset = Math.max(0, Math.round(y - act.top));
+              sendMessage(JSON.stringify({ type: 'readerScroll', offset: y, inOffset: inOffset, chapter: act.num }));
               maybeNeedNext();
           }, true);
           document.addEventListener('click', function(e) {
@@ -1424,7 +1503,13 @@ useEffect(() => {
 
 // Cleanup scroll-save timer on unmount
 useEffect(() => () => {
+    // 🔥 FLUSH the very last position on exit — the debounced save would otherwise
+    // be cancelled here and the last ~600ms of reading progress would be lost.
     if (scrollSaveTimer.current) clearTimeout(scrollSaveTimer.current);
+    const last = lastScrollPosRef.current;
+    if (last && last.chapter) {
+        saveScrollPosition(last.chapter, last.offset, last.global);
+    }
 }, []);
 
 // Keep server reading-progress in sync with the chapter actually being viewed
@@ -1440,8 +1525,11 @@ const onMessage = (event) => {
             const data = JSON.parse(msg);
             if (data.type === 'readerScroll') {
                 const chNum = parseInt(data.chapter) || currentViewedChapter;
+                // v2: offset INSIDE the active chapter's section (exact resume)
+                const inOffset = (data.inOffset != null) ? data.inOffset : data.offset;
+                lastScrollPosRef.current = { chapter: chNum, offset: inOffset, global: data.offset };
                 setCurrentViewedChapter(prev => (parseInt(prev) === chNum ? prev : chNum));
-                queueSaveScroll(chNum, data.offset);
+                queueSaveScroll(chNum, inOffset, data.offset);
                 return;
             }
         } catch (e) {}
@@ -1554,7 +1642,11 @@ const handleAndroidScroll = (e) => {
         if (ys[k] <= y + 120 && num > cur) cur = num;
     });
     setCurrentViewedChapter(prev => (prev === cur ? prev : cur));
-    queueSaveScroll(cur, y);
+    // v2: save the offset INSIDE the current chapter's section (exact resume)
+    const secTop = ys[cur] != null ? ys[cur] : 0;
+    const inOffset = Math.max(0, Math.round(y - secTop));
+    lastScrollPosRef.current = { chapter: cur, offset: inOffset, global: y };
+    queueSaveScroll(cur, inOffset, y);
     if (continuousMode && contentSize.height > 0 && y + layoutMeasurement.height >= contentSize.height - 1500) {
         fetchNextChapter();
     }
@@ -1563,9 +1655,14 @@ const handleAndroidScroll = (e) => {
 const handleAndroidContentSize = (w, h) => {
     const target = pendingRestoreRef.current;
     if (target <= 0 || restoredOnceRef.current) return;
-    if (h >= target + 300) {
+    // v2 offsets are measured inside the anchor chapter's section — add the
+    // section's y (layout includes the top padding) to get the list offset.
+    const anchorNum = parseInt(chapterId) || 1;
+    const secTop = headerYsRef.current[anchorNum] || 0;
+    const absoluteTarget = secTop + target;
+    if (h >= absoluteTarget + 300) {
         restoredOnceRef.current = true;
-        androidListRef.current?.scrollToOffset({ offset: target, animated: false });
+        androidListRef.current?.scrollToOffset({ offset: absoluteTarget, animated: false });
         pendingRestoreRef.current = 0;
     } else {
         // Push towards the end so virtualization renders further items; retry next size change

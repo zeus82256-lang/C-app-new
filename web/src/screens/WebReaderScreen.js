@@ -575,11 +575,21 @@ export default function WebReaderScreen({ route, navigation }) {
 
     // ========================= scroll persistence =========================
     const scrollKeyFor = (chNum) => `@reader_scroll_v1_${novelId}_${chNum}`;
+    // Novel-level marker of the EXACT position (chapter + offset inside it).
+    // Fresher than the server record — the novel page uses it for "استئناف القراءة"
+    // so progress is never lost, even if the server update fails.
+    const lastPosKeyFor = () => `@reader_last_pos_v1_${novelId}`;
 
-    const saveScrollPosition = async (chNum, offset) => {
+    // Latest live position (kept in refs so it can be flushed synchronously on exit)
+    const lastScrollPosRef = useRef(null);
+    const sectionTitlesRef = useRef({});
+
+    const saveScrollPosition = async (chNum, offset, globalOffset) => {
         try {
             if (!chNum || offset == null || offset < 0) return;
-            await AsyncStorage.setItem(scrollKeyFor(chNum), JSON.stringify({ offset: Math.round(offset), savedAt: Date.now() }));
+            const payload = JSON.stringify({ offset: Math.round(offset), global: Math.round(globalOffset || 0), v: 2, savedAt: Date.now() });
+            await AsyncStorage.setItem(scrollKeyFor(chNum), payload);
+            await AsyncStorage.setItem(lastPosKeyFor(), JSON.stringify({ chapter: parseInt(chNum), offset: Math.round(offset), savedAt: Date.now() }));
         } catch (e) { }
     };
 
@@ -588,18 +598,34 @@ export default function WebReaderScreen({ route, navigation }) {
             const raw = await AsyncStorage.getItem(scrollKeyFor(chNum));
             if (!raw) return 0;
             const parsed = JSON.parse(raw);
+            // v1 saves stored a GLOBAL page offset — treating it as an in-chapter
+            // offset would overshoot to the end of the document (and open the next
+            // chapter). Ignore legacy saves: resume lands at the top of the saved
+            // chapter instead of at its end.
+            if (parsed?.v !== 2) return 0;
             return parsed?.offset || 0;
         } catch (e) { return 0; }
     };
 
-    const queueSaveScroll = (chNum, offset) => {
+    const queueSaveScroll = (chNum, offset, globalOffset) => {
         if (!settingsRef.current.continuousMode && parseInt(chNum) !== parseInt(chapterId)) return;
         if (scrollSaveTimer.current) clearTimeout(scrollSaveTimer.current);
-        scrollSaveTimer.current = setTimeout(() => saveScrollPosition(chNum, offset), 600);
+        scrollSaveTimer.current = setTimeout(() => saveScrollPosition(chNum, offset, globalOffset), 600);
     };
 
     const clearScrollFor = async (chNum) => {
         try { await AsyncStorage.removeItem(scrollKeyFor(chNum)); } catch (e) { }
+    };
+
+    // Resolve the title of whichever chapter the user is actually viewing
+    // (the anchor chapter OR any appended continuous-mode section).
+    const titleForChapter = (chNum) => {
+        const n = parseInt(chNum);
+        if (sectionTitlesRef.current[n]) return sectionTitlesRef.current[n];
+        if (chapterRef.current && n === parseInt(chapterId)) return chapterRef.current.title;
+        const fromList = (chaptersListRef.current || []).find(c => parseInt(c.number) === n);
+        if (fromList) return fromList.title;
+        return `فصل ${n}`;
     };
 
     const updateProgressOnServer = async (currentChapter, chapterNum) => {
@@ -611,7 +637,7 @@ export default function WebReaderScreen({ route, navigation }) {
                 cover: novel.cover,
                 author: novel.author || novel.translator,
                 lastChapterId: parseInt(chapterNum) || parseInt(chapterId),
-                lastChapterTitle: currentChapter.title
+                lastChapterTitle: titleForChapter(chapterNum)
             });
         } catch (error) { }
     };
@@ -619,10 +645,14 @@ export default function WebReaderScreen({ route, navigation }) {
     // ========================= fetching =========================
     const fetchChapters = async () => {
         try {
-            const res = await api.get(`/api/novels/${novelId}/chapters`);
-            if (res.data && Array.isArray(res.data)) {
-                setChaptersList(res.data);
-                sendChapters(res.data);
+            // /chapters-list is the real endpoint (the old /chapters route never
+            // existed — that is why the in-reader chapter list stayed empty).
+            const res = await api.get(`/api/novels/${novelId}/chapters-list`, { params: { page: 1, limit: 100000, sort: 'asc' } });
+            const payload = res.data;
+            const list = Array.isArray(payload) ? payload : (payload?.chapters || []);
+            if (Array.isArray(list) && list.length > 0) {
+                setChaptersList(list);
+                sendChapters(list);
             }
         } catch (error) { }
     };
@@ -743,6 +773,9 @@ export default function WebReaderScreen({ route, navigation }) {
             }
 
             setChapter(chapterData);
+            if (chapterData) {
+                sectionTitlesRef.current = { ...sectionTitlesRef.current, [parseInt(chapterId) || 1]: chapterData.title || `فصل ${chapterId}` };
+            }
             if (availableChapters) {
                 setRealTotalChapters(availableChapters.length);
             } else if (chapterData.totalChapters) {
@@ -825,6 +858,7 @@ export default function WebReaderScreen({ route, navigation }) {
                 copyrightEnd: nextData.copyrightEnd,
                 copyrightStyles: nextData.copyrightStyles
             };
+            sectionTitlesRef.current = { ...sectionTitlesRef.current, [nextNum]: section.title };
             setExtraSections(prev => [...prev, section]);
             const html = buildWorSectionHTML({
                 number: section.number,
@@ -1040,7 +1074,14 @@ export default function WebReaderScreen({ route, navigation }) {
         });
         return () => {
             backHandler.remove();
+            // 🔥 FLUSH the very last position on exit — the debounced save would
+            // otherwise be cancelled by the cleanup below and the last ~600ms of
+            // reading progress would be lost every single time.
             if (scrollSaveTimer.current) clearTimeout(scrollSaveTimer.current);
+            const last = lastScrollPosRef.current;
+            if (last && last.chapter) {
+                saveScrollPosition(last.chapter, last.offset, last.global);
+            }
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
@@ -1096,8 +1137,13 @@ export default function WebReaderScreen({ route, navigation }) {
             }
             case 'scroll': {
                 const chNum = parseInt(data.chapter) || currentViewedChapter;
+                // v2: the shell reports the offset INSIDE the active chapter's
+                // section — saving that (instead of the global page offset) is
+                // what makes "continue where I stopped" land on the exact line.
+                const inOffset = (data.inOffset != null) ? data.inOffset : data.offset;
+                lastScrollPosRef.current = { chapter: chNum, offset: inOffset, global: data.offset };
                 setCurrentViewedChapter(prev => (parseInt(prev) === chNum ? prev : chNum));
-                queueSaveScroll(chNum, data.offset);
+                queueSaveScroll(chNum, inOffset, data.offset);
                 break;
             }
             case 'needNext':

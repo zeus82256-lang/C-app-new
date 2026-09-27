@@ -108,8 +108,10 @@ export default function TitleGeneratorSelectionScreen({ navigation }) {
           // 🔥 FIX: Use chapters-list endpoint to get all chapters for selection
           const res = await api.get(`/api/novels/${novelId}/chapters-list?limit=10000`);
           if (res.data) {
+              // Response may be the new { chapters, total, totalPages } object or a legacy array
+              const list = Array.isArray(res.data) ? res.data : (res.data?.chapters || []);
               // The endpoint returns objects with { _id, number, title, etc }
-              setChapters(res.data);
+              setChapters(list);
           }
       } catch(e) { 
           console.log(e); 

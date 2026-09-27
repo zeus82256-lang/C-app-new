@@ -111,8 +111,8 @@ export const WOR_APP_CSS = `
   .wor-mini-toast.is-visible span { opacity: 1; transform: translateY(0); }
 
   /* ---- boot loader ---- */
-  .wor-boot-loading { position: fixed; inset: 0; display: grid; place-items: center; z-index: 4000; background: var(--wor-bg, #000); transition: opacity .3s ease; }
-  .wor-boot-loading.is-done { opacity: 0; pointer-events: none; }
+  .wor-boot-loading { position: fixed; inset: 0; display: grid; place-items: center; z-index: 4000; background: var(--wor-bg, #000); transition: opacity .3s ease, visibility 0s linear .35s; }
+  .wor-boot-loading.is-done { opacity: 0; pointer-events: none; visibility: hidden; }
   .wor-boot-spinner { width: 42px; height: 42px; border-radius: 50%; border: 3px solid color-mix(in srgb, var(--wor-text, #fff) 18%, transparent); border-top-color: var(--wor-accent, #808080); animation: wor-boot-spin 1s linear infinite; }
   @keyframes wor-boot-spin { to { transform: rotate(360deg); } }
 
@@ -178,17 +178,23 @@ export const WOR_APP_CSS = `
   .wor-reader-dock__panel { min-block-size: 0; }
   .wor-reader-dock__tabs { grid-template-columns: repeat(7, minmax(0, 1fr)); }
 
-  /* Text brightness slider was dead — the bundle hardcodes filter:none on the
-     surface and nothing consumed --wor-reader-text-brightness. Wire it up. */
-  .wor-reader-text-surface { filter: brightness(var(--wor-reader-text-brightness, 1)); transition: filter .25s ease; }
+  /* Text brightness (سطوع الخط) is implemented by computing the effective text
+     color in JS (applyTheme) instead of a CSS "filter: brightness()". A filter on
+     the huge text surface forces iOS to re-composite the ENTIRE chapter every
+     scroll frame — that was the main cause of the stuttering scroll.
+     The variable is kept only for backwards compatibility. */
+  :root { --wor-reader-text-brightness: 1; }
 
   /* Scrolling smoothness: no CSS smooth-scroll fighting the finger, and no
-     permanent backdrop blur repaint over the whole dock while the page moves. */
+     permanent backdrop blur repaint over the whole dock while the page moves.
+     The dock background must be FULLY OPAQUE — translucent layers over moving
+     text cost an extra blend pass on every frame. */
   html { scroll-behavior: auto !important; }
   .wor-reader-dock {
     -webkit-backdrop-filter: none; backdrop-filter: none;
-    background: linear-gradient(150deg, color-mix(in srgb, var(--wor-surface-solid) 99%, transparent), color-mix(in srgb, var(--wor-surface) 97%, transparent));
+    background: var(--wor-surface-solid);
   }
+  .wor-reader-dock__panel, .wor-reader-dock__tabs { background: transparent; }
 
   /* Panel switch animation (keyframes ship with the bundle) */
   .wor-reader-dock__panel.is-entering { animation: worReaderPanelIn 150ms ease-out both; }
@@ -330,11 +336,22 @@ function bridgeScript() {
   }
 
   // ============================ theme ============================
+  function brightnessAdjusted(hex, b) {
+    // brightness < 1 → darker text, > 1 → brighter text (same visual result the
+    // old CSS filter produced, but with ZERO per-frame compositing cost).
+    var f = parseFloat(b);
+    if (isNaN(f)) f = 1;
+    if (f < 1) return mix(hex, '#000000', Math.min(1 - f, 0.92));
+    if (f > 1) return mix(hex, '#ffffff', Math.min((f - 1) * 0.85, 0.85));
+    return hex;
+  }
+
   function applyTheme() {
     var root = document.documentElement;
     var bg = S.bgColor || '#000000';
     var text = S.textColor || '#ffffff';
     var accent = S.accent || '#808080';
+    var effText = brightnessAdjusted(text, S.brightness);
     var dark = !isLight(bg);
     var soft = mix(bg, dark ? '#ffffff' : '#000000', 0.055);
     root.setAttribute('data-wor-theme', 'custom');
@@ -351,9 +368,9 @@ function bridgeScript() {
       + '--wor-danger:#fb7185;--wor-success:#4ade80;--wor-warning:#fbbf24;'
       + '--wor-shadow:0 18px 50px rgba(0,0,0,' + (dark ? 0.4 : 0.18) + ');'
       + '--wor-reader-page-bg:' + bg + ';'
-      + '--wor-reader-page-fg:' + text + ';'
-      + '--wor-reader-effective-fg:' + text + ';'
-      + '--wor-reader-page-muted:' + rgba(text, 0.68) + ';'
+      + '--wor-reader-page-fg:' + effText + ';'
+      + '--wor-reader-effective-fg:' + effText + ';'
+      + '--wor-reader-page-muted:' + rgba(effText, 0.68) + ';'
       + '--wor-reader-font-family-active:inherit;'
       + '--wor-reader-chapter-progress-color:' + (S.progressBarColor || '#00ffff') + ';'
       + 'color-scheme:' + (dark ? 'dark' : 'light') + ';'
@@ -543,28 +560,62 @@ function bridgeScript() {
 
   // ============================ scroll / progress ============================
   var lastSent = 0;
-  function chapterNumberAt(y) {
+  var scrollRaf = 0;
+  var lastDockNum = 0;
+  function activeSectionAt(y) {
+    // Returns the section the reader is currently in + its absolute top, so the
+    // saved offset can be stored PER CHAPTER (offset inside that chapter) —
+    // this is what makes resume land exactly where the user stopped.
     var secs = $all('.wor-chapter-sec[data-ch]');
-    var cur = secs.length ? parseInt(secs[0].getAttribute('data-ch'), 10) : 0;
+    var cur = { num: secs.length ? (parseInt(secs[0].getAttribute('data-ch'), 10) || 0) : 0, top: secs.length ? secs[0].offsetTop : 0 };
     for (var i = 0; i < secs.length; i++) {
-      if (secs[i].offsetTop - 90 <= y) cur = parseInt(secs[i].getAttribute('data-ch'), 10);
+      var t = secs[i].offsetTop;
+      if (t - 90 <= y) cur = { num: parseInt(secs[i].getAttribute('data-ch'), 10) || cur.num, top: t };
       else break;
     }
     return cur;
   }
-  function onScroll() {
-    var y = window.scrollY || window.pageYOffset || 0;
-    var fill = $('[data-wor-reader-chapter-progress-fill]');
-    var doc = document.documentElement;
-    var max = doc.scrollHeight - window.innerHeight;
-    var ratio = max > 0 ? clamp(y / max, 0, 1) : 0;
-    if (fill) fill.style.width = (ratio * 100).toFixed(2) + '%';
-    var now = Date.now();
-    if (now - lastSent > 220) {
-      lastSent = now;
-      send({ t: 'scroll', offset: Math.round(y), chapter: chapterNumberAt(y), ratio: ratio });
+  function updateDockProgress(num) {
+    // Mirror the live chapter into the dock progress while the user scrolls
+    // through appended chapters (continuous mode) — the dock used to stay on
+    // the chapter the reader was OPENED with.
+    if (!num || num === lastDockNum) return;
+    lastDockNum = num;
+    var total = (CHAPTERS && CHAPTERS.length) ? CHAPTERS.length : ((CH && CH.total) || 0);
+    var pos = num;
+    if (CHAPTERS && CHAPTERS.length) {
+      for (var i = 0; i < CHAPTERS.length; i++) {
+        if (parseInt(CHAPTERS[i].number, 10) === num) { pos = i + 1; break; }
+      }
     }
-    maybeNeedNext();
+    var percent = total > 0 ? Math.min(100, Math.round((pos / total) * 100)) : 0;
+    var strong = $('.wor-reader-dock__progress-copy strong');
+    var pct = $('.wor-reader-dock__progress-copy span');
+    if (strong) strong.textContent = pos + '/' + (total || '—');
+    if (pct) pct.textContent = percent + '%';
+    var prog = $('.wor-reader-dock__progress');
+    if (prog) prog.style.setProperty('--wor-reader-progress-value', percent + '%');
+  }
+  function onScroll() {
+    if (scrollRaf) return;
+    scrollRaf = requestAnimationFrame(function () {
+      scrollRaf = 0;
+      var y = window.scrollY || window.pageYOffset || 0;
+      var fill = $('[data-wor-reader-chapter-progress-fill]');
+      var doc = document.documentElement;
+      var max = doc.scrollHeight - window.innerHeight;
+      var ratio = max > 0 ? clamp(y / max, 0, 1) : 0;
+      if (fill) fill.style.width = (ratio * 100).toFixed(2) + '%';
+      var now = Date.now();
+      if (now - lastSent > 220) {
+        lastSent = now;
+        var act = activeSectionAt(y);
+        var inOffset = Math.max(0, Math.round(y - act.top));
+        send({ t: 'scroll', offset: Math.round(y), inOffset: inOffset, chapter: act.num, ratio: ratio });
+        updateDockProgress(act.num);
+      }
+      maybeNeedNext();
+    });
   }
   function maybeNeedNext() {
     if (!S.continuousMode || window.__worEnd || window.__worNeedLock) return;
@@ -1379,6 +1430,7 @@ function bridgeScript() {
         var pct = $('.wor-reader-dock__progress-copy span');
         if (strong) strong.textContent = msg.number + '/' + (msg.total || '—');
         if (pct) pct.textContent = msg.percent || '';
+        lastDockNum = msg.number;
         var prog = $('.wor-reader-dock__progress');
         if (prog) prog.style.setProperty('--wor-reader-progress-value', (msg.percentValue || 0) + '%');
         var prev = $('[data-wor-reader-nav-prev]');
@@ -1422,11 +1474,7 @@ function bridgeScript() {
       }
       else if (kind === 'appendChapter') {
         var surface2 = $('#worTextSurface');
-        if (surface2) {
-          var tmp = document.createElement('div');
-          tmp.innerHTML = msg.html;
-          while (tmp.firstChild) surface2.appendChild(tmp.firstChild);
-        }
+        if (surface2) surface2.insertAdjacentHTML('beforeend', msg.html || '');
         window.__worNeedLock = false;
       }
       else if (kind === 'endReached') {
@@ -1496,10 +1544,18 @@ function bridgeScript() {
 
   function restoreScroll() {
     if (!pendingScroll || pendingScroll <= 0) return;
-    var y = pendingScroll;
-    // never fight the reader's own finger: if they already touched the page,
-    // skip the remaining restore attempts instead of yanking the scroll away
-    function go() { if (!userTouched) window.scrollTo(0, y); }
+    var inOffset = pendingScroll;
+    // The saved offset is measured INSIDE the chapter's own section (v2), so the
+    // restore target is sectionTop + inOffset. Old v1 saves stored a global
+    // offset — those are simply clamped to the page maximum.
+    function go() {
+      if (userTouched) return; // never fight the reader's own finger
+      var sec = (CH && CH.number != null) ? document.querySelector('.wor-chapter-sec[data-ch="' + CH.number + '"]') : null;
+      var top = sec ? sec.offsetTop : 0;
+      var doc = document.documentElement;
+      var maxY = Math.max(0, doc.scrollHeight - window.innerHeight);
+      window.scrollTo(0, Math.min(top + inOffset, maxY));
+    }
     setTimeout(go, 60);
     setTimeout(go, 320);
     setTimeout(go, 900);

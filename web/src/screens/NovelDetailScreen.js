@@ -13,6 +13,7 @@ import {
   ScrollView,
   FlatList,
   Modal,
+  TextInput,
   Platform
 } from 'react-native';
 import { Image } from 'expo-image'; 
@@ -26,6 +27,7 @@ import { AuthContext } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import CommentsSection from '../components/CommentsSection'; 
 import { saveOfflineNovel, saveOfflineChapter, removeOfflineChapter, getOfflineNovelDetails } from '../services/offlineStorage';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import CustomAlert from '../components/CustomAlert';
 import downloadQueue from '../services/DownloadQueue'; // 🔥 IMPORTED QUEUE SERVICE
 
@@ -85,6 +87,12 @@ export default function NovelDetailScreen({ route, navigation }) {
   const [isPagePickerVisible, setPagePickerVisible] = useState(false);
   const [sortDesc, setSortDesc] = useState(false); 
 
+  // 🔥 Chapter search (يبحث برقم الفصل أو عنوانه)
+  const [chapterSearch, setChapterSearch] = useState('');
+  const searchDebounceRef = useRef(null);
+  const chaptersTabInitRef = useRef(false);
+  const [localLastPos, setLocalLastPos] = useState(null);
+
   // Sort Dropdown Modal
   const [isSortPickerVisible, setSortPickerVisible] = useState(false);
 
@@ -140,16 +148,54 @@ export default function NovelDetailScreen({ route, navigation }) {
       }
   }, [fullNovel.authorEmail]);
 
+  // 🔥 3.5 Local "استئناف القراءة" marker — written by the reader on every scroll,
+  // so the exact chapter (e.g. 35 in the middle) survives even without the server.
+  const loadLocalLastPos = useCallback(async () => {
+      try {
+          const raw = await AsyncStorage.getItem(`@reader_last_pos_v1_${novelId}`);
+          setLocalLastPos(raw ? JSON.parse(raw) : null);
+      } catch (e) { }
+  }, [novelId]);
+
+  // Refresh reading progress when returning from the reader (screen focus)
+  useFocusEffect(
+      useCallback(() => {
+          loadLocalLastPos();
+          if (!isOfflineMode) {
+              fetchLibraryStatus();
+          }
+          // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [novelId, isOfflineMode])
+  );
+
   // 🔥 4. Fetch Chapters logic (Updated for Offline Mode Pagination)
   useEffect(() => {
       if (activeTab === 'chapters') {
+          // 🔥 Auto-jump ONCE to the page containing the last read chapter
+          // (الفصول مقسمة لصفحات → افتح الصفحة التي فيها آخر فصل قُرئ)
+          if (!chaptersTabInitRef.current) {
+              chaptersTabInitRef.current = true;
+              const lastNum = parseInt(localLastPos?.chapter) || lastReadChapterId || 0;
+              if (lastNum > 0 && totalPages > 1) {
+                  const base = Math.floor((lastNum - 1) / CHAPTERS_PER_PAGE) + 1;
+                  const targetPage = sortDesc
+                      ? Math.max(1, totalPages - base + 1)
+                      : Math.min(totalPages, base);
+                  if (targetPage !== currentPage) {
+                      setCurrentPage(targetPage);
+                      return;
+                  }
+              }
+          }
           if (isOfflineMode) {
               updateOfflineChaptersList();
           } else {
-              fetchChaptersPage(currentPage);
+              fetchChaptersPage(currentPage, chapterSearch);
           }
       }
-  }, [activeTab, currentPage, sortDesc, isOfflineMode, allOfflineChapters]);
+      // localLastPos is included so a late AsyncStorage resolution still triggers
+      // the one-time auto-jump (the init guard above prevents double-jumping).
+  }, [activeTab, currentPage, sortDesc, isOfflineMode, allOfflineChapters, localLastPos]);
 
   // 🔥 New Function: Process Offline Chapters (Sort & Paginate Locally)
   const updateOfflineChaptersList = useCallback(() => {
@@ -159,21 +205,36 @@ export default function NovelDetailScreen({ route, navigation }) {
       }
 
       let processed = [...allOfflineChapters];
-      
+
+      // 🔥 Client-side search (offline mode)
+      const q = (chapterSearch || '').trim().toLowerCase();
+      if (q) {
+          const qNum = String(parseInt(chapterSearch, 10));
+          processed = processed.filter(c => {
+              const numStr = String(c.number);
+              const numMatch = !isNaN(parseInt(chapterSearch, 10)) && (numStr === qNum || numStr.startsWith(qNum));
+              const titleMatch = String(c.title || '').toLowerCase().includes(q);
+              return numMatch || titleMatch;
+          });
+      }
+
       // Sort
       if (sortDesc) {
           processed.sort((a, b) => b.number - a.number);
       } else {
           processed.sort((a, b) => a.number - b.number);
       }
-      
+
+      // 🔥 Total pages reflects the filtered list (like the server does)
+      setTotalPages(Math.ceil(processed.length / CHAPTERS_PER_PAGE) || 1);
+
       // Paginate
       const startIndex = (currentPage - 1) * CHAPTERS_PER_PAGE;
       const endIndex = startIndex + CHAPTERS_PER_PAGE;
       const pageItems = processed.slice(startIndex, endIndex);
 
       setChapters(pageItems);
-  }, [allOfflineChapters, currentPage, sortDesc]);
+  }, [allOfflineChapters, currentPage, sortDesc, chapterSearch]);
 
   const fetchOfflineData = async () => {
       setLoadingChapters(true);
@@ -260,8 +321,8 @@ export default function NovelDetailScreen({ route, navigation }) {
       }
   };
 
-  // 🔥 Optimized: Fetch Specific Page of Chapters
-  const fetchChaptersPage = async (page) => {
+  // 🔥 Optimized: Fetch Specific Page of Chapters (with optional search)
+  const fetchChaptersPage = async (page, search = '') => {
       if (isOfflineMode) return; // Handled by updateOfflineChaptersList
 
       setLoadingChapters(true);
@@ -271,15 +332,36 @@ export default function NovelDetailScreen({ route, navigation }) {
               params: {
                   page: page,
                   limit: CHAPTERS_PER_PAGE,
-                  sort: sortOrder
+                  sort: sortOrder,
+                  ...(search ? { search } : {})
               }
           });
-          setChapters(res.data);
+          const payload = res.data;
+          // New object shape { chapters, total, totalPages } (older array shape kept for safety)
+          const list = Array.isArray(payload) ? payload : (payload?.chapters || []);
+          setChapters(list);
+          if (payload && !Array.isArray(payload) && payload.totalPages) {
+              setTotalPages(payload.totalPages);
+          }
       } catch (e) {
           showToast("فشل تحميل الفصول", "error");
       } finally {
           setLoadingChapters(false);
       }
+  };
+
+  // 🔥 Debounced search handler (server-side search for online mode)
+  const handleChapterSearchChange = (text) => {
+      setChapterSearch(text);
+      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+      searchDebounceRef.current = setTimeout(() => {
+          if (!isOfflineMode) {
+              setCurrentPage(1);
+              fetchChaptersPage(1, text);
+          } else {
+              setCurrentPage(1);
+          }
+      }, 350);
   };
 
   const handleDownloadChapter = async (chapter) => {
@@ -686,8 +768,13 @@ export default function NovelDetailScreen({ route, navigation }) {
               style={styles.readButton}
               onPress={() => {
                 // Logic to start reading doesn't rely on chapter list being loaded
+                // 🔥 Local marker is FRESHER than the server record (written on every
+                // scroll) — it guarantees we resume the exact chapter we stopped at.
                 let targetChapterNum = 1;
-                if (lastReadChapterId > 0) {
+                const localChapter = parseInt(localLastPos?.chapter) || 0;
+                if (localChapter > 0) {
+                     targetChapterNum = localChapter;
+                } else if (lastReadChapterId > 0) {
                      targetChapterNum = lastReadChapterId;
                 }
                 
@@ -706,7 +793,9 @@ export default function NovelDetailScreen({ route, navigation }) {
               ) : (
                   <>
                     <Text style={styles.readButtonText}>
-                        {lastReadChapterId > 0 ? 'استئناف القراءة' : 'ابدأ القراءة'}
+                        {(localLastPos?.chapter || lastReadChapterId) > 0
+                            ? `استئناف القراءة — الفصل ${localLastPos?.chapter || lastReadChapterId}`
+                            : 'ابدأ القراءة'}
                     </Text>
                     <Ionicons name="book-outline" size={20} color="#fff" style={{ marginLeft: 8 }} />
                   </>
@@ -750,6 +839,24 @@ export default function NovelDetailScreen({ route, navigation }) {
           
           {activeTab === 'chapters' && (
             <View style={styles.chaptersList}>
+               {/* 🔥 شريط البحث في الفصول */}
+               <View style={styles.chapterSearchRow}>
+                   <Ionicons name="search" size={18} color="#888" />
+                   <TextInput
+                       style={styles.chapterSearchInput}
+                       placeholder="ابحث عن فصل برقمه أو عنوانه..."
+                       placeholderTextColor="#666"
+                       value={chapterSearch}
+                       onChangeText={handleChapterSearchChange}
+                       returnKeyType="search"
+                   />
+                   {chapterSearch.length > 0 && (
+                       <TouchableOpacity onPress={() => handleChapterSearchChange('')} style={{ padding: 4 }}>
+                           <Ionicons name="close-circle" size={18} color="#888" />
+                       </TouchableOpacity>
+                   )}
+               </View>
+
                <TouchableOpacity 
                    style={styles.sortHeader} 
                    onPress={() => setSortPickerVisible(true)}
@@ -775,7 +882,9 @@ export default function NovelDetailScreen({ route, navigation }) {
                        {renderPagination()}
                    </>
                ) : (
-                   <Text style={{color: '#666', textAlign: 'center', marginTop: 20}}>لا توجد فصول بعد.</Text>
+                   <Text style={{color: '#666', textAlign: 'center', marginTop: 20}}>
+                       {chapterSearch ? 'لا توجد نتائج مطابقة لبحثك.' : 'لا توجد فصول بعد.'}
+                   </Text>
                )}
             </View>
           )}
@@ -911,6 +1020,8 @@ const styles = StyleSheet.create({
   pickerItemText: { color: '#ccc', fontSize: 16, textAlign: 'right' },
   
   chaptersList: { paddingBottom: 20 },
+  chapterSearchRow: { flexDirection: 'row-reverse', alignItems: 'center', gap: 8, backgroundColor: '#1a1a1a', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, marginBottom: 10, borderWidth: 1, borderColor: '#333' },
+  chapterSearchInput: { flex: 1, color: '#fff', fontSize: 14, paddingVertical: 4, textAlign: 'right' },
   sortHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 10, marginBottom: 5, borderBottomWidth: 1, borderBottomColor: '#333' },
   sortHeaderText: { color: '#888', fontSize: 12, textAlign: 'right' },
   
