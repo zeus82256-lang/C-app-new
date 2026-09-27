@@ -136,14 +136,16 @@ export const WOR_APP_CSS = `
   .wor-reader-background-picker__canvas canvas, .wor-reader-chapter-progress-color-picker__canvas canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
   .wor-reader-background-picker__handle, .wor-reader-chapter-progress-color-picker__canvas .wor-picker-handle { z-index: 2; }
 
-  /* ---- words sheet additions (folders tabs, list) ---- */
-  .wor-reader-words-tabs { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; scrollbar-width: none; }
-  .wor-reader-words-tabs::-webkit-scrollbar { display: none; }
-  .wor-reader-words-tab { flex: 0 0 auto; padding-inline: 14px; }
-  .wor-reader-words-tab.is-active { border-color: var(--wor-accent); background: var(--wor-accent-soft); color: var(--wor-accent); }
-  .wor-reader-words-list { display: grid; gap: 10px; }
+  /* ---- words sheet (Galaxy "تغيير الكلمات") additions ---- */
+  .wor-reader-words-color-control[aria-hidden="true"] { display: none; }
+  .wor-reader-words-check.is-on { border-color: color-mix(in srgb, var(--wor-accent) 48%, var(--wor-border)); background: linear-gradient(180deg, color-mix(in srgb, var(--wor-accent-soft) 56%, var(--wor-surface-soft)), color-mix(in srgb, var(--wor-accent-soft) 86%, var(--wor-surface))); }
+  .wor-reader-words-check input[type="radio"] { accent-color: var(--wor-accent); }
   .wor-reader-words-item.is-editing { border-color: var(--wor-accent); }
-  .wor-reader-words-btn--danger { color: var(--wor-danger, #fb7185); }
+  .wor-reader-words-item__color { flex: 0 0 auto; }
+  .wor-reader-words-color-dot { cursor: pointer; }
+  .wor-reader-words-library__head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-block-end: 8px; }
+  .wor-reader-words-library__head strong { font-size: .92rem; font-weight: 950; }
+  .wor-reader-words-library__head span { min-inline-size: 30px; text-align: center; padding: 3px 9px; border: 1px solid var(--wor-border); border-radius: 999px; background: var(--wor-accent-soft); color: var(--wor-accent); font-size: .76rem; font-weight: 950; }
 
   /* ---- active states for background presets ---- */
   .wor-reader-background-preset.is-active { border-color: color-mix(in srgb, var(--wor-accent) 60%, var(--wor-border)); background: var(--wor-accent-soft); }
@@ -254,7 +256,7 @@ function bridgeScript() {
   var REPORT_TYPES = '__WOR_REPORT_TYPES__';
   var CH = null;
   var CHAPTERS = [];
-  var WORDS = { folders: [], activeId: null, editing: null, sortDesc: true };
+  // (words state lives in the words sheet section below)
   var CHAPTERS_PAGE = 100;
   var chaptersPageCount = 1;
   var chaptersSortDesc = false;
@@ -617,55 +619,202 @@ function bridgeScript() {
     sh.setAttribute('aria-hidden', 'true');
   }
 
-  // ============================ words sheet ============================
+  // ==================== words sheet (Galaxy "تغيير الكلمات") ====================
+  var WORDS = {
+    scope: 'novel',                     // 'novel' = هذه الرواية | 'global' = كل الروايات
+    items: { novel: [], global: [] },   // filled from React
+    editing: null                       // { id } while editing a saved term
+  };
+  var WORDS_DEFAULT_COLOR = '#0ea5e9';
+  var WORDS_PALETTE = ['#0ea5e9', '#38bdf8', '#06b6d4', '#14b8a6', '#10b981', '#22c55e', '#84cc16', '#eab308', '#f59e0b', '#f97316', '#ef4444', '#ec4899', '#d946ef', '#a855f7', '#8b5cf6', '#6366f1', '#f43f5e', '#fb7185', '#ffffff', '#cbd5e1', '#94a3b8', '#64748b', '#334155', '#0f172a'];
+
+  // ---- color picker state (HSV) ----
+  var wcHue = 198, wcSat = 1, wcVal = .93;
+
+  function wcHsvToHex(h, s, v) {
+    function f(n) {
+      var k = (n + h / 60) % 6;
+      var c = v - v * s * Math.max(Math.min(k, 4 - k, 1), 0);
+      return ('0' + Math.round(255 * c).toString(16)).slice(-2);
+    }
+    return '#' + f(5) + f(3) + f(1);
+  }
+  function wcHexToHsv(hex) {
+    var m = /^#?([0-9a-f]{6})$/i.exec(String(hex || '').trim());
+    if (!m) return null;
+    var n = parseInt(m[1], 16);
+    var r = ((n >> 16) & 255) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
+    var mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+    var h = 0;
+    if (d) {
+      if (mx === r) h = ((g - b) / d) % 6;
+      else if (mx === g) h = (b - r) / d + 2;
+      else h = (r - g) / d + 4;
+      h *= 60; if (h < 0) h += 360;
+    }
+    return { h: h, s: mx ? d / mx : 0, v: mx };
+  }
+
+  function wcApplyColor(hex, src) {
+    hex = String(hex || WORDS_DEFAULT_COLOR).toUpperCase();
+    var hidden = $('[data-wor-words-color]');
+    var swatch = $('[data-wor-words-color-preview]');
+    var large = $('[data-wor-words-color-preview-large]');
+    var hexLabel = $('[data-wor-words-color-hex]');
+    var hexInput = $('[data-wor-words-color-hex-input]');
+    if (hidden) hidden.value = hex;
+    if (swatch) swatch.style.background = hex;
+    if (large) large.style.background = hex;
+    if (hexLabel) hexLabel.textContent = hex;
+    if (hexInput && src !== 'input') hexInput.value = hex;
+    var canvas = $('[data-wor-words-color-canvas]');
+    if (canvas) {
+      canvas.style.backgroundColor = 'hsl(' + wcHue + ', 100%, 50%)';
+      canvas.style.backgroundImage = 'linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, hsl(' + wcHue + ', 100%, 50%))';
+    }
+    if (src !== 'canvas') {
+      var handle = $('[data-wor-words-color-handle]');
+      if (handle) { handle.style.left = (wcSat * 100) + '%'; handle.style.top = ((1 - wcVal) * 100) + '%'; }
+    }
+    if (src !== 'hue') {
+      var hue = $('[data-wor-words-color-hue]');
+      if (hue) hue.value = String(Math.round(wcHue));
+    }
+    $all('[data-wor-words-color-dot]').forEach(function (d) {
+      d.classList.toggle('is-active', d.getAttribute('data-wor-words-color-dot').toUpperCase() === hex);
+    });
+  }
+
+  function wcSetColorHex(hex, src) {
+    var clean = String(hex || '').trim();
+    if (/^#[0-9a-f]{3}$/i.test(clean)) clean = '#' + clean[1] + clean[1] + clean[2] + clean[2] + clean[3] + clean[3];
+    var hsv = wcHexToHsv(clean);
+    if (!hsv) return false;
+    wcHue = Math.round(hsv.h); wcSat = hsv.s; wcVal = hsv.v;
+    wcApplyColor(clean.toUpperCase(), src);
+    return true;
+  }
+
+  function wcBindPicker() {
+    var canvas = $('[data-wor-words-color-canvas]');
+    if (canvas) {
+      var dragging = false;
+      var pick = function (e) {
+        var r = canvas.getBoundingClientRect();
+        var x = Math.min(Math.max((e.clientX - r.left) / Math.max(r.width, 1), 0), 1);
+        var y = Math.min(Math.max((e.clientY - r.top) / Math.max(r.height, 1), 0), 1);
+        wcSat = x; wcVal = 1 - y;
+        wcApplyColor(wcHsvToHex(wcHue, wcSat, wcVal), 'canvas');
+      };
+      canvas.addEventListener('pointerdown', function (e) { dragging = true; try { canvas.setPointerCapture(e.pointerId); } catch (err) { } pick(e); });
+      canvas.addEventListener('pointermove', function (e) { if (dragging) pick(e); });
+      ['pointerup', 'pointercancel'].forEach(function (ev) { canvas.addEventListener(ev, function () { dragging = false; }); });
+    }
+    var hue = $('[data-wor-words-color-hue]');
+    hue && hue.addEventListener('input', function () {
+      wcHue = parseInt(hue.value, 10) || 0;
+      wcApplyColor(wcHsvToHex(wcHue, wcSat, wcVal), 'hue');
+    });
+    var hexInput = $('[data-wor-words-color-hex-input]');
+    hexInput && hexInput.addEventListener('input', function () {
+      var v = hexInput.value.trim();
+      if (/^#[0-9a-f]{6}$/i.test(v) || /^#[0-9a-f]{3}$/i.test(v)) wcSetColorHex(v, 'input');
+    });
+    var reset = $('[data-wor-words-color-reset]');
+    reset && reset.addEventListener('click', function () { wcSetColorHex(WORDS_DEFAULT_COLOR); });
+  }
+
+  function wcRenderPalette() {
+    var grid = $('[data-wor-words-color-grid]');
+    if (!grid) return;
+    grid.innerHTML = WORDS_PALETTE.map(function (c) {
+      return '<button type="button" class="wor-reader-words-color-dot" data-wor-words-color-dot="' + c + '" style="background:' + c + '" aria-label="' + c + '"></button>';
+    }).join('');
+  }
+
+  function wordsCurrent() { return WORDS.scope === 'global' ? WORDS.items.global : WORDS.items.novel; }
+
+  function wordsEndEdit() {
+    WORDS.editing = null;
+    var from = $('[data-wor-words-from]'), to = $('[data-wor-words-to]');
+    var submit = $('[data-wor-words-submit]'), cancel = $('[data-wor-words-cancel]');
+    if (from) from.value = '';
+    if (to) to.value = '';
+    if (submit) submit.textContent = 'إضافة';
+    if (cancel) cancel.hidden = true;
+    $all('input[name="worWordsMode"]').forEach(function (r) { r.checked = r.getAttribute('data-wor-words-mode') === 'smart'; });
+    var colorOn = $('[data-wor-words-color-on]');
+    if (colorOn) colorOn.checked = false;
+    var ctl = $('[data-wor-words-color-control]');
+    if (ctl) ctl.setAttribute('aria-hidden', 'true');
+    wcSetColorHex(WORDS_DEFAULT_COLOR);
+    $all('.wor-reader-words-check').forEach(function (lbl) {
+      var input = lbl.querySelector('input');
+      if (input) lbl.classList.toggle('is-on', !!input.checked);
+    });
+    renderWords();
+  }
+
+  function wordsBeginEdit(item) {
+    if (!item) return;
+    WORDS.editing = { id: item.id };
+    var from = $('[data-wor-words-from]'), to = $('[data-wor-words-to]');
+    var submit = $('[data-wor-words-submit]'), cancel = $('[data-wor-words-cancel]');
+    if (from) from.value = item.original || '';
+    if (to) to.value = item.replacement || '';
+    if (submit) submit.textContent = 'تحديث';
+    if (cancel) cancel.hidden = false;
+    $all('input[name="worWordsMode"]').forEach(function (r) { r.checked = (r.getAttribute('data-wor-words-mode') === 'exact') === !!item.exact; });
+    var colorOn = $('[data-wor-words-color-on]');
+    if (colorOn) colorOn.checked = !!item.color;
+    var ctl = $('[data-wor-words-color-control]');
+    if (ctl) ctl.setAttribute('aria-hidden', item.color ? 'false' : 'true');
+    if (item.color) wcSetColorHex(item.color);
+    $all('.wor-reader-words-check').forEach(function (lbl) {
+      var input = lbl.querySelector('input');
+      if (input) lbl.classList.toggle('is-on', !!input.checked);
+    });
+    renderWords();
+    var form = $('[data-wor-words-form]');
+    form && form.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  }
+
   function renderWords() {
-    var tabsEl = $('#worWordsTabs');
-    var listEl = $('#worWordsList');
-    if (!tabsEl || !listEl) return;
-    var tabs = WORDS.folders.map(function (f) {
-      return '<button type="button" class="wor-reader-words-tab' + (WORDS.activeId === f.id ? ' is-active' : '') + '" data-wor-words-folder="' + esc(f.id) + '">' + esc(f.name) + '</button>';
+    $all('[data-wor-words-scope]').forEach(function (b) {
+      var on = b.getAttribute('data-wor-words-scope') === WORDS.scope;
+      b.classList.toggle('is-active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
     });
-    tabs.push('<button type="button" class="wor-reader-words-tab" data-wor-words-newfolder title="مجلد جديد">＋</button>');
-    if (WORDS.folders.length > 1) tabs.push('<button type="button" class="wor-reader-words-tab" data-wor-words-delfolder title="حذف المجلد الحالي">🗑</button>');
-    tabsEl.innerHTML = tabs.join('');
-    var folder = null;
-    for (var i = 0; i < WORDS.folders.length; i++) if (WORDS.folders[i].id === WORDS.activeId) folder = WORDS.folders[i];
-    var items = folder ? (folder.replacements || []) : [];
-    var sorted = items.slice();
-    sorted.sort(function (a, b) {
-      var ao = String(a.original || ''), bo = String(b.original || '');
-      return WORDS.sortDesc ? bo.localeCompare(ao, 'ar') : ao.localeCompare(bo, 'ar');
+    var listEl = $('[data-wor-words-list]');
+    var countEl = $('[data-wor-words-count]');
+    var clearBtn = $('[data-wor-words-clear]');
+    var items = wordsCurrent().slice().sort(function (a, b) {
+      return String(a.original || '').localeCompare(String(b.original || ''), 'ar');
     });
-    var html = sorted.map(function (r) {
-      var idx = items.indexOf(r);
-      var editing = WORDS.editing != null && WORDS.editing.idx === idx;
-      return '<div class="wor-reader-words-item' + (editing ? ' is-editing' : '') + '" data-wor-words-idx="' + idx + '">'
+    if (countEl) countEl.textContent = String(items.length);
+    if (clearBtn) clearBtn.hidden = items.length === 0;
+    var html = items.map(function (r) {
+      var editing = WORDS.editing != null && WORDS.editing.id === r.id;
+      var meta = [];
+      meta.push(r.replacement ? ('← ' + r.replacement) : '← حذف الكلمة');
+      if (r.exact) meta.push('كلمة مستقلة');
+      if (r.color) meta.push(String(r.color).toUpperCase());
+      return '<div class="wor-reader-words-item' + (editing ? ' is-editing' : '') + '">'
         + '<div class="wor-reader-words-item__body">'
-        + '<div class="wor-reader-words-item__pair">'
         + '<strong>' + esc(r.original) + '</strong>'
-        + '<span class="wor-reader-words-item__arrow">←</span>'
-        + '<strong class="wor-reader-words-item__to">' + esc(r.replacement) + '</strong>'
-        + '</div></div>'
+        + '<span>' + esc(meta.join(' · ')) + '</span>'
+        + (r.color ? '<i class="wor-reader-words-item__color" style="background:' + esc(r.color) + '"></i>' : '')
+        + '</div>'
         + '<div class="wor-reader-words-item__actions">'
-        + '<button type="button" data-wor-words-edit="' + idx + '">' + (editing ? 'إلغاء' : 'تعديل') + '</button>'
-        + '<button type="button" data-wor-words-del="' + idx + '">حذف</button>'
+        + '<button type="button" data-wor-words-edit="' + esc(r.id) + '">' + (editing ? 'إلغاء التعديل' : 'تعديل') + '</button>'
+        + '<button type="button" data-wor-words-del="' + esc(r.id) + '">حذف</button>'
         + '</div></div>';
     }).join('');
-    if (!sorted.length) html = '<div class="wor-reader-words-empty">لا توجد كلمات مستبدلة بعد في هذا المجلد</div>';
-    listEl.innerHTML = html;
-    var orig = $('#worWordsOriginal'), repl = $('#worWordsReplacement'), saveBtn = $('#worWordsSave');
-    if (WORDS.editing != null && items[WORDS.editing.idx]) {
-      if (orig) orig.value = items[WORDS.editing.idx].original || '';
-      if (repl) repl.value = items[WORDS.editing.idx].replacement || '';
-      if (saveBtn) saveBtn.textContent = 'تحديث';
-    } else if (saveBtn) {
-      saveBtn.textContent = 'إضافة';
-    }
-    var hint = $('#worWordsFolderName');
-    if (hint) hint.textContent = folder ? ('— ' + folder.name) : '';
+    if (listEl) listEl.innerHTML = html || '<div class="wor-reader-words-empty">لا توجد كلمات محفوظة في هذا النطاق.</div>';
   }
-  function openWordsSheet() { var sh = $('#wor-reader-words-sheet'); if (!sh) return; sh.hidden = false; sh.setAttribute('aria-hidden', 'false'); renderWords(); send({ t: 'wordsOpen' }); }
-  function closeWordsSheet() { var sh = $('#wor-reader-words-sheet'); if (!sh) return; sh.hidden = true; sh.setAttribute('aria-hidden', 'true'); WORDS.editing = null; }
+
+  function openWordsSheet() { var sh = $('#wor-reader-words-sheet'); if (!sh) return; sh.hidden = false; sh.setAttribute('aria-hidden', 'false'); wcRenderPalette(); wcSetColorHex(WORDS_DEFAULT_COLOR); renderWords(); send({ t: 'wordsOpen' }); }
+  function closeWordsSheet() { var sh = $('#wor-reader-words-sheet'); if (!sh) return; sh.hidden = true; sh.setAttribute('aria-hidden', 'true'); wordsEndEdit(); }
 
   // ============================ search overlay ============================
   function renderSearch() {
@@ -937,49 +1086,79 @@ function bridgeScript() {
     chSort && chSort.addEventListener('click', function () { chaptersSortDesc = !chaptersSortDesc; renderChapters(); });
     var chMore = $('#worChaptersMore');
     chMore && chMore.addEventListener('click', function () { chaptersPageCount += 1; renderChapters(); });
-    // words sheet
+    // words sheet (Galaxy)
     var wordsClose = $('[data-wor-words-close]');
     wordsClose && wordsClose.addEventListener('click', closeWordsSheet);
-    document.addEventListener('click', function (e) {
-      var el;
-      if ((el = e.target.closest('[data-wor-words-folder]'))) {
-        WORDS.activeId = el.getAttribute('data-wor-words-folder');
-        WORDS.editing = null;
-        renderWords();
-        send({ t: 'words', action: 'selectFolder', id: WORDS.activeId });
-      } else if ((el = e.target.closest('[data-wor-words-newfolder]'))) {
-        send({ t: 'words', action: 'createFolderPrompt' });
-      } else if ((el = e.target.closest('[data-wor-words-delfolder]'))) {
-        send({ t: 'words', action: 'deleteFolder', id: WORDS.activeId });
-      } else if ((el = e.target.closest('[data-wor-words-edit]'))) {
-        var idx = parseInt(el.getAttribute('data-wor-words-edit'), 10);
-        WORDS.editing = (WORDS.editing && WORDS.editing.idx === idx) ? null : { idx: idx };
-        renderWords();
-      } else if ((el = e.target.closest('[data-wor-words-del]'))) {
-        send({ t: 'words', action: 'deleteRep', idx: parseInt(el.getAttribute('data-wor-words-del'), 10) });
-      }
+    $all('[data-wor-words-scope]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var scope = b.getAttribute('data-wor-words-scope') || 'novel';
+        if (scope === WORDS.scope) return;
+        WORDS.scope = scope;
+        wordsEndEdit();
+      });
     });
-    var wordsSave = $('#worWordsSave');
-    wordsSave && wordsSave.addEventListener('click', function () {
-      var original = ($('#worWordsOriginal') || {}).value || '';
-      var replacement = ($('#worWordsReplacement') || {}).value || '';
-      original = original.trim();
+    $all('.wor-reader-words-check').forEach(function (lbl) {
+      var input = lbl.querySelector('input');
+      if (!input) return;
+      var sync = function () { lbl.classList.toggle('is-on', !!input.checked); };
+      input.addEventListener('change', sync);
+      sync();
+    });
+    var colorOnEl = $('[data-wor-words-color-on]');
+    colorOnEl && colorOnEl.addEventListener('change', function () {
+      var ctl = $('[data-wor-words-color-control]');
+      if (ctl) ctl.setAttribute('aria-hidden', colorOnEl.checked ? 'false' : 'true');
+    });
+    wcBindPicker();
+    var wordsForm = $('[data-wor-words-form]');
+    wordsForm && wordsForm.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var from = $('[data-wor-words-from]'), to = $('[data-wor-words-to]');
+      var original = ((from || {}).value || '').trim();
       if (!original) { toast('اكتب الكلمة الأصلية أولاً'); return; }
+      var modeEl = $('input[name="worWordsMode"]:checked');
+      var exact = !!modeEl && modeEl.getAttribute('data-wor-words-mode') === 'exact';
+      var colorOn = !!$('[data-wor-words-color-on]') && $('[data-wor-words-color-on]').checked;
+      var color = colorOn ? ((($('[data-wor-words-color]') || {}).value || WORDS_DEFAULT_COLOR)) : null;
       send({
         t: 'words',
         action: WORDS.editing != null ? 'updateRep' : 'addRep',
-        idx: WORDS.editing != null ? WORDS.editing.idx : null,
+        scope: WORDS.scope,
+        id: WORDS.editing != null ? WORDS.editing.id : null,
         original: original,
-        replacement: replacement
+        replacement: ((to || {}).value || '').trim(),
+        exact: exact,
+        color: color
       });
     });
-    var wordsCancel = $('#worWordsCancel');
-    wordsCancel && wordsCancel.addEventListener('click', function () {
-      WORDS.editing = null;
-      var o = $('#worWordsOriginal'), r = $('#worWordsReplacement');
-      if (o) o.value = '';
-      if (r) r.value = '';
-      renderWords();
+    var wordsCancelBtn = $('[data-wor-words-cancel]');
+    wordsCancelBtn && wordsCancelBtn.addEventListener('click', function () { wordsEndEdit(); });
+    var clearArmed = 0;
+    document.addEventListener('click', function (e) {
+      var el;
+      if ((el = e.target.closest('[data-wor-words-edit]'))) {
+        var id = el.getAttribute('data-wor-words-edit');
+        if (WORDS.editing && WORDS.editing.id === id) { wordsEndEdit(); return; }
+        var item = null;
+        var cur = wordsCurrent();
+        for (var i = 0; i < cur.length; i++) if (cur[i].id === id) item = cur[i];
+        item ? wordsBeginEdit(item) : wordsEndEdit();
+      } else if ((el = e.target.closest('[data-wor-words-del]'))) {
+        send({ t: 'words', action: 'deleteRep', scope: WORDS.scope, id: el.getAttribute('data-wor-words-del') });
+      } else if ((el = e.target.closest('[data-wor-words-color-dot]'))) {
+        wcSetColorHex(el.getAttribute('data-wor-words-color-dot'));
+      } else if ((el = e.target.closest('[data-wor-words-clear]'))) {
+        var now = Date.now();
+        if (now - clearArmed > 3000) {
+          clearArmed = now;
+          el.textContent = 'اضغط مجدداً للمسح';
+          setTimeout(function () { el.textContent = 'مسح الكل'; }, 3000);
+        } else {
+          clearArmed = 0;
+          el.textContent = 'مسح الكل';
+          send({ t: 'words', action: 'clearScope', scope: WORDS.scope });
+        }
+      }
     });
     // report modal
     $all('[data-wor-report-close]').forEach(function (b) { b.addEventListener('click', closeReport); });
@@ -1265,19 +1444,18 @@ function bridgeScript() {
         renderSearch();
       }
       else if (kind === 'words') {
-        WORDS.folders = msg.folders || [];
-        WORDS.activeId = msg.activeId || (WORDS.folders[0] && WORDS.folders[0].id) || null;
-        WORDS.editing = null;
+        WORDS.items = {
+          novel: (msg.items && msg.items.novel) || [],
+          global: (msg.items && msg.items.global) || []
+        };
         renderWords();
       }
       else if (kind === 'wordsSaved') {
-        WORDS.folders = msg.folders || [];
-        WORDS.activeId = msg.activeId || WORDS.activeId;
-        WORDS.editing = null;
-        var o = $('#worWordsOriginal'), r = $('#worWordsReplacement');
-        if (o) o.value = '';
-        if (r) r.value = '';
-        renderWords();
+        WORDS.items = {
+          novel: (msg.items && msg.items.novel) || [],
+          global: (msg.items && msg.items.global) || []
+        };
+        wordsEndEdit();
         toast(msg.toast || 'تم الحفظ');
       }
       else if (kind === 'commentCount') {
@@ -1950,24 +2128,98 @@ export function buildWorShell({ safeTop = 0, safeBottom = 0, novelTitle = '', no
   </div>
 </div>
 
-<!-- words sheet -->
+<!-- words sheet (Galaxy "تغيير الكلمات") -->
 <div class="wor-reader-words-sheet" id="wor-reader-words-sheet" role="dialog" aria-modal="true" aria-label="تغيير الكلمات" hidden aria-hidden="true">
   <div class="wor-reader-words-sheet__head">
-    <h2>تغيير الكلمات <small id="worWordsFolderName" style="color:var(--wor-muted);font-size:.75em"></small></h2>
+    <h2>تغيير الكلمات</h2>
     <button class="wor-reader-words-sheet__close" type="button" data-wor-words-close aria-label="إغلاق">×</button>
   </div>
   <div class="wor-reader-words-sheet__body">
-    <div class="wor-reader-words-tabs" id="worWordsTabs"></div>
-    <p class="wor-reader-words-sheet__hint">تُستبدل الكلمات تلقائياً أثناء عرض الفصول. اختر مجلداً من الأعلى أو أضف كلمة جديدة.</p>
-    <div class="wor-reader-words-form">
-      <label><span>الكلمة الأصلية</span><input id="worWordsOriginal" type="text" placeholder="اكتب الكلمة أو العبارة الأصلية..." autocomplete="off"></label>
-      <label><span>الكلمة البديلة</span><input id="worWordsReplacement" type="text" placeholder="اكتب البديل (اتركه فارغاً للحذف)..." autocomplete="off"></label>
-      <div class="wor-reader-words-form__actions">
-        <button class="wor-reader-words-btn" type="button" id="worWordsSave">إضافة</button>
-        <button class="wor-reader-words-btn wor-reader-words-btn--danger" type="button" id="worWordsCancel">إلغاء</button>
+    <div class="wor-reader-words-editor">
+      <div class="wor-reader-words-tabs" role="tablist" aria-label="نطاق تغيير الكلمات">
+        <button type="button" data-wor-words-scope="novel" aria-selected="true" class="is-active">هذه الرواية</button>
+        <button type="button" data-wor-words-scope="global" aria-selected="false">كل الروايات</button>
       </div>
+      <p class="wor-reader-words-sheet__hint">استبدل مصطلحًا أثناء القراءة لهذه الرواية أو لكل الروايات.</p>
+      <form class="wor-reader-words-form" data-wor-words-form autocomplete="off">
+        <label>
+          <span>الكلمة الأصلية</span>
+          <input type="text" data-wor-words-from placeholder="مثال: الاسم القديم" required>
+        </label>
+        <label>
+          <span>الكلمة البديلة</span>
+          <input type="text" data-wor-words-to placeholder="مثال: الاسم الجديد">
+        </label>
+        <div class="wor-reader-words-form__options">
+          <div class="wor-reader-words-form__switches">
+            <label class="wor-reader-words-check">
+              <input type="radio" name="worWordsMode" data-wor-words-mode="smart" checked>
+              <span>استبدال ذكي</span>
+            </label>
+            <label class="wor-reader-words-check">
+              <input type="radio" name="worWordsMode" data-wor-words-mode="exact">
+              <span>كلمة مستقلة</span>
+            </label>
+            <label class="wor-reader-words-check wor-reader-words-check--color">
+              <input type="checkbox" data-wor-words-color-on>
+              <span>تلوين البديل</span>
+            </label>
+          </div>
+          <div class="wor-reader-words-color-control" data-wor-words-color-control aria-hidden="true">
+            <input type="hidden" data-wor-words-color value="#0ea5e9">
+            <div class="wor-reader-words-color-control__head">
+              <div class="wor-reader-words-color-summary">
+                <i class="wor-reader-words-color-summary__swatch" data-wor-words-color-preview aria-hidden="true" style="background: #0ea5e9;"></i>
+                <div class="wor-reader-words-color-summary__copy">
+                  <strong>لون المصطلح البديل</strong>
+                  <span data-wor-words-color-hex>#0EA5E9</span>
+                </div>
+              </div>
+              <button type="button" class="wor-reader-words-color-reset" data-wor-words-color-reset>افتراضي</button>
+            </div>
+            <div class="wor-reader-words-color-grid" data-wor-words-color-grid></div>
+            <div class="wor-reader-words-color-picker" data-wor-words-color-picker>
+              <div class="wor-reader-words-color-canvas-wrap">
+                <div class="wor-reader-words-color-canvas" data-wor-words-color-canvas aria-label="لوحة تخصيص لون المصطلح" tabindex="0" role="application" style="background-image: linear-gradient(to top, rgb(0, 0, 0), transparent), linear-gradient(to right, rgb(255, 255, 255), rgb(0, 174, 255)); background-color: rgb(0, 174, 255);">
+                  <span class="wor-reader-words-color-canvas__handle" data-wor-words-color-handle aria-hidden="true"></span>
+                </div>
+                <div class="wor-reader-words-color-side">
+                  <label class="wor-reader-words-color-hue">
+                    <span>درجة اللون</span>
+                    <input type="range" min="0" max="360" step="1" value="198" data-wor-words-color-hue aria-label="درجة اللون">
+                  </label>
+                  <div class="wor-reader-words-color-preview-card">
+                    <i data-wor-words-color-preview-large aria-hidden="true" style="background: #0ea5e9;"></i>
+                    <div>
+                      <strong>معاينة</strong>
+                      <span>سيطبق هذا اللون على المصطلح المستبدل داخل الفصل.</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="wor-reader-words-color-footer">
+                <label class="wor-reader-words-color-hex-field">
+                  <span>HEX</span>
+                  <input type="text" data-wor-words-color-hex-input inputmode="text" dir="ltr" spellcheck="false" maxlength="7" placeholder="#0EA5E9">
+                </label>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="wor-reader-words-form__actions">
+          <button type="submit" class="wor-reader-words-btn wor-reader-words-btn--primary" data-wor-words-submit>إضافة</button>
+          <button type="button" class="wor-reader-words-btn" data-wor-words-cancel hidden>إلغاء التعديل</button>
+        </div>
+      </form>
     </div>
-    <div class="wor-reader-words-list" id="worWordsList"></div>
+    <aside class="wor-reader-words-library" aria-label="المصطلحات المحفوظة">
+      <div class="wor-reader-words-library__head">
+        <strong>المصطلحات المحفوظة</strong>
+        <span data-wor-words-count>0</span>
+      </div>
+      <div class="wor-reader-words-list" data-wor-words-list></div>
+      <button type="button" class="wor-reader-words-btn wor-reader-words-btn--danger" data-wor-words-clear hidden>مسح الكل</button>
+    </aside>
   </div>
 </div>
 

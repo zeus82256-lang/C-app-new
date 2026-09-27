@@ -24,6 +24,10 @@ import { AuthContext } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { getOfflineChapterContent } from '../services/offlineStorage';
 import buildWorShell from '../reader/worShell';
+import {
+    loadWordsStore, saveWordsStore, novelScopeOf, effectiveTerms,
+    replaceTermsInText, buildColoredTerms, buildColoredRegexSources,
+} from '../reader/wordsStore';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -151,6 +155,11 @@ const processLineHTML = (line, S) => {
         alternatives.push(escapeRegex(customOpen) + '[\\s\\S]*?' + escapeRegex(customClose));
     }
 
+    // Colored replacement terms ("تلوين البديل") join the SAME single pass so the
+    // generated span markup can never be re-scanned by the other patterns.
+    const colored = Array.isArray(S.colored) ? S.colored : [];
+    colored.forEach(c => alternatives.push(c.src));
+
     let re;
     try { re = new RegExp(alternatives.join('|'), 'g'); } catch (e) { return text; }
 
@@ -158,6 +167,12 @@ const processLineHTML = (line, S) => {
     const markdownMarks = STYLE_MARKS[S.selectedMarkdownStyle] || null;
 
     return text.replace(re, (m) => {
+        // colored replacement term (checked first so it always wins)
+        for (let ci = 0; ci < colored.length; ci++) {
+            if (m === colored[ci].escaped) {
+                return `<span class="wor-rep-colored" style="color:${colored[ci].color}">${m}</span>`;
+            }
+        }
         // custom marks first (user-chosen delimiters take precedence)
         if (customOpen && m.startsWith(customOpen) && m.endsWith(customClose)) {
             const inner = m.slice(customOpen.length, m.length - customClose.length);
@@ -282,13 +297,9 @@ export default function WebReaderScreen({ route, navigation }) {
         });
     }, []);
 
-    // ----- replacements (folders) -----
-    const [folders, setFolders] = useState([]);
-    const foldersRef = useRef([]);
-    const [currentFolderId, setCurrentFolderId] = useState(null);
-    const currentFolderIdRef = useRef(null);
-    const [showFolderModal, setShowFolderModal] = useState(false);
-    const [newFolderName, setNewFolderName] = useState('');
+    // ----- replacements (Galaxy: هذه الرواية / كل الروايات) -----
+    const wordsStoreRef = useRef({ novel: {}, global: [] });
+    const [wordsVersion, setWordsVersion] = useState(0);
 
     // ----- admin: cleaner -----
     const [cleanerWords, setCleanerWords] = useState([]);
@@ -362,13 +373,13 @@ export default function WebReaderScreen({ route, navigation }) {
     const chaptersListRef = useRef([]);
     useEffect(() => { chaptersListRef.current = chaptersList; }, [chaptersList]);
 
-    const sendWords = useCallback((nextFolders, nextActiveId) => {
+    const sendWords = useCallback(() => {
+        const store = wordsStoreRef.current;
         postToWeb({
             kind: 'words',
-            folders: nextFolders !== undefined ? nextFolders : foldersRef.current,
-            activeId: nextActiveId !== undefined ? nextActiveId : currentFolderIdRef.current,
+            items: { novel: novelScopeOf(store, novelId), global: store.global || [] },
         });
-    }, [postToWeb]);
+    }, [postToWeb, novelId]);
 
     const sendFav = useCallback((value) => {
         postToWeb({ kind: 'fav', value });
@@ -376,7 +387,7 @@ export default function WebReaderScreen({ route, navigation }) {
 
     const sendChapterToWeb = useCallback((chapterData, opts = {}) => {
         if (!chapterData) return;
-        const S = settingsRef.current;
+        const S = { ...settingsRef.current, colored: coloredRef.current };
         const number = opts.number || parseInt(chapterId) || 1;
         const sorted = (availableChapters && availableChapters.length > 0)
             ? [...availableChapters].sort((a, b) => a - b)
@@ -475,129 +486,86 @@ export default function WebReaderScreen({ route, navigation }) {
         } catch (e) { }
     };
 
-    // ========================= replacements (folders) =========================
-    const saveFoldersData = async (newFolders) => {
-        foldersRef.current = newFolders;
-        setFolders(newFolders);
-        try { await AsyncStorage.setItem('@reader_folders_v2', JSON.stringify(newFolders)); } catch (e) { }
-        sendWords(newFolders);
+    // ========================= replacements (Galaxy words) =========================
+    // Two scopes like Galaxy: "هذه الرواية" (per novel) and "كل الروايات" (global).
+    const loadWords = async () => {
+        const store = await loadWordsStore(novelId, novel.title);
+        wordsStoreRef.current = store;
+        setWordsVersion(v => v + 1);
+        sendWords();
     };
 
-    const loadFoldersAndPrefs = async () => {
-        try {
-            let parsedFolders = [];
-            const savedFolders = await AsyncStorage.getItem('@reader_folders_v2');
-            if (savedFolders) {
-                parsedFolders = JSON.parse(savedFolders);
-            } else {
-                const oldReplacements = await AsyncStorage.getItem('@reader_replacements');
-                if (oldReplacements) {
-                    parsedFolders = [{ id: 'default_migrated', name: 'عام (قديم)', replacements: JSON.parse(oldReplacements) }];
-                    await AsyncStorage.setItem('@reader_folders_v2', JSON.stringify(parsedFolders));
-                }
-            }
-            foldersRef.current = parsedFolders;
-            setFolders(parsedFolders);
-            sendWords(parsedFolders);
-
-            // default active folder = one named after the novel, else first
-            const match = parsedFolders.find(f => f.name === (novel.title || ''));
-            const activeId = match ? match.id : (parsedFolders[0] ? parsedFolders[0].id : null);
-            currentFolderIdRef.current = activeId;
-            setCurrentFolderId(activeId);
-        } catch (e) { }
-    };
-
-    const handleCreateFolder = () => {
-        if (!newFolderName.trim()) return;
-        const newFolder = { id: Date.now().toString(), name: newFolderName.trim(), replacements: [] };
-        const updated = [...folders, newFolder];
-        currentFolderIdRef.current = newFolder.id;
-        setCurrentFolderId(newFolder.id);
-        saveFoldersData(updated);
-        setShowFolderModal(false);
-        setNewFolderName('');
-        showToast('تم إنشاء المجلد', 'success');
-    };
-
-    const handleDeleteFolder = (folderId) => {
-        const folder = folders.find(f => f.id === folderId);
-        Alert.alert('حذف المجلد', `سيتم حذف المجلد "${folder ? folder.name : ''}" وجميع الكلمات داخله.`, [
-            { text: 'إلغاء', style: 'cancel' },
-            {
-                text: 'حذف', style: 'destructive', onPress: () => {
-                    const updated = folders.filter(f => f.id !== folderId);
-                    if (currentFolderIdRef.current === folderId) {
-                        const next = updated[0] ? updated[0].id : null;
-                        currentFolderIdRef.current = next;
-                        setCurrentFolderId(next);
-                    }
-                    saveFoldersData(updated);
-                    showToast('تم حذف المجلد', 'success');
-                }
-            }
-        ]);
-    };
+    const wordsItemsPayload = () => ({
+        novel: novelScopeOf(wordsStoreRef.current, novelId),
+        global: wordsStoreRef.current.global || [],
+    });
 
     const wordsAction = useCallback((msg) => {
-        const list = foldersRef.current;
-        const activeId = msg.id || currentFolderIdRef.current;
-        const idx = list.findIndex(f => f.id === activeId);
-        if (msg.action === 'selectFolder') {
-            currentFolderIdRef.current = msg.id;
-            setCurrentFolderId(msg.id);
-            return;
-        }
-        if (msg.action === 'createFolderPrompt') {
-            setNewFolderName(novel.title || '');
-            setShowFolderModal(true);
-            return;
-        }
-        if (msg.action === 'deleteFolder') {
-            handleDeleteFolder(msg.id);
-            return;
-        }
-        if (idx === -1) {
-            showToast('أنشئ مجلداً أولاً', 'warning');
-            return;
-        }
-        const folder = list[idx];
-        const reps = [...(folder.replacements || [])];
-        let toastText = '';
+        const scope = msg.scope === 'global' ? 'global' : 'novel';
+        const listFor = () => (scope === 'global'
+            ? (wordsStoreRef.current.global || [])
+            : novelScopeOf(wordsStoreRef.current, novelId));
+        const commit = async (next, toastText) => {
+            if (scope === 'global') wordsStoreRef.current.global = next;
+            else wordsStoreRef.current.novel[String(novelId || 'unknown')] = next;
+            await saveWordsStore(wordsStoreRef.current);
+            setWordsVersion(v => v + 1);
+            sendWords();
+            postToWeb({ kind: 'wordsSaved', items: wordsItemsPayload(), toast: toastText });
+        };
+        const list = listFor();
         if (msg.action === 'addRep') {
-            if (!msg.original || !msg.original.trim()) { showToast('اكتب الكلمة الأصلية أولاً', 'warning'); return; }
-            reps.push({ original: msg.original.trim(), replacement: (msg.replacement || '').trim() });
-            toastText = 'تمت إضافة الكلمة';
+            const original = String(msg.original || '').trim();
+            if (!original) { showToast('اكتب الكلمة الأصلية أولاً', 'warning'); return; }
+            commit([...list, {
+                id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+                original,
+                replacement: String(msg.replacement || '').trim(),
+                exact: !!msg.exact,
+                color: (typeof msg.color === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(msg.color)) ? msg.color : null,
+            }], 'تمت إضافة الكلمة');
         } else if (msg.action === 'updateRep') {
-            if (msg.idx == null || !reps[msg.idx]) return;
-            reps[msg.idx] = { original: (msg.original || '').trim(), replacement: (msg.replacement || '').trim() };
-            toastText = 'تم تحديث الكلمة';
+            const idx = list.findIndex(r => r.id === msg.id);
+            if (idx === -1) { showToast('لم يتم العثور على الكلمة', 'warning'); return; }
+            const next = list.slice();
+            next[idx] = {
+                ...next[idx],
+                original: String(msg.original || '').trim(),
+                replacement: String(msg.replacement || '').trim(),
+                exact: !!msg.exact,
+                color: (typeof msg.color === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(msg.color)) ? msg.color : null,
+            };
+            commit(next, 'تم تحديث الكلمة');
         } else if (msg.action === 'deleteRep') {
-            if (msg.idx == null || !reps[msg.idx]) return;
-            reps.splice(msg.idx, 1);
-            toastText = 'تم حذف الكلمة';
+            commit(list.filter(r => r.id !== msg.id), 'تم حذف الكلمة');
+        } else if (msg.action === 'clearScope') {
+            commit([], 'تم مسح الكلمات');
         }
-        const updated = [...list];
-        updated[idx] = { ...folder, replacements: reps };
-        saveFoldersData(updated);
-        postToWeb({ kind: 'wordsSaved', folders: updated, activeId, toast: toastText });
-    }, [folders, novel.title, postToWeb, saveFoldersData, showToast]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [novelId, postToWeb, sendWords, showToast]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    const activeReplacementsList = useMemo(() => {
-        if (!currentFolderId) return [];
-        const folder = folders.find(f => f.id === currentFolderId);
-        return folder ? folder.replacements : [];
-    }, [folders, currentFolderId]);
+    const wordsTerms = useMemo(() => effectiveTerms(wordsStoreRef.current, novelId), [wordsVersion, novelId]); // eslint-disable-line react-hooks/exhaustive-deps
+    const coloredTermsSources = useMemo(
+        () => buildColoredRegexSources(buildColoredTerms(wordsTerms)),
+        [wordsTerms]
+    );
+    const coloredRef = useRef([]);
+    useEffect(() => { coloredRef.current = coloredTermsSources; }, [coloredTermsSources]);
 
-    const applyReplacements = useCallback((raw) => {
-        let content = normalizeContent(raw);
-        activeReplacementsList.forEach(rep => {
-            if (rep.original && rep.replacement !== undefined) {
-                content = safeReplaceAll(content, rep.original, rep.replacement);
-            }
-        });
-        return content;
-    }, [activeReplacementsList]);
+    // Re-render the open chapter right after a word change (like Galaxy:
+    // the replacement takes effect while reading, without leaving the chapter)
+    const wordsInitRef = useRef(0);
+    useEffect(() => {
+        wordsInitRef.current += 1;
+        if (wordsInitRef.current <= 1) return; // initial load — the chapter send is handled elsewhere
+        const ch = chapterRef.current;
+        if (!ch) return;
+        const processed = applyReplacements(ch.content || '');
+        setTimeout(() => sendChapterToWeb({ ...ch, processedContent: processed }, { keepScroll: true }), 0);
+    }, [wordsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    const applyReplacements = useCallback((raw) => (
+        replaceTermsInText(normalizeContent(raw), wordsTerms)
+    ), [wordsTerms]);
 
     const getProcessedContent = useMemo(() => (chapter ? applyReplacements(chapter.content) : ''), [chapter, applyReplacements]);
 
@@ -1040,9 +1008,9 @@ export default function WebReaderScreen({ route, navigation }) {
 
     useEffect(() => {
         (async () => {
-            // الإعدادات ومجلدات الاستبدال أولاً حتى تكون جاهزة قبل أول جلب للفصل
+            // الإعدادات والكلمات المستبدلة أولاً حتى تكون جاهزة قبل أول جلب للفصل
             await loadSettings();
-            await loadFoldersAndPrefs();
+            await loadWords();
             if (!isOfflineMode) {
                 fetchAuthorData();
                 fetchFavoriteStatus();
@@ -1302,31 +1270,7 @@ export default function WebReaderScreen({ route, navigation }) {
                 </View>
             </Modal>
 
-            {/* folder creation modal */}
-            <Modal visible={showFolderModal} transparent animationType="fade" onRequestClose={() => setShowFolderModal(false)}>
-                <View style={styles.modalOverlay}>
-                    <TouchableOpacity style={styles.modalBackdrop} activeOpacity={1} onPress={() => setShowFolderModal(false)} />
-                    <View style={styles.modalContent}>
-                        <Text style={styles.modalTitle}>اسم المجلد</Text>
-                        <TextInput
-                            style={styles.modalInput}
-                            placeholder="اسم المجلد"
-                            placeholderTextColor="#666"
-                            value={newFolderName}
-                            onChangeText={setNewFolderName}
-                            textAlign="right"
-                        />
-                        <View style={styles.modalButtons}>
-                            <TouchableOpacity style={[styles.modalBtn, { backgroundColor: '#333' }]} onPress={() => setShowFolderModal(false)}>
-                                <Text style={styles.modalBtnText}>إلغاء</Text>
-                            </TouchableOpacity>
-                            <TouchableOpacity style={[styles.modalBtn, { backgroundColor: '#fff' }]} onPress={handleCreateFolder}>
-                                <Text style={[styles.modalBtnText, { color: '#000' }]}>تم</Text>
-                            </TouchableOpacity>
-                        </View>
-                    </View>
-                </View>
-            </Modal>
+            {/* (folder creation modal removed — replaced by the Galaxy words sheet) */}
 
             {/* admin: cleaner modal */}
             <Modal visible={showCleaner} animationType="slide" onRequestClose={() => setShowCleaner(false)}>
