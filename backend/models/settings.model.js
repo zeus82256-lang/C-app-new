@@ -94,6 +94,19 @@ RETURN ONLY JSON:` },
         selectedPowProviderId: { type: String } // Active DeepSeek POW service provider
     }],
 
+    // 🔥 Qwen auto-created accounts (نظام إنشاء حسابات تلقائي من qwen.py):
+    // عند فشل كل توكنات مزوّد Qwen أو عدم وجود مفتاح، يُنشأ حساب جديد
+    // (بريد مؤقت → تسجيل → تفعيل → توكن) ويُخزَّن هنا بشكل دائم + يُضاف
+    // توكنه إلى qwenTokens لمزوّد Qwen تلقائياً.
+    qwenAutoAccounts: [{
+        email: { type: String },
+        password: { type: String },
+        token: { type: String },
+        createdAt: { type: Date, default: Date.now },
+        rateLimitedUntil: { type: Date, default: null }, // موسم لمدة 24 ساعة عند RateLimited
+        dead: { type: Boolean, default: false } // توكن مصداقيته فاشلة نهائياً
+    }],
+
     // 🔥 Title Generator Specific Settings
     titleGenModel: { type: String, default: 'gemini-2.5-flash' },
     titleGenPrompt: { type: String, default: 'Read the following chapter content and suggest a short, engaging, and professional Arabic title for it (Maximum 6 words). Output ONLY the Arabic title string without any quotes, prefixes, or chapter numbers.' },

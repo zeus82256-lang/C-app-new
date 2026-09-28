@@ -6,6 +6,8 @@ const axios = require('axios'); // 🔥 NEW: for custom/OpenRouter providers
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { askQwen } = require('../services/qwenAndroid.service.js');
 const { askDeepSeek } = require('../services/deepseekAndroid.service.js');
+// 🔥 نظام إنشاء حسابات Qwen تلقائياً (منقول من qwen.py) — نفس السلوك المستخدم في مسار ترجمة الفصول
+const qwenAutoAccount = require('../services/qwenAutoAccount.service.js');
 
 // --- Config Imports ---
 let firestore, cloudinary;
@@ -355,9 +357,19 @@ async function translateNovelMetadata(novelId, originalData, jobId = null) {
                     keys = ['dummy-key-for-deepseek'];
                     await logScraper(`🔑 مزوّد DeepSeek: سيتم استخدام الرمز الافتراضي من تطبيق DeepSeek`, 'info');
                 }
+                // 🔥 Qwen AUTO-ACCOUNT: لا نعتمد على التوكن الوهمي — أنشئ حساباً جديداً مباشرة
                 if (keys.length === 0 && isQwenProvider(provider)) {
-                    keys = ['dummy-key-for-qwen'];
-                    await logScraper(`🔑 مزوّد Qwen: سيتم استخدام إعدادات البيئة/الافتراضي عند عدم توفر توكن`, 'info');
+                    await logScraper(`🤖 مزوّد Qwen: لا توجد توكنات — إنشاء حساب Qwen جديد تلقائياً (بريد مؤقت → تسجيل → تفعيل)...`, 'info');
+                    try {
+                        const account = await qwenAutoAccount.ensureQwenAccount();
+                        provider.qwenTokens = Array.isArray(provider.qwenTokens) ? provider.qwenTokens : [];
+                        if (!provider.qwenTokens.includes(account.token)) provider.qwenTokens.push(account.token);
+                        try { await qwenAutoAccount.persistProviderToken(provider.providerId, account.token); } catch (_) {}
+                        keys = [account.token];
+                        await logScraper(`✅ تم إنشاء حساب Qwen جديد (${account.email}) وستُكمل الترجمة عليه مباشرة`, 'success');
+                    } catch (accErr) {
+                        await logScraper(`❌ تعذر إنشاء حساب Qwen تلقائياً: ${accErr.message}`, 'warning');
+                    }
                 }
                 if (keys.length === 0) {
                     await logScraper(`⚠️ المزوّد ${providerName} ليس لديه مفاتيح – تخطيه`, 'warning');
@@ -377,12 +389,39 @@ async function translateNovelMetadata(novelId, originalData, jobId = null) {
                         console.error(`❌ فشل ${providerName} مفتاح ${keyIdx+1}: ${err.message}`);
                         // 🔥 NEW: أظهر سبب الفشل في سجل السكرابر داخل التطبيق أيضاً (ليس الكونسول فقط)
                         await logScraper(`❌ فشل ${providerName} (مفتاح ${keyIdx + 1}/${keys.length}): ${err.message}`, 'warning');
+                        // 🔥 Qwen: وسم التوكن حسب نوع الخطأ
+                        if (isQwenProvider(provider)) {
+                            if (err && err.name === 'QwenRateLimitedError') {
+                                qwenAutoAccount.markTokenRateLimited(key);
+                                await logScraper(`⏳ توكن Qwen مستهلك (RateLimited): وُسم 24 ساعة`, 'warning');
+                            } else if (err && err.name === 'QwenAuthError') {
+                                qwenAutoAccount.markTokenDead(key);
+                                await logScraper(`🔒 توكن Qwen غير صالح (فشل مصادقة): وُسم ميتاً`, 'warning');
+                            }
+                        }
                         if (err.message.includes('429') || err.message.includes('quota')) {
                             if (jobId) await updateMetadataJob(jobId, 'active', `⚠️ ضغط على المفتاح، تبديل...`, 'warning');
                             await delay(3000);
                             continue; // try next key
                         }
                         // For other errors, try next key
+                    }
+                }
+                // 🔥 Qwen AUTO-ACCOUNT: فشلت كل التوكنات → حساب جديد وإعادة محاولة واحدة
+                if (!parsed && isQwenProvider(provider)) {
+                    await logScraper(`🤖 مزوّد Qwen: فشلت جميع التوكنات — إنشاء حساب جديد تلقائياً ومتابعة على Qwen فقط`, 'info');
+                    try {
+                        const account = await qwenAutoAccount.ensureQwenAccount();
+                        provider.qwenTokens = Array.isArray(provider.qwenTokens) ? provider.qwenTokens : [];
+                        if (!provider.qwenTokens.includes(account.token)) provider.qwenTokens.push(account.token);
+                        try { await qwenAutoAccount.persistProviderToken(provider.providerId, account.token); } catch (_) {}
+                        await logScraper(`✅ حساب Qwen جديد جاهز (${account.email}) — إعادة المحاولة`, 'info');
+                        const rawText = await callTranslationProvider(provider, modelToUse, account.token, prompt);
+                        parsed = extractJsonObject(rawText);
+                        if (jobId) await updateMetadataJob(jobId, 'active', `✅ نجحت الترجمة باستخدام ${providerName} (حساب تلقائي جديد)`, 'success');
+                    } catch (err) {
+                        lastError = err;
+                        await logScraper(`❌ فشل حتى مع الحساب الجديد: ${err.message}`, 'warning');
                     }
                 }
                 if (!parsed) {

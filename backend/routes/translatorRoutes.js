@@ -7,6 +7,9 @@ const TranslationJob = require('../models/translationJob.model.js');
 const Settings = require('../models/settings.model.js');
 const { askDeepSeek } = require('../services/deepseekAndroid.service.js');
 const { askQwen } = require('../services/qwenAndroid.service.js');
+// 🔥 نظام إنشاء حسابات Qwen تلقائياً (منقول من qwen.py):
+// عند عدم وجود مفتاح أو فشل كل المفاتيح يُنشأ حساب جديد وتُكمل الترجمة عليه — Qwen فقط.
+const qwenAutoAccount = require('../services/qwenAutoAccount.service.js');
 
 const DEEPSEEK_CHAPTERS_PER_CONVERSATION = 100;
 const DEEPSEEK_MAX_ATTEMPTS_PER_TOKEN = 5;
@@ -559,7 +562,9 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
     // ---- Qwen Android API (same conversation/token behavior as DeepSeek) ----
     if (isQwenProvider(provider)) {
         return askQwen(prompt, {
-            token: apiKey && !apiKey.startsWith('dummy-key-for-') ? apiKey : provider.qwenToken,
+            token: apiKey && !apiKey.startsWith('dummy-key-for-')
+                ? apiKey
+                : ((Array.isArray(provider.qwenTokens) && provider.qwenTokens[0]) || undefined),
             model: modelName || 'qwen3.8-max',
             thinkingEnabled: Boolean(provider.thinkingEnabled),
             searchEnabled: provider.searchEnabled !== false,
@@ -768,6 +773,7 @@ ${sourceContent}
             let translatedText = "";
             let translationSuccess = false;
             let usedProvider = null; // track which provider succeeded
+            let usedKey = null; // 🔥 التوكن الذي نجحت به الترجمة (يُستخدم أولاً في استخراج المصطلحات)
 
             // ========== Multi-provider translation with strict validation ==========
             const RETRY_DELAY_MS = 30 * 60 * 1000;
@@ -786,6 +792,98 @@ ${sourceContent}
                 const promptForAttempt = lastValidationReasons.length > 0
                     ? buildRepairTranslationPrompt(transPrompt, glossaryText, sourceContent, translatedText, lastValidationReasons)
                     : translationInput;
+
+                // 🔥 محاولة ترجمة كاملة (توليد + فحص + ترجمة المقاطع + مراجع) بتوكن واحد.
+                // تُستخدم في حلقة التوكنات المحفوظة وفي نظام حسابات Qwen التلقائية على حد سواء.
+                // النتيجة: { ok: true } عند النجاح، أو { ok: false, kind: 'review' | 'error' }.
+                const attemptChapterWithToken = async (prov, model, key, keyIdx, keysCount, tokenAttempt, tokenAttempts, attemptNo) => {
+                    const provName = prov.name || prov.providerId;
+                    const provIsSticky = isStickyChatProvider(prov);
+                    const conversationScopeKey = provIsSticky ? getTokenConversationScope(prov, key, keyIdx) : undefined;
+                    try {
+                        const retryLabel = provIsSticky ? ` | محاولة التوكن ${tokenAttempt}/${tokenAttempts}` : '';
+                        await pushLog(jobId, `1️⃣ مزوّد: ${provName} | نموذج: ${model} | مفتاح ${keyIdx + 1}/${keysCount} | محاولة ${attemptNo}${retryLabel}`, 'info');
+                        const candidateText = await callTranslationProvider(prov, model, key, promptForAttempt, {
+                            deepSeekJobId: jobId.toString(),
+                            conversationContexts,
+                            conversationPurpose: 'chapters',
+                            conversationBatchKey,
+                            conversationScopeKey
+                        });
+                        let candidateTextForReview = removeDeepSeekFinishedMarker(candidateText);
+                        if (candidateTextForReview !== (candidateText || '').trim()) {
+                            await pushLog(jobId, `✂️ تم حذف علامة DeepSeek النهائية FINISHED من الفصل ${chapterNum} قبل المراجعة والحفظ`, 'info');
+                        }
+                        let validation = validateTranslatedChapter(candidateTextForReview, sourceContent);
+
+                        if (validation.residues.length > 0) {
+                            await pushLog(jobId, `🔎 وُجد نص غير مترجم في الفصل ${chapterNum}: ${validation.residues.slice(0, 8).map(r => String(r).length > 18 ? String(r).substring(0, 18) + '…' : r).join(' ، ')} — ترجمة المقاطع فقط ثم استبدالها`, 'warning');
+                            try {
+                                candidateTextForReview = await translateResiduesOnly(prov, model, key, candidateTextForReview, validation.residues, {
+                                    deepSeekJobId: jobId.toString(),
+                                    conversationContexts,
+                                    conversationPurpose: 'chapter_review',
+                                    conversationBatchKey,
+                                    conversationScopeKey
+                                });
+                                validation = validateTranslatedChapter(candidateTextForReview, sourceContent);
+                            } catch (replaceErr) {
+                                await pushLog(jobId, `⚠️ فشل استبدال المقاطع الأجنبية فقط: ${replaceErr.message}`, 'warning');
+                            }
+                        }
+
+                        if (!validation.ok) {
+                            const review = await reviewQuestionableChapter(prov, model, key, candidateTextForReview, sourceContent, validation, {
+                                deepSeekJobId: jobId.toString(),
+                                conversationContexts,
+                                conversationPurpose: 'chapter_review',
+                                conversationBatchKey,
+                                conversationScopeKey
+                            });
+
+                            if (review.decision !== 'accept') {
+                                translatedText = candidateTextForReview || '';
+                                lastValidationReasons = [...validation.reasons, review.reason];
+                                await pushLog(jobId, `🧪 فشلت مراجعة الفصل ${chapterNum}: ${lastValidationReasons.join('، ')} — ستتم إعادة الترجمة ولن ننتقل للفصل التالي`, 'warning');
+                                if (provIsSticky) resetConversationContextPurposeForScope(conversationContexts, 'chapters', conversationScopeKey, conversationBatchKey);
+                                return { ok: false, kind: 'review' };
+                            }
+
+                            await pushLog(jobId, `✅ قبل المراجع الآلي الفصل رغم تنبيه الفحص: ${review.reason}`, 'success');
+                        }
+
+                        translatedText = candidateTextForReview;
+                        lastValidationReasons = [];
+                        translationSuccess = true;
+                        usedProvider = prov;
+                        usedKey = key;
+                        stickySuccessRoute = { providerIndex: providers.indexOf(prov), keyIdx, key };
+                        await pushLog(jobId, `✅ نجحت الترجمة والمراجعة باستخدام ${provName} (سيُكمل النظام من هذا المزود/التوكن في الفصل التالي)`, 'success');
+                        return { ok: true, kind: null };
+                    } catch (err) {
+                        console.error(`❌ فشل ${provName} مفتاح ${keyIdx + 1}: ${err.message}`);
+                        await pushLog(jobId, `❌ فشل: ${err.message}`, 'warning');
+
+                        // 🔥 Qwen: وسم التوكن حسب نوع الخطأ ليُستبعد تلقائياً في الجولات القادمة
+                        // (RateLimited → موسم 24 ساعة مثل qwen.py، فشل مصادقة → ميت نهائياً)
+                        if (isQwenProvider(prov)) {
+                            if (err && err.name === 'QwenRateLimitedError') {
+                                qwenAutoAccount.markTokenRateLimited(key);
+                                await pushLog(jobId, `⏳ توكن Qwen مستهلك (RateLimited): وُسم 24 ساعة وسيُستبعد ويُستبدل بحساب جديد تلقائياً`, 'warning');
+                            } else if (err && err.name === 'QwenAuthError') {
+                                qwenAutoAccount.markTokenDead(key);
+                                await pushLog(jobId, `🔒 توكن Qwen غير صالح (فشل مصادقة): وُسم ميتاً وسيُستبعد`, 'warning');
+                            }
+                        }
+
+                        if (provIsSticky && tokenAttempt < tokenAttempts) {
+                            resetConversationContextPurposeForScope(conversationContexts, 'chapters', conversationScopeKey, conversationBatchKey);
+                            await pushLog(jobId, `🔁 مزوّد المحادثة: سيتم إنشاء محادثات جديدة لنفس التوكن قبل إعادة المحاولة ${tokenAttempt + 1}/${tokenAttempts}`, 'warning');
+                            await delay(3000);
+                        }
+                        return { ok: false, kind: 'error' };
+                    }
+                };
 
                 const orderedProviders = stickySuccessRoute
                     ? [...providers.slice(stickySuccessRoute.providerIndex), ...providers.slice(0, stickySuccessRoute.providerIndex)]
@@ -811,93 +909,54 @@ ${sourceContent}
                     } else if (isDeepSeek) {
                         await pushLog(jobId, `🔑 مزوّد DeepSeek: سيتم استخدام ${keys.length} توكن محفوظ من حقل المفاتيح/التوكنات`, 'info');
                     }
-                    if (isQwen && keys.length === 0) {
-                        keys = ['dummy-key-for-qwen'];
-                        await pushLog(jobId, `🔑 مزوّد Qwen: لا توجد توكنات محفوظة، سيتم استخدام إعدادات البيئة/الافتراضي`, 'info');
-                    } else if (isQwen) {
-                        await pushLog(jobId, `🔑 مزوّد Qwen: سيتم استخدام ${keys.length} توكن محفوظ`, 'info');
+
+                    // 🔥🔥🔥 Qwen AUTO-ACCOUNT (Qwen فقط — نفس طريقة qwen.py) 🔥🔥🔥
+                    // لا نعتمد فقط على المفاتيح المحفوظة: تُستبعد التوكنات المستهلكة/الميتة،
+                    // وإن لم يبقَ أي توكن صالح يُنشأ حساب Qwen جديد تلقائياً
+                    // (بريد مؤقت → تسجيل → تفعيل → توكن) وتُكمل الترجمة عليه فوراً.
+                    if (isQwen) {
+                        const usableTokens = qwenAutoAccount.filterUsableQwenTokens(keys);
+                        if (usableTokens.length < keys.length) {
+                            await pushLog(jobId, `🧹 مزوّد Qwen: استبعاد ${keys.length - usableTokens.length} توكن مستهلك/محدود (موسوم 24 ساعة أو ميت)`, 'info');
+                            keys = usableTokens;
+                        }
+                        if (keys.length === 0) {
+                            await pushLog(jobId, `🤖 مزوّد Qwen: لا يوجد أي توكن صالح — جاري إنشاء حساب Qwen جديد تلقائياً (بريد مؤقت → تسجيل → تفعيل → توكن)...`, 'info');
+                            try {
+                                const account = await qwenAutoAccount.ensureQwenAccount();
+                                provider.qwenTokens = Array.isArray(provider.qwenTokens) ? provider.qwenTokens : [];
+                                if (!provider.qwenTokens.includes(account.token)) provider.qwenTokens.push(account.token);
+                                try { await qwenAutoAccount.persistProviderToken(provider.providerId, account.token); } catch (_) {}
+                                keys = [account.token];
+                                await pushLog(jobId, `✅ تم إنشاء حساب Qwen جديد (${account.email}) وستُكمل الترجمة عليه مباشرة`, 'success');
+                            } catch (accErr) {
+                                await pushLog(jobId, `❌ تعذر إنشاء حساب Qwen تلقائياً الآن: ${accErr.message} — لن ننتقل لمزوّد آخر، ستُعاد المحاولة على Qwen`, 'warning');
+                                break; // Qwen فقط: لا انتقال لمزوّد آخر أبداً
+                            }
+                        } else {
+                            await pushLog(jobId, `🔑 مزوّد Qwen: سيتم استخدام ${keys.length} توكن صالح`, 'info');
+                        }
                     }
 
-                    const preferredKeyIdx = stickySuccessRoute?.providerIndex === providerIndex ? stickySuccessRoute.keyIdx : 0;
+                    // تفضيل التوكن الذي نجح في الفصل السابق (مطابقة بالنص لتحمّل تصفية التوكنات)
+                    let preferredKeyIdx = 0;
+                    if (stickySuccessRoute && stickySuccessRoute.providerIndex === providerIndex && stickySuccessRoute.key) {
+                        const ki = keys.indexOf(stickySuccessRoute.key);
+                        preferredKeyIdx = ki >= 0 ? ki : 0;
+                    }
                     const orderedKeyIndexes = [...Array(keys.length).keys()].slice(preferredKeyIdx).concat([...Array(keys.length).keys()].slice(0, preferredKeyIdx));
 
+                    let lastFailureKind = null;
                     for (const keyIdx of orderedKeyIndexes) {
                         const key = keys[keyIdx];
-                        const conversationScopeKey = isStickyChat ? getTokenConversationScope(provider, key, keyIdx) : undefined;
                         const tokenAttempts = isStickyChat ? DEEPSEEK_MAX_ATTEMPTS_PER_TOKEN : 1;
                         let tokenFailed = false;
 
                         for (let tokenAttempt = 1; tokenAttempt <= tokenAttempts; tokenAttempt++) {
-                            try {
-                                const retryLabel = isStickyChat ? ` | محاولة التوكن ${tokenAttempt}/${tokenAttempts}` : '';
-                                await pushLog(jobId, `1️⃣ مزوّد: ${providerName} | نموذج: ${modelToUse} | مفتاح ${keyIdx + 1}/${keys.length} | محاولة ${attempt}${retryLabel}`, 'info');
-                                const candidateText = await callTranslationProvider(provider, modelToUse, key, promptForAttempt, {
-                                    deepSeekJobId: jobId.toString(),
-                                    conversationContexts,
-                                    conversationPurpose: 'chapters',
-                                    conversationBatchKey,
-                                    conversationScopeKey
-                                });
-                            let candidateTextForReview = removeDeepSeekFinishedMarker(candidateText);
-                            if (candidateTextForReview !== (candidateText || '').trim()) {
-                                await pushLog(jobId, `✂️ تم حذف علامة DeepSeek النهائية FINISHED من الفصل ${chapterNum} قبل المراجعة والحفظ`, 'info');
-                            }
-                            let validation = validateTranslatedChapter(candidateTextForReview, sourceContent);
-
-                            if (validation.residues.length > 0) {
-                                await pushLog(jobId, `🔎 وُجد نص غير مترجم في الفصل ${chapterNum}: ${validation.residues.slice(0, 8).map(r => String(r).length > 18 ? String(r).substring(0, 18) + '…' : r).join(' ، ')} — ترجمة المقاطع فقط ثم استبدالها`, 'warning');
-                                try {
-                                    candidateTextForReview = await translateResiduesOnly(provider, modelToUse, key, candidateTextForReview, validation.residues, {
-                                        deepSeekJobId: jobId.toString(),
-                                        conversationContexts,
-                                        conversationPurpose: 'chapter_review',
-                                        conversationBatchKey,
-                                        conversationScopeKey
-                                    });
-                                    validation = validateTranslatedChapter(candidateTextForReview, sourceContent);
-                                } catch (replaceErr) {
-                                    await pushLog(jobId, `⚠️ فشل استبدال المقاطع الأجنبية فقط: ${replaceErr.message}`, 'warning');
-                                }
-                            }
-
-                            if (!validation.ok) {
-                                const review = await reviewQuestionableChapter(provider, modelToUse, key, candidateTextForReview, sourceContent, validation, {
-                                    deepSeekJobId: jobId.toString(),
-                                    conversationContexts,
-                                    conversationPurpose: 'chapter_review',
-                                    conversationBatchKey,
-                                    conversationScopeKey
-                                });
-
-                                if (review.decision !== 'accept') {
-                                    translatedText = candidateTextForReview || '';
-                                    lastValidationReasons = [...validation.reasons, review.reason];
-                                    await pushLog(jobId, `🧪 فشلت مراجعة الفصل ${chapterNum}: ${lastValidationReasons.join('، ')} — ستتم إعادة الترجمة ولن ننتقل للفصل التالي`, 'warning');
-                                    if (isStickyChat) resetConversationContextPurposeForScope(conversationContexts, 'chapters', conversationScopeKey, conversationBatchKey);
-                                    tokenFailed = true;
-                                    continue;
-                                }
-
-                                await pushLog(jobId, `✅ قبل المراجع الآلي الفصل رغم تنبيه الفحص: ${review.reason}`, 'success');
-                            }
-
-                            translatedText = candidateTextForReview;
-                            lastValidationReasons = [];
-                            translationSuccess = true;
-                            usedProvider = provider;
-                            stickySuccessRoute = { providerIndex, keyIdx };
-                                await pushLog(jobId, `✅ نجحت الترجمة والمراجعة باستخدام ${providerName} (سيُكمل النظام من هذا المزود/التوكن في الفصل التالي)`, 'success');
-                                break;
-                            } catch (err) {
-                                tokenFailed = true;
-                                console.error(`❌ فشل ${providerName} مفتاح ${keyIdx+1}: ${err.message}`);
-                                await pushLog(jobId, `❌ فشل: ${err.message}`, 'warning');
-                                if (isStickyChat && tokenAttempt < tokenAttempts) {
-                                    resetConversationContextPurposeForScope(conversationContexts, 'chapters', conversationScopeKey, conversationBatchKey);
-                                    await pushLog(jobId, `🔁 مزوّد المحادثة: سيتم إنشاء محادثات جديدة لنفس التوكن قبل إعادة المحاولة ${tokenAttempt + 1}/${tokenAttempts}`, 'warning');
-                                    await delay(3000);
-                                }
-                            }
+                            const result = await attemptChapterWithToken(provider, modelToUse, key, keyIdx, keys.length, tokenAttempt, tokenAttempts, attempt);
+                            if (result.ok) { lastFailureKind = null; break; }
+                            tokenFailed = true;
+                            lastFailureKind = result.kind || 'error';
                         }
 
                         if (translationSuccess) break;
@@ -909,8 +968,40 @@ ${sourceContent}
                         }
                     }
 
+                    // 🔥🔥🔥 Qwen AUTO-ACCOUNT: فشلت كل التوكنات → إنشاء حساب جديد فوراً ومتابعة على Qwen فقط 🔥🔥🔥
+                    // "مهما فشل يستطيع عمل حساب جديد وتكملة الترجمة" — جولتان لكل محاولة (مرتين كما طلب المستخدم).
+                    // لا يتوقف ولا ينتقل لمزوّد آخر: إن فشل الإنشاء أيضاً تُعاد المحاولة على نفس الفصل لاحقاً.
+                    if (!translationSuccess && isQwen && lastFailureKind === 'error') {
+                        const AUTO_ROUNDS = 2;
+                        for (let round = 1; round <= AUTO_ROUNDS && !translationSuccess; round++) {
+                            await pushLog(jobId, `🤖 مزوّد Qwen: فشلت جميع التوكنات (${keys.length}) — إنشاء حساب Qwen جديد تلقائياً (جولة ${round}/${AUTO_ROUNDS}) ومتابعة الترجمة على Qwen فقط`, 'info');
+                            let account;
+                            try {
+                                account = await qwenAutoAccount.ensureQwenAccount();
+                            } catch (accErr) {
+                                await pushLog(jobId, `❌ تعذر إنشاء حساب Qwen تلقائياً الآن: ${accErr.message} — لن ننتقل لمزوّد آخر، ستُعاد المحاولة على Qwen`, 'warning');
+                                break;
+                            }
+                            provider.qwenTokens = Array.isArray(provider.qwenTokens) ? provider.qwenTokens : [];
+                            if (!provider.qwenTokens.includes(account.token)) provider.qwenTokens.push(account.token);
+                            try { await qwenAutoAccount.persistProviderToken(provider.providerId, account.token); } catch (_) {}
+                            keys.push(account.token);
+                            await pushLog(jobId, `✅ حساب Qwen جديد جاهز (${account.email}) — إعادة ترجمة الفصل ${chapterNum} بالتوكن الجديد`, 'success');
+
+                            const autoKeyIdx = keys.length - 1;
+                            const autoTokenAttempts = 2;
+                            for (let tokenAttempt = 1; tokenAttempt <= autoTokenAttempts && !translationSuccess; tokenAttempt++) {
+                                await attemptChapterWithToken(provider, modelToUse, account.token, autoKeyIdx, keys.length, tokenAttempt, autoTokenAttempts, attempt);
+                            }
+                            if (!translationSuccess && round < AUTO_ROUNDS) await delay(3000);
+                        }
+                    }
+
                     if (!translationSuccess) {
                         await pushLog(jobId, `🚫 جميع مفاتيح ${providerName} فشلت أو لم تجتز المراجعة`, 'warning');
+                        // 🔥 Qwen فقط: لا انتقال إلى مزوّد آخر — الدورة الخارجية ستعيد المحاولة
+                        // على نفس الفصل (مع إنشاء حسابات Qwen جديدة عند الحاجة) حتى تنجح الترجمة.
+                        if (isQwen) break;
                     }
                 }
 
@@ -1078,6 +1169,11 @@ if (jsonMatch) {
                     await pushLog(jobId, `2️⃣ استخراج المصطلحات بنفس مزوّد الترجمة الناجح: ${extProviderName} | نموذج: ${extModel}`, 'info');
 
                     const keys = extractionKeysFor(usedProvider);
+                    // 🔥 ضع التوكن الذي نجحت به الترجمة أولاً (خاصة توكن حساب Qwen التلقائي)
+                    if (usedKey) {
+                        const ki = keys.indexOf(usedKey);
+                        if (ki > 0) keys.unshift(keys.splice(ki, 1)[0]);
+                    }
                     for (const key of keys) {
                         try {
                             const terms = await tryExtraction(usedProvider, extModel, key);

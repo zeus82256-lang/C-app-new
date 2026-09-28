@@ -10,6 +10,45 @@ const DEFAULT_MINI_WUA_NEW = process.env.QWEN_MINI_WUA_NEW || '';
 const DEFAULT_MINI_WUA_CHAT = process.env.QWEN_MINI_WUA_CHAT || '';
 const DEFAULT_APP_WAF = process.env.QWEN_APP_WAF || '';
 
+// 🔥 تصنيف أخطاء Qwen ليقرأها نظام الحساب التلقائي (qwenAutoAccount.service.js):
+// RateLimited → وسم الحساب مستهلكاً 24 ساعة وإنشاء حساب بديل فوراً
+// QwenAuthError → توكن غير صالح (مصادقة) ووسمه ميتاً
+class QwenRateLimitedError extends Error {
+    constructor(message) {
+        super(message || 'Qwen RateLimited: تم استهلاك حد الحساب');
+        this.name = 'QwenRateLimitedError';
+    }
+}
+class QwenAuthError extends Error {
+    constructor(message) {
+        super(message || 'Qwen auth failed: التوكن غير صالح');
+        this.name = 'QwenAuthError';
+    }
+}
+
+function looksRateLimited(payload) {
+    try {
+        const text = typeof payload === 'string' ? payload : JSON.stringify(payload);
+        return text.includes('RateLimited');
+    } catch (_) { return false; }
+}
+
+function looksAuthError(payload) {
+    try {
+        const text = typeof payload === 'string' ? payload.toLowerCase() : JSON.stringify(payload).toLowerCase();
+        return /unauthorized|invalid token|token.*invalid|authorization failed|not authenticated|login required/.test(text);
+    } catch (_) { return false; }
+}
+
+// توحيد أخطاء axios من نداءات Qwen إلى أخطاء مصنّفة
+function classifyQwenAxiosError(err, fallbackMessage) {
+    const status = err?.response?.status;
+    const data = err?.response?.data;
+    if (looksRateLimited(data) || status === 429) throw new QwenRateLimitedError(`Qwen RateLimited (HTTP ${status || '?'})`);
+    if (status === 401 || status === 403 || looksAuthError(data)) throw new QwenAuthError(`Qwen auth failed (HTTP ${status || '?'})`);
+    throw err;
+}
+
 function parseCookies(cookiesStr = '') {
     return cookiesStr.split(';').reduce((acc, part) => {
         const idx = part.indexOf('=');
@@ -54,9 +93,16 @@ function headers(kind, options = {}) {
 }
 
 async function createChat(options = {}) {
-    const res = await axios.post(`${BASE}/api/v2/chats/new`, { chat_mode: 'normal', project_id: '' }, {
-        headers: headers('new', options), timeout: options.timeout || 60000
-    });
+    let res;
+    try {
+        res = await axios.post(`${BASE}/api/v2/chats/new`, { chat_mode: 'normal', project_id: '' }, {
+            headers: headers('new', options), timeout: options.timeout || 60000
+        });
+    } catch (err) {
+        classifyQwenAxiosError(err, 'Qwen chat creation failed');
+    }
+    if (looksRateLimited(res.data)) throw new QwenRateLimitedError('Qwen RateLimited أثناء إنشاء المحادثة');
+    if (looksAuthError(res.data)) throw new QwenAuthError('Qwen auth failed أثناء إنشاء المحادثة');
     const id = res.data?.chat_id || res.data?.id || res.data?.data?.chat_id || res.data?.data?.id;
     if (!id) throw new Error(`Qwen chat_id missing: ${JSON.stringify(res.data)}`);
     return id;
@@ -85,7 +131,13 @@ function parseQwenLine(line, state) {
     const raw = line.startsWith('data:') ? line.slice(5).trim() : line;
     if (!raw || raw === '[DONE]' || raw === 'done') return;
     let obj;
-    try { obj = JSON.parse(raw); } catch (_) { return; }
+    try { obj = JSON.parse(raw); } catch (_) {
+        // قد تأتي رسالة RateLimited كنص خام غير JSON داخل البث
+        if (looksRateLimited(raw)) state.rateLimited = true;
+        return;
+    }
+    if (looksRateLimited(obj)) state.rateLimited = true;
+    if (looksAuthError(obj)) state.authError = true;
     const created = obj?.['response.created'];
     if (created?.response_id) state.responseId = created.response_id;
     if (obj?.response_id) state.responseId = obj.response_id;
@@ -137,15 +189,22 @@ async function askQwen(prompt, options = {}) {
         parentId: parentId || '',
         parent_id: parentId || null
     };
-    const response = await axios.post(`${BASE}/api/v2/chat/completions`, payload, {
-        params: { chat_id: chatId }, headers: headers('chat', { ...options, token }), timeout: options.timeout || 500000, responseType: 'stream'
-    });
-    const state = { text: '', responseId: null };
+    let response;
+    try {
+        response = await axios.post(`${BASE}/api/v2/chat/completions`, payload, {
+            params: { chat_id: chatId }, headers: headers('chat', { ...options, token }), timeout: options.timeout || 500000, responseType: 'stream'
+        });
+    } catch (err) {
+        classifyQwenAxiosError(err, 'Qwen chat completions failed');
+    }
+    const state = { text: '', responseId: null, rateLimited: false, authError: false };
     await new Promise((resolve, reject) => {
         response.data.on('data', chunk => chunk.toString().split('\n').forEach(line => parseQwenLine(line.trim(), state)));
         response.data.on('end', resolve);
         response.data.on('error', reject);
     });
+    if (state.rateLimited) throw new QwenRateLimitedError('Qwen RateLimited أثناء التوليد');
+    if (state.authError) throw new QwenAuthError('Qwen auth failed أثناء التوليد');
     if (!state.text.trim()) throw new Error('Qwen returned an empty response');
     if (options.context) {
         options.context.chatId = chatId;
@@ -155,4 +214,4 @@ async function askQwen(prompt, options = {}) {
     return state.text;
 }
 
-module.exports = { askQwen };
+module.exports = { askQwen, QwenRateLimitedError, QwenAuthError };
