@@ -803,13 +803,32 @@ ${sourceContent}
                     try {
                         const retryLabel = provIsSticky ? ` | محاولة التوكن ${tokenAttempt}/${tokenAttempts}` : '';
                         await pushLog(jobId, `1️⃣ مزوّد: ${provName} | نموذج: ${model} | مفتاح ${keyIdx + 1}/${keysCount} | محاولة ${attemptNo}${retryLabel}`, 'info');
-                        const candidateText = await callTranslationProvider(prov, model, key, promptForAttempt, {
-                            deepSeekJobId: jobId.toString(),
-                            conversationContexts,
-                            conversationPurpose: 'chapters',
-                            conversationBatchKey,
-                            conversationScopeKey
-                        });
+                        let candidateText;
+                        try {
+                            candidateText = await callTranslationProvider(prov, model, key, promptForAttempt, {
+                                deepSeekJobId: jobId.toString(),
+                                conversationContexts,
+                                conversationPurpose: 'chapters',
+                                conversationBatchKey,
+                                conversationScopeKey
+                            });
+                        } catch (genErr) {
+                            // 🔥 قاتل حلقة "نفس الحساب": أي فشل توليد لحظياً يوسم التوكن حسب نوعه
+                            // (RateLimited → 24 ساعة، مصادقة → ميت، خطأ غير مصنّف → موسم 30 دقيقة
+                            // شبكة أمان، شبكة عابرة → بلا وسم) بحيث لا يُعاد استخدام الحساب الفاشل أبداً
+                            // في الجولة التالية، ويُنشأ حساب جديد بدلاً منه.
+                            if (isQwenProvider(prov)) {
+                                const verdict = qwenAutoAccount.markTokenFailure(key, genErr);
+                                if (verdict === 'rate-limited-24h') {
+                                    await pushLog(jobId, `⏳ توكن Qwen مستهلك (RateLimited): وُسم 24 ساعة وسيُستبعد ويُستبدل بحساب جديد تلقائياً`, 'warning');
+                                } else if (verdict === 'dead') {
+                                    await pushLog(jobId, `🔒 توكن Qwen غير صالح (فشل مصادقة): وُسم ميتاً وسيُستبعد`, 'warning');
+                                } else if (verdict === 'limited-30m') {
+                                    await pushLog(jobId, `🧯 فشل غير مصنّف من حساب Qwen (${genErr.message}) — وُسم التوكن 30 دقيقة احتياطاً حتى لا يتكرر نفس الحساب في الحلقة`, 'warning');
+                                }
+                            }
+                            throw genErr;
+                        }
                         let candidateTextForReview = removeDeepSeekFinishedMarker(candidateText);
                         if (candidateTextForReview !== (candidateText || '').trim()) {
                             await pushLog(jobId, `✂️ تم حذف علامة DeepSeek النهائية FINISHED من الفصل ${chapterNum} قبل المراجعة والحفظ`, 'info');
@@ -864,16 +883,11 @@ ${sourceContent}
                         console.error(`❌ فشل ${provName} مفتاح ${keyIdx + 1}: ${err.message}`);
                         await pushLog(jobId, `❌ فشل: ${err.message}`, 'warning');
 
-                        // 🔥 Qwen: وسم التوكن حسب نوع الخطأ ليُستبعد تلقائياً في الجولات القادمة
-                        // (RateLimited → موسم 24 ساعة مثل qwen.py، فشل مصادقة → ميت نهائياً)
+                        // 🔥 Qwen: وسوم صامتة لأخطاء المراجعة اللاحقة (التوليد وُسم أصلاً في catch الداخلي أعلاه
+                        // مع السجل الكامل؛ هنا نغطي أخطاء المراجعة/المقاطع المصنّفة فقط دون رسائل مكرّرة)
                         if (isQwenProvider(prov)) {
-                            if (err && err.name === 'QwenRateLimitedError') {
-                                qwenAutoAccount.markTokenRateLimited(key);
-                                await pushLog(jobId, `⏳ توكن Qwen مستهلك (RateLimited): وُسم 24 ساعة وسيُستبعد ويُستبدل بحساب جديد تلقائياً`, 'warning');
-                            } else if (err && err.name === 'QwenAuthError') {
-                                qwenAutoAccount.markTokenDead(key);
-                                await pushLog(jobId, `🔒 توكن Qwen غير صالح (فشل مصادقة): وُسم ميتاً وسيُستبعد`, 'warning');
-                            }
+                            if (err && err.name === 'QwenRateLimitedError') qwenAutoAccount.markTokenRateLimited(key);
+                            else if (err && err.name === 'QwenAuthError') qwenAutoAccount.markTokenDead(key);
                         }
 
                         if (provIsSticky && tokenAttempt < tokenAttempts) {
@@ -915,20 +929,26 @@ ${sourceContent}
                     // وإن لم يبقَ أي توكن صالح يُنشأ حساب Qwen جديد تلقائياً
                     // (بريد مؤقت → تسجيل → تفعيل → توكن) وتُكمل الترجمة عليه فوراً.
                     if (isQwen) {
-                        const usableTokens = qwenAutoAccount.filterUsableQwenTokens(keys);
+                        // 🔥 وعي الملكية: يُستبعد أيضاً أي توكن حساب تلقائي مملوك لمزوّد Qwen آخر —
+                        // كل مزوّد يعمل على حساباته هو فقط فلا يتشارك مزوّدان حساباً واحداً.
+                        const usableTokens = qwenAutoAccount.filterUsableQwenTokens(keys, provider.providerId);
                         if (usableTokens.length < keys.length) {
-                            await pushLog(jobId, `🧹 مزوّد Qwen: استبعاد ${keys.length - usableTokens.length} توكن مستهلك/محدود (موسوم 24 ساعة أو ميت)`, 'info');
+                            await pushLog(jobId, `🧹 مزوّد Qwen: استبعاد ${keys.length - usableTokens.length} توكن (موسوم/ميت أو مملوك لمزوّد آخر)`, 'info');
                             keys = usableTokens;
                         }
                         if (keys.length === 0) {
-                            await pushLog(jobId, `🤖 مزوّد Qwen: لا يوجد أي توكن صالح — جاري إنشاء حساب Qwen جديد تلقائياً (بريد مؤقت → تسجيل → تفعيل → توكن)...`, 'info');
+                            await pushLog(jobId, `🤖 مزوّد Qwen: لا يوجد أي توكن صالح لهذا المزوّد — جاري تجهيز حساب Qwen خاص به (بريد مؤقت → تسجيل → تفعيل → توكن)...`, 'info');
                             try {
-                                const account = await qwenAutoAccount.ensureQwenAccount();
+                                const { account, created } = await qwenAutoAccount.ensureQwenAccount(provider.providerId);
                                 provider.qwenTokens = Array.isArray(provider.qwenTokens) ? provider.qwenTokens : [];
                                 if (!provider.qwenTokens.includes(account.token)) provider.qwenTokens.push(account.token);
                                 try { await qwenAutoAccount.persistProviderToken(provider.providerId, account.token); } catch (_) {}
                                 keys = [account.token];
-                                await pushLog(jobId, `✅ تم إنشاء حساب Qwen جديد (${account.email}) وستُكمل الترجمة عليه مباشرة`, 'success');
+                                if (created) {
+                                    await pushLog(jobId, `✅ تم إنشاء حساب Qwen جديد خاص بهذا المزوّد (${account.email}) وستُكمل الترجمة عليه مباشرة`, 'success');
+                                } else {
+                                    await pushLog(jobId, `♻️ إعادة استخدام الحساب التلقائي الصالح الخاص بهذا المزوّد (${account.email}) — لم يُنشأ حساب جديد`, 'info');
+                                }
                             } catch (accErr) {
                                 await pushLog(jobId, `❌ تعذر إنشاء حساب Qwen تلقائياً الآن: ${accErr.message} — لن ننتقل لمزوّد آخر، ستُعاد المحاولة على Qwen`, 'warning');
                                 break; // Qwen فقط: لا انتقال لمزوّد آخر أبداً
@@ -974,10 +994,15 @@ ${sourceContent}
                     if (!translationSuccess && isQwen && lastFailureKind === 'error') {
                         const AUTO_ROUNDS = 2;
                         for (let round = 1; round <= AUTO_ROUNDS && !translationSuccess; round++) {
-                            await pushLog(jobId, `🤖 مزوّد Qwen: فشلت جميع التوكنات (${keys.length}) — إنشاء حساب Qwen جديد تلقائياً (جولة ${round}/${AUTO_ROUNDS}) ومتابعة الترجمة على Qwen فقط`, 'info');
+                            await pushLog(jobId, `🤖 مزوّد Qwen: فشلت جميع التوكنات (${keys.length}) — إنشاء حساب Qwen جديد كلياً (جولة ${round}/${AUTO_ROUNDS}) ومتابعة الترجمة على Qwen فقط`, 'info');
                             let account;
+                            let accountCreated = false;
                             try {
-                                account = await qwenAutoAccount.ensureQwenAccount();
+                                // 🔥 forceNew: بعد فشل فعلي يُنشأ حساب جديد كلياً دائماً —
+                                // لا إعادة استخدام للحساب الفاشل مهما كان (قاتل الحلقة المفرغة).
+                                const ensured = await qwenAutoAccount.ensureQwenAccount(provider.providerId, { forceNew: true });
+                                account = ensured.account;
+                                accountCreated = ensured.created;
                             } catch (accErr) {
                                 await pushLog(jobId, `❌ تعذر إنشاء حساب Qwen تلقائياً الآن: ${accErr.message} — لن ننتقل لمزوّد آخر، ستُعاد المحاولة على Qwen`, 'warning');
                                 break;
@@ -986,7 +1011,11 @@ ${sourceContent}
                             if (!provider.qwenTokens.includes(account.token)) provider.qwenTokens.push(account.token);
                             try { await qwenAutoAccount.persistProviderToken(provider.providerId, account.token); } catch (_) {}
                             keys.push(account.token);
-                            await pushLog(jobId, `✅ حساب Qwen جديد جاهز (${account.email}) — إعادة ترجمة الفصل ${chapterNum} بالتوكن الجديد`, 'success');
+                            if (accountCreated) {
+                                await pushLog(jobId, `✅ حساب Qwen جديد كلياً جاهز (${account.email}) — إعادة ترجمة الفصل ${chapterNum} بالتوكن الجديد`, 'success');
+                            } else {
+                                await pushLog(jobId, `⚠️ تعذّر إنشاء حساب مختلف الآن — إعادة المحاولة على حساب موجود (${account.email})`, 'warning');
+                            }
 
                             const autoKeyIdx = keys.length - 1;
                             const autoTokenAttempts = 2;

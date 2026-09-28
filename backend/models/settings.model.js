@@ -102,6 +102,7 @@ RETURN ONLY JSON:` },
         email: { type: String },
         password: { type: String },
         token: { type: String },
+        providerId: { type: String, default: '' }, // 🔥 مالك الحساب: مزوّد Qwen الذي أُنشئ له — لا يُشارك مع مزوّدين آخرين
         createdAt: { type: Date, default: Date.now },
         rateLimitedUntil: { type: Date, default: null }, // موسم لمدة 24 ساعة عند RateLimited
         dead: { type: Boolean, default: false } // توكن مصداقيته فاشلة نهائياً

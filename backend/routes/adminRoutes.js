@@ -357,16 +357,20 @@ async function translateNovelMetadata(novelId, originalData, jobId = null) {
                     keys = ['dummy-key-for-deepseek'];
                     await logScraper(`🔑 مزوّد DeepSeek: سيتم استخدام الرمز الافتراضي من تطبيق DeepSeek`, 'info');
                 }
-                // 🔥 Qwen AUTO-ACCOUNT: لا نعتمد على التوكن الوهمي — أنشئ حساباً جديداً مباشرة
+                // 🔥 Qwen AUTO-ACCOUNT: لا نعتمد على التوكن الوهمي — أنشئ حساباً جديداً مباشرة (خاص بهذا المزوّد)
                 if (keys.length === 0 && isQwenProvider(provider)) {
-                    await logScraper(`🤖 مزوّد Qwen: لا توجد توكنات — إنشاء حساب Qwen جديد تلقائياً (بريد مؤقت → تسجيل → تفعيل)...`, 'info');
+                    await logScraper(`🤖 مزوّد Qwen: لا توجد توكنات — تجهيز حساب Qwen خاص بهذا المزوّد تلقائياً (بريد مؤقت → تسجيل → تفعيل)...`, 'info');
                     try {
-                        const account = await qwenAutoAccount.ensureQwenAccount();
+                        const { account, created } = await qwenAutoAccount.ensureQwenAccount(provider.providerId);
                         provider.qwenTokens = Array.isArray(provider.qwenTokens) ? provider.qwenTokens : [];
                         if (!provider.qwenTokens.includes(account.token)) provider.qwenTokens.push(account.token);
                         try { await qwenAutoAccount.persistProviderToken(provider.providerId, account.token); } catch (_) {}
                         keys = [account.token];
-                        await logScraper(`✅ تم إنشاء حساب Qwen جديد (${account.email}) وستُكمل الترجمة عليه مباشرة`, 'success');
+                        if (created) {
+                            await logScraper(`✅ تم إنشاء حساب Qwen جديد خاص بهذا المزوّد (${account.email}) وستُكمل الترجمة عليه مباشرة`, 'success');
+                        } else {
+                            await logScraper(`♻️ إعادة استخدام الحساب التلقائي الصالح الخاص بهذا المزوّد (${account.email})`, 'info');
+                        }
                     } catch (accErr) {
                         await logScraper(`❌ تعذر إنشاء حساب Qwen تلقائياً: ${accErr.message}`, 'warning');
                     }
@@ -389,14 +393,15 @@ async function translateNovelMetadata(novelId, originalData, jobId = null) {
                         console.error(`❌ فشل ${providerName} مفتاح ${keyIdx+1}: ${err.message}`);
                         // 🔥 NEW: أظهر سبب الفشل في سجل السكرابر داخل التطبيق أيضاً (ليس الكونسول فقط)
                         await logScraper(`❌ فشل ${providerName} (مفتاح ${keyIdx + 1}/${keys.length}): ${err.message}`, 'warning');
-                        // 🔥 Qwen: وسم التوكن حسب نوع الخطأ
+                        // 🔥 Qwen: وسم التوكن حسب نوع الخطأ (التصنيف الشامل يمنع حلقة نفس الحساب):
                         if (isQwenProvider(provider)) {
-                            if (err && err.name === 'QwenRateLimitedError') {
-                                qwenAutoAccount.markTokenRateLimited(key);
+                            const verdict = qwenAutoAccount.markTokenFailure(key, err);
+                            if (verdict === 'rate-limited-24h') {
                                 await logScraper(`⏳ توكن Qwen مستهلك (RateLimited): وُسم 24 ساعة`, 'warning');
-                            } else if (err && err.name === 'QwenAuthError') {
-                                qwenAutoAccount.markTokenDead(key);
+                            } else if (verdict === 'dead') {
                                 await logScraper(`🔒 توكن Qwen غير صالح (فشل مصادقة): وُسم ميتاً`, 'warning');
+                            } else if (verdict === 'limited-30m') {
+                                await logScraper(`🧯 فشل غير مصنّف من حساب Qwen: وُسم التوكن 30 دقيقة احتياطاً`, 'warning');
                             }
                         }
                         if (err.message.includes('429') || err.message.includes('quota')) {
@@ -407,15 +412,19 @@ async function translateNovelMetadata(novelId, originalData, jobId = null) {
                         // For other errors, try next key
                     }
                 }
-                // 🔥 Qwen AUTO-ACCOUNT: فشلت كل التوكنات → حساب جديد وإعادة محاولة واحدة
+                // 🔥 Qwen AUTO-ACCOUNT: فشلت كل التوكنات → حساب جديد كلياً (forceNew) وإعادة محاولة واحدة
                 if (!parsed && isQwenProvider(provider)) {
-                    await logScraper(`🤖 مزوّد Qwen: فشلت جميع التوكنات — إنشاء حساب جديد تلقائياً ومتابعة على Qwen فقط`, 'info');
+                    await logScraper(`🤖 مزوّد Qwen: فشلت جميع التوكنات — إنشاء حساب جديد كلياً تلقائياً ومتابعة على Qwen فقط`, 'info');
                     try {
-                        const account = await qwenAutoAccount.ensureQwenAccount();
+                        const { account, created } = await qwenAutoAccount.ensureQwenAccount(provider.providerId, { forceNew: true });
                         provider.qwenTokens = Array.isArray(provider.qwenTokens) ? provider.qwenTokens : [];
                         if (!provider.qwenTokens.includes(account.token)) provider.qwenTokens.push(account.token);
                         try { await qwenAutoAccount.persistProviderToken(provider.providerId, account.token); } catch (_) {}
-                        await logScraper(`✅ حساب Qwen جديد جاهز (${account.email}) — إعادة المحاولة`, 'info');
+                        if (created) {
+                            await logScraper(`✅ حساب Qwen جديد كلياً جاهز (${account.email}) — إعادة المحاولة`, 'info');
+                        } else {
+                            await logScraper(`⚠️ تعذّر إنشاء حساب مختلف — إعادة المحاولة على حساب موجود (${account.email})`, 'warning');
+                        }
                         const rawText = await callTranslationProvider(provider, modelToUse, account.token, prompt);
                         parsed = extractJsonObject(rawText);
                         if (jobId) await updateMetadataJob(jobId, 'active', `✅ نجحت الترجمة باستخدام ${providerName} (حساب تلقائي جديد)`, 'success');

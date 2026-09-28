@@ -52,6 +52,9 @@ function normalizeAccount(a) {
         email: String(a?.email || ''),
         password: String(a?.password || QWEN_ACCOUNT_PASSWORD),
         token: String(a?.token || ''),
+        // 🔥 مالك الحساب: كل مزوّد Qwen يحصل على حسابه الخاص المستقل.
+        // بدون هذا الحقل كان الحساب الأول يُعاد استخدامه لكل المزوّدين (بلاغ المستخدم 1).
+        providerId: String(a?.providerId || ''),
         createdAt: a?.createdAt ? new Date(a.createdAt) : new Date(),
         rateLimitedUntil: a?.rateLimitedUntil ? new Date(a.rateLimitedUntil) : null,
         dead: !!a?.dead
@@ -76,26 +79,44 @@ async function loadStore() {
     return store;
 }
 
-let persistChain = Promise.resolve();
-function persistAccountsSerialized() {
-    persistChain = persistChain.then(async () => {
-        try {
-            const settings = await Settings.findOne();
-            if (!settings) return;
-            settings.qwenAutoAccounts = store.map(a => ({
-                email: a.email,
-                password: a.password,
-                token: a.token,
-                createdAt: a.createdAt,
-                rateLimitedUntil: a.rateLimitedUntil,
-                dead: a.dead
-            }));
-            await settings.save();
-        } catch (e) {
-            console.error('[qwenAutoAccount] failed to persist accounts:', e.message);
+// 🔥 طابور كتابة واحد مُتسلسل لكل تعديلات Settings من هذه الخدمة.
+// سبب الجذري (بلاغ المستخدم 2): حفظان متوازيان لنفس المستند يرميان Mongoose VersionError
+// فتضيع وسوم RateLimited/dead بصمت ويعود الحساب الميت "صالحاً" بعد إعادة تشغيل الخدمة.
+let settingsWriteChain = Promise.resolve();
+function enqueueSettingsWrite(task) {
+    const run = settingsWriteChain.then(async () => {
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+                await task();
+                return true;
+            } catch (e) {
+                const retryable = e?.name === 'VersionError' || /version/i.test(String(e?.message || ''));
+                console.error(`[qwenAutoAccount] settings write failed (attempt ${attempt + 1}):`, e.message);
+                if (!retryable || attempt === 2) return false;
+                await delay(300);
+            }
         }
-    }).catch(() => {});
-    return persistChain;
+        return false;
+    }).catch(() => false);
+    settingsWriteChain = run;
+    return run;
+}
+
+function persistAccountsSerialized() {
+    return enqueueSettingsWrite(async () => {
+        const settings = await Settings.findOne();
+        if (!settings) return;
+        settings.qwenAutoAccounts = store.map(a => ({
+            email: a.email,
+            password: a.password,
+            token: a.token,
+            providerId: a.providerId,
+            createdAt: a.createdAt,
+            rateLimitedUntil: a.rateLimitedUntil,
+            dead: a.dead
+        }));
+        await settings.save();
+    });
 }
 
 function isAccountUsable(account) {
@@ -115,12 +136,16 @@ function isTokenEphemeralLimited(token) {
     return true;
 }
 
-// تُرجع فقط التوكنات القابلة للاستخدام الآن (تستبعد الميتة/المستهلكة الموسومة)
-function filterUsableQwenTokens(tokens) {
+// تُرجع فقط التوكنات القابلة للاستخدام الآن (تستبعد الميتة/المستهلكة الموسومة).
+// 🔥 وعي الملكية: توكن حساب تلقائي مملوك لمزوّد آخر يُستبعد من هذا المزوّد —
+// كل مزوّد Qwen يعمل على حساباته هو فقط (بلاغ المستخدم 1: ثلاثة مزوّدين بنفس الحساب).
+// التوكنات غير الموجودة في المخزن (مُدخلة يدوياً) تبقى صالحة لمزوّدها.
+function filterUsableQwenTokens(tokens, providerId = '') {
+    const owner = String(providerId || '');
     return (Array.isArray(tokens) ? tokens : []).filter(token => {
         if (!token || token.startsWith('dummy-key-for-')) return false;
         const account = store.find(a => a.token === token);
-        if (account) return isAccountUsable(account);
+        if (account) return isAccountUsable(account) && account.providerId === owner;
         if (ephemeralDead.has(token)) return false;
         if (isTokenEphemeralLimited(token)) return false;
         return true;
@@ -149,10 +174,35 @@ function markTokenDead(token) {
     }
 }
 
+// 🔥 التصنيف الشامل لأي فشل توليد بتوكن Qwen — قاتل حلقة "نفس الحساب" (بلاغ المستخدم 2):
+//   RateLimited → وسم 24 ساعة (مثل qwen.py)
+//   فشل مصادقة → ميت نهائياً
+//   خطأ شبكة عابر (timeout/انقطاع/5xx) → لا وسم (الحساب سليم)
+//   أي خطأ آخر غير مصنّف → موسم قصير 30 دقيقة (شبكة أمان: الحساب الفاشل لا يُعاد استخدامه
+//     فوراً أبداً، ويتعافى تلقائياً بعد نصف ساعة إن كان الخطأ مؤقتاً)
+function isTransientNetworkError(err) {
+    if (!err) return false;
+    const code = String(err.code || '');
+    if (['ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'EHOSTUNREACH', 'ENETUNREACH'].includes(code)) return true;
+    const status = err.response?.status;
+    if (status && status >= 500) return true;
+    return /timeout|timed out|network|socket hang up|connection (refused|reset|closed)/i.test(String(err.message || ''));
+}
+
+function markTokenFailure(token, err) {
+    if (!token || token.startsWith('dummy-key-for-')) return 'skipped';
+    if (err && err.name === 'QwenRateLimitedError') { markTokenRateLimited(token, 24); return 'rate-limited-24h'; }
+    if (err && err.name === 'QwenAuthError') { markTokenDead(token); return 'dead'; }
+    if (isTransientNetworkError(err)) return 'transient';
+    markTokenRateLimited(token, 0.5);
+    return 'limited-30m';
+}
+
 // إضافة التوكن لمزوّد Qwen في الإعدادات بشكل دائم (يظهر للمستخدم في حقل التوكنات)
+// تمر عبر نفس الطابور المتسلسل لمنع VersionError مع حفظ وسوم الحسابات.
 async function persistProviderToken(providerId, token) {
     if (!providerId || !token) return;
-    try {
+    await enqueueSettingsWrite(async () => {
         const settings = await Settings.findOne();
         if (!settings) return;
         const prov = (settings.translationProviders || []).find(p => p.providerId === providerId);
@@ -161,9 +211,7 @@ async function persistProviderToken(providerId, token) {
         if (!prov.qwenTokens.includes(token)) prov.qwenTokens.push(token);
         settings.markModified('translationProviders');
         await settings.save();
-    } catch (e) {
-        console.error('[qwenAutoAccount] failed to persist provider token:', e.message);
-    }
+    });
 }
 
 // ---------- Temp email providers (مع تجاوز تلقائي عند فشل أحدها) ----------
@@ -317,7 +365,8 @@ async function signinQwen(email, password) {
 }
 
 // نفس منطق qwen.py: 5 محاولات كاملة (بريد → تسجيل → تفعيل → دخول) قبل الاستسلام
-async function createQwenAccountInternal() {
+// ownerProviderId: المزوّد الذي يملك هذا الحساب حصرياً
+async function createQwenAccountInternal(ownerProviderId = '') {
     const name = 'User_' + crypto.randomBytes(8).toString('hex').substring(0, 6);
     let lastError = '';
     for (let attempt = 0; attempt < 5; attempt++) {
@@ -335,7 +384,7 @@ async function createQwenAccountInternal() {
 
             const token = await signinQwen(emailCtx.email, QWEN_ACCOUNT_PASSWORD);
             if (token) {
-                const account = normalizeAccount({ email: emailCtx.email, password: QWEN_ACCOUNT_PASSWORD, token });
+                const account = normalizeAccount({ email: emailCtx.email, password: QWEN_ACCOUNT_PASSWORD, token, providerId: String(ownerProviderId || '') });
                 store.push(account);
                 await persistAccountsSerialized();
                 console.log(`[qwenAutoAccount] ✅ created Qwen account ${emailCtx.email}`);
@@ -350,16 +399,25 @@ async function createQwenAccountInternal() {
     throw new Error(`فشل إنشاء حساب Qwen جديد بعد عدة محاولات (${lastError})`);
 }
 
-//Serialize creation: لو نداءان متوازيان، الثاني يعيد استخدام الحساب الجديد بدل إنشاء اثنين
+//Serialize creation: لو نداءان متوازيان للـ نفس المزوّد، الثاني يعيد استخدام الحساب الجديد بدل إنشاء اثنين.
+// 🔥 providerId إلزامي عملياً: إعادة الاستخدام تقتصر على حسابات هذا المزوّد هو فقط،
+// وكل مزوّد بلا حساب صالح يحصل على حساب جديد كلياً مختلف (بلاغ المستخدم 1).
+// 🔥 opts.forceNew: بعد فشل ترجمة فعلية يُنشأ حساب جديد كلياً دائماً بدل إعادة نفس
+// الحساب الفاشل — يكسر حلقة "يقول إنه أنشأ حساباً لكنه نفس الحساب" (بلاغ المستخدم 2).
+// تُرجع { account, created } — created=true فقط عند إنشاء فعلي جديد (للرسائل الصادقة).
 let creationChain = Promise.resolve();
-function ensureQwenAccount() {
+function ensureQwenAccount(providerId, opts = {}) {
     const run = creationChain
         .catch(() => {})
         .then(async () => {
             await loadStore();
-            const usable = getUsableAccounts();
-            if (usable.length > 0) return usable[usable.length - 1];
-            return await createQwenAccountInternal();
+            const owner = String(providerId || '');
+            if (!opts.forceNew) {
+                const owned = store.filter(a => a.providerId === owner && isAccountUsable(a));
+                if (owned.length > 0) return { account: owned[owned.length - 1], created: false };
+            }
+            const account = await createQwenAccountInternal(owner);
+            return { account, created: true };
         });
     creationChain = run.catch(() => {});
     return run;
@@ -370,6 +428,7 @@ module.exports = {
     filterUsableQwenTokens,
     markTokenRateLimited,
     markTokenDead,
+    markTokenFailure,
     persistProviderToken,
     getUsableAccounts,
     isAccountUsable
