@@ -9,7 +9,8 @@ const { askDeepSeek } = require('../services/deepseekAndroid.service.js');
 const { askQwen } = require('../services/qwenAndroid.service.js');
 // 🔥 Gemini Web — نقل مسار Gemini فقط من بروكسي المستخدم (jsnjbwjbw-ui/Proxy):
 // كوكيز gemini.google.com → SNlM0e/FdrFJe → StreamGenerate + إكمال تلقائي ضد القطع
-const { askGeminiWeb, GeminiWebAuthError } = require('../services/geminiWeb.service.js');
+// 🔥 GUEST_TOKEN_SENTINEL: مفتاح وهمي يمثل جلسة الضيف عندما لا توجد كوكيز إطلاقاً
+const { askGeminiWeb, GeminiWebAuthError, GUEST_TOKEN_SENTINEL } = require('../services/geminiWeb.service.js');
 // 🔥 نظام إنشاء حسابات Qwen تلقائياً (منقول من qwen.py):
 // عند عدم وجود مفتاح أو فشل كل المفاتيح يُنشأ حساب جديد وتُكمل الترجمة عليه — Qwen فقط.
 const qwenAutoAccount = require('../services/qwenAutoAccount.service.js');
@@ -970,11 +971,18 @@ ${sourceContent}
                     let keys = getProviderAuthKeys(provider);
                     const isDeepSeek = isDeepSeekProvider(provider);
                     const isQwen = isQwenProvider(provider);
+                    const isGeminiWeb = isGeminiWebProvider(provider);
                     const isStickyChat = isStickyChatProvider(provider);
 
-                    if (keys.length === 0 && !isDeepSeek && !isQwen) {
+                    if (keys.length === 0 && !isDeepSeek && !isQwen && !isGeminiWeb) {
                         await pushLog(jobId, `⚠️ المزوّد ${providerName} ليس لديه مفاتيح – تخطيه`, 'warning');
                         continue;
+                    }
+                    // 🔥🔥 وضع الضيف (طلب المستخدم): مزوّد Gemini Web يعمل حتى بدون أي كوكيز —
+                    // وصول مجهول إلى gemini.google.com مع تنبيه واضح في سجل المهمة عند الدخول لوضع الضيف
+                    if (isGeminiWeb && keys.length === 0) {
+                        keys = [GUEST_TOKEN_SENTINEL];
+                        await pushLog(jobId, `🟡 تنبيه — وضع الضيف: مزوّد Gemini Web "${providerName}" بلا كوكيز، ستعمل الترجمة عبر الوصول المجهول (بدون حساب). لتجربة أفضل وأسرع أضف كوكيز حساب Google في حقل المفاتيح`, 'warning');
                     }
                     if (isDeepSeek && keys.length === 0) {
                         keys = ['dummy-key-for-deepseek'];
@@ -1543,7 +1551,8 @@ module.exports = function(app, verifyToken, verifyAdmin) {
             
             // 🔥 CHECK providers instead of legacy keys
             const providers = userSettings?.translationProviders || [];
-            const anyKeys = providers.some(p => (p.apiKeys && p.apiKeys.length > 0) || isDeepSeekProvider(p) || isQwenProvider(p));
+            // 🔥 مزوّد Gemini Web يُقبل حتى بلا مفاتيح (وضع الضيف بدون كوكيز)
+            const anyKeys = providers.some(p => (p.apiKeys && p.apiKeys.length > 0) || isDeepSeekProvider(p) || isQwenProvider(p) || isGeminiWebProvider(p));
             const legacyKeys = userSettings?.translatorApiKeys || [];
             
             if (!anyKeys && legacyKeys.length === 0) {

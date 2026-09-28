@@ -6,7 +6,7 @@ const axios = require('axios'); // 🔥 NEW: for custom/OpenRouter providers
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { askQwen } = require('../services/qwenAndroid.service.js');
 // 🔥 Gemini Web — نقل مسار Gemini فقط من بروكسي المستخدم (ترجمة البيانات الوصفية أيضاً)
-const { askGeminiWeb } = require('../services/geminiWeb.service.js');
+const { askGeminiWeb, GUEST_TOKEN_SENTINEL } = require('../services/geminiWeb.service.js');
 const { askDeepSeek } = require('../services/deepseekAndroid.service.js');
 // 🔥 نظام إنشاء حسابات Qwen تلقائياً (منقول من qwen.py) — نفس السلوك المستخدم في مسار ترجمة الفصول
 const qwenAutoAccount = require('../services/qwenAutoAccount.service.js');
@@ -183,10 +183,12 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
     }
 
     // ---- 🔥 Gemini Web (كوكيز حساب Google — نقل مسار Gemini فقط من بروكسي المستخدم) ----
+    // 🔥 وضع الضيف: بدون كوكيز أو بمفتاح وهمي → الوصول المجهول مع تنبيه واضح عبر log إن توفر
     if (isGeminiWebProvider(provider)) {
         return askGeminiWeb(prompt, {
             token: apiKey && !apiKey.startsWith('dummy-key-for-') ? apiKey : undefined,
-            timeout: options.timeout || 300000
+            timeout: options.timeout || 300000,
+            log: typeof options.log === 'function' ? options.log : null
         });
     }
 
@@ -390,6 +392,11 @@ async function translateNovelMetadata(novelId, originalData, jobId = null) {
                     } catch (accErr) {
                         await logScraper(`❌ تعذر إنشاء حساب Qwen تلقائياً: ${accErr.message}`, 'warning');
                     }
+                }
+                // 🔥 وضع الضيف: مزوّد Gemini Web يعمل حتى بدون أي كوكيز — وصول مجهول مع تنبيه واضح
+                if (keys.length === 0 && isGeminiWebProvider(provider)) {
+                    keys = [GUEST_TOKEN_SENTINEL];
+                    await logScraper(`🟡 تنبيه — وضع الضيف: مزوّد Gemini Web "${providerName}" بلا كوكيز، ستعمل العملية عبر الوصول المجهول (بدون حساب) إلى gemini.google.com`, 'warning');
                 }
                 if (keys.length === 0) {
                     await logScraper(`⚠️ المزوّد ${providerName} ليس لديه مفاتيح – تخطيه`, 'warning');

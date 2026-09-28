@@ -36,7 +36,7 @@ const PROVIDER_TEMPLATES = [
   {
     type: 'gemini_web',
     title: 'Gemini Web',
-    subtitle: 'كوكيز حساب Google — إكمال تلقائي ضد قطع الفصول ومنع تكرار الفقرات',
+    subtitle: 'كوكيز Google أو وضع الضيف بدون كوكيز — إكمال تلقائي ضد قطع الفصول ومنع تكرار الفقرات',
     icon: 'planet-outline'
   },
   {
@@ -610,6 +610,7 @@ export default function TranslatorSettingsScreen({ navigation }) {
                                   <View style={styles.deepSeekBox}>
                                     <Text style={styles.miniLabel}>إعدادات Gemini Web</Text>
                                     <Text style={styles.hintSmall}>يستخدم واجهة gemini.google.com عبر كوكيز حساب Google. عند انقطاع الرد في منتصف الفصل يتم إكماله تلقائياً في نفس المحادثة، والتكرار للفقرات يُكشف ويُعاد إصلاحه آلياً.</Text>
+                                    <Text style={styles.hintSmall}>🟡 يعمل أيضاً بدون أي كوكيز في وضع الضيف (وصول مجهول)، وسيظهر تنبيه واضح في سجل الترجمة عند دخول وضع الضيف أو الانتقال إليه تلقائياً عند فشل الكوكيز. وضع الضيف قد يكون أبطأ وقد يحدّه Google — الكوكيز تبقى الخيار الأفضل.</Text>
                                   </View>
                                 )}
 
@@ -646,12 +647,12 @@ export default function TranslatorSettingsScreen({ navigation }) {
                                 )}
 
                                 {/* المفاتيح */}
-                                <Text style={styles.miniLabel}>{isDeepSeekProvider(provider) ? 'توكنات DeepSeek (كل توكن في سطر)' : isQwenProvider(provider) ? 'توكنات Qwen (كل توكن في سطر)' : isGeminiWebProvider(provider) ? 'كوكيز Gemini (كل جلسة كوكيز في سطر)' : 'مفاتيح API (كل مفتاح في سطر)'}</Text>
-                                <Text style={styles.hintSmall}>{isGeminiWebProvider(provider) ? '🍪 سجّل الدخول في gemini.google.com من المتصفح ← F12 ← Application ← Cookies ← انسخ قيمة __Secure-1PSID و __Secure-1PSIDTS بالشكل: __Secure-1PSID=...; __Secure-1PSIDTS=... (كل حساب في سطر = جلسة مستقلة). الكوكيز تنتهي دورياً — عند فشل الترجمة حدّثها.' : isDeepSeekProvider(provider) ? '🔑 بالنسبة لـ DeepSeek: ضع توكنات الحساب هنا؛ سيتم استخدامها فعلياً بدل التوكن الافتراضي.' : isQwenProvider(provider) ? '🔑 بالنسبة لـ Qwen: ضع توكنات الحساب هنا وسيعاملها النظام مثل DeepSeek.' : '🔑 مفاتيح هذا المزوّد مستقلة تماماً ويُرسل معها الطلب إلى Base URL أعلاه.'}</Text>
+                                <Text style={styles.miniLabel}>{isDeepSeekProvider(provider) ? 'توكنات DeepSeek (كل توكن في سطر)' : isQwenProvider(provider) ? 'توكنات Qwen (كل توكن في سطر)' : isGeminiWebProvider(provider) ? 'كوكيز Gemini (اختيارية — فارغة = وضع الضيف)' : 'مفاتيح API (كل مفتاح في سطر)'}</Text>
+                                <Text style={styles.hintSmall}>{isGeminiWebProvider(provider) ? '🟡 اترك الحقل فارغاً تماماً للعمل في وضع الضيف (بدون حساب — وصول مجهول). أو للحصول على أفضل تجربة: سجّل الدخول في gemini.google.com من المتصفح ← F12 ← Application ← Cookies ← انسخ قيمة __Secure-1PSID و __Secure-1PSIDTS بالشكل: __Secure-1PSID=...; __Secure-1PSIDTS=... (كل حساب في سطر = جلسة مستقلة). الكوكيز تنتهي دورياً — وعند فشلها ينتقل التطبيق تلقائياً لوضع الضيف مع تنبيه واضح في السجل.' : isDeepSeekProvider(provider) ? '🔑 بالنسبة لـ DeepSeek: ضع توكنات الحساب هنا؛ سيتم استخدامها فعلياً بدل التوكن الافتراضي.' : isQwenProvider(provider) ? '🔑 بالنسبة لـ Qwen: ضع توكنات الحساب هنا وسيعاملها النظام مثل DeepSeek.' : '🔑 مفاتيح هذا المزوّد مستقلة تماماً ويُرسل معها الطلب إلى Base URL أعلاه.'}</Text>
                                 <TextInput
                                     style={styles.keysInputSmall}
                                     multiline
-                                    placeholder={isDeepSeekProvider(provider) ? "DeepSeek token 1\nDeepSeek token 2" : isQwenProvider(provider) ? "Qwen token 1\nQwen token 2" : isGeminiWebProvider(provider) ? "__Secure-1PSID=...; __Secure-1PSIDTS=..." : "sk-...\nمفتاح آخر"}
+                                    placeholder={isDeepSeekProvider(provider) ? "DeepSeek token 1\nDeepSeek token 2" : isQwenProvider(provider) ? "Qwen token 1\nQwen token 2" : isGeminiWebProvider(provider) ? "اختياري — __Secure-1PSID=...; __Secure-1PSIDTS=...\nأو اتركه فارغاً لوضع الضيف" : "sk-...\nمفتاح آخر"}
                                     placeholderTextColor="#666"
                                     value={provider._keysText || provider.apiKeys.join('\n')}
                                     onChangeText={(text) => updateProviderKeys(provider.providerId, text)}

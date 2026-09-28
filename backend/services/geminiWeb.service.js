@@ -7,11 +7,16 @@
 //   2) نجلب توكني الجلسة SNlM0e + FdrFJe من صفحة التطبيق (مع تتبّع تدوير الكوكيز)
 //   3) نرسل البرومبت إلى StreamGenerate (نفس نداء واجهة الويب) ونجمع النص التدريجي
 //   4) 🔥 إصلاح مشكلة "يترجم نصف الفصل / آخره كأنه انقطع": إذا انتهى الرد مقطوعاً
-//      (بلا علامة ترقيم نهائية) نتابع تلقائياً في نفس المحادثة حتى ٣ جولات إكمال
+//      (بلا علامة ترقيم نهائية) نتابع تلقائياً في نفس المحادثة حتى جولتَي إكمال
 //      مع منع التكرار وقصّ التداخل بين الجزأين
 //
-// ملاحظة مجرّبة: الوضع المجهول بدون كوكيز يعيد HTTP 400 (لا يوجد SNlM0e في صفحة الزوّار)
-// لذلك لا يوجد fallback صامت — فشل الكوكيز يعطي رسالة صادقة وواضحة للمستخدم.
+// 🔥🔥🔥 وضع الضيف (بدون كوكيز) — نقل حرفي لـ GEMINI_FALLBACK_* من البروكسي 🔥🔥🔥
+//   - بلا كوكيز أو عندما تفشل الكوكيز → نستخدم الوصول المجهول إلى gemini.google.com
+//     (عنوان StreamGenerate مختلف بلا /u/1/ + bl أقدم + ترويسات كروم ويندوز + طلب مستقل
+//     بلا حالة محادثة — كل طلب مستقل تماماً كما في البروكسي).
+//   - طلب المستخدم: "أريده كذلك يعمل في وضع الضيف وهو بدون كوكيز... لكن أريد تنبيه واضح
+//     عند الانتقال لوضع الضيف" → كل دخول/انتقال لوضع الضيف يصدر تنبيهاً صريحاً في سجل
+//     المهمة عبر options.log + سجل الخادم.
 const axios = require('axios');
 const crypto = require('crypto');
 
@@ -25,6 +30,14 @@ const GEMINI_MODEL_JSPB = (
 );
 const GEMINI_STREAM_URL = `${GEMINI_BASE}/${GEMINI_USER_ACCT}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate`;
 const GEMINI_APP_URL = `${GEMINI_BASE}/${GEMINI_USER_ACCT}/app`;
+
+// 🔥 وضع الضيف — نفس قيم البروكسي GEMINI_FALLBACK_URL/BL/MODEL_JSPB
+const GEMINI_GUEST_STREAM_URL = `${GEMINI_BASE}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate`;
+const GEMINI_GUEST_BL = 'boq_assistant-bard-web-server_20240519.16_p0';
+const GEMINI_GUEST_MODEL_JSPB = '[1,null,null,null,"35609594dbe934d8"]';
+
+// 🔥 مفتاح وهمي يمثل جلسة الضيف (يُستخدم من المسارات عندما لا توجد كوكيز إطلاقاً)
+const GUEST_TOKEN_SENTINEL = 'dummy-key-for-gemini-guest';
 
 // نفس الكوكيز التي يتتبعها البروكسي للتدوير (PSIDTS تدور بشكل دوري من Google)
 const TRACKED_COOKIES = new Set([
@@ -41,7 +54,7 @@ class GeminiWebAuthError extends Error {
     }
 }
 
-// ---------- Cookie jars (in-memory, تتبّع تدوير الكوكيز مثل البروكسي) ----------
+// ---------- Cookie jars (in-memory، تتبّع تدوير الكوكيز مثل البروكسي) ----------
 const cookieJars = new Map(); // cookieKey -> { cookies: {}, updatedAt }
 
 function parseCookieString(cookieStr) {
@@ -69,6 +82,12 @@ function getJar(token) {
         cookieJars.set(key, { cookies: parseCookieString(token), updatedAt: Date.now() });
     }
     return cookieJars.get(key);
+}
+
+// 🔥 جرة كوكيز الضيف المشتركة (تجمع كوكيز المجهولين مثل NID من الردود وتعيد استخدامها —
+// تماماً كما يحتفظ AsyncClient في البروكسي بكوكيز jar الخاصة به بين GET و POST)
+function getGuestJar() {
+    return getJar(GUEST_TOKEN_SENTINEL);
 }
 
 function mergeSetCookies(jar, setCookieHeaders) {
@@ -106,11 +125,47 @@ function geminiHeaders(cookiesStr) {
     };
 }
 
-// ---------- جلب توكني الجلسة SNlM0e + FdrFJe (مثل البروكسي: تتبّع التحويلات يدوياً) ----------
-async function getTokens(jar) {
-    let url = GEMINI_APP_URL;
+// 🔥 ترويسات وضع الضيف — نفس ترويسات GEMINI_FALLBACK_HEADERS في البروكسي حرفياً
+// (كروم ويندوز + en-US، بلا كوكيز)
+function geminiGuestHeaders() {
+    return {
+        'authority': 'gemini.google.com',
+        'accept': '*/*',
+        'accept-language': 'en-US,en;q=0.9',
+        'origin': 'https://gemini.google.com',
+        'referer': 'https://gemini.google.com/',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36',
+        'x-same-domain': '1',
+        'content-type': 'application/x-www-form-urlencoded;charset=UTF-8'
+    };
+}
+
+// هل يحتوي المفتاح المُدخل على كوكيز Gemini فعلية؟
+function looksLikeGeminiCookies(token) {
+    const t = String(token || '');
+    return t.includes('__Secure-1PSID=') || t.includes('SID=');
+}
+
+// ---------- استخراج توكني الجلسة من HTML ----------
+function extractSessionTokens(page) {
+    let snlm0e = null;
+    let fdrfje = null;
+    for (const pattern of [/"SNlM0e":"(.*?)"/, /'SNlM0e':'(.*?)'/, /SNlM0e["\s]*:["\s]*"([^"]+)"/]) {
+        const m = page.match(pattern);
+        if (m) { snlm0e = m[1]; break; }
+    }
+    for (const pattern of [/"FdrFJe":"([\d-]+)"/, /'FdrFJe':'([\d-]+)'/, /FdrFJe["\s]*:["\s]*"([\d-]+)"/]) {
+        const m = page.match(pattern);
+        if (m) { fdrfje = m[1]; break; }
+    }
+    return { snlm0e, fdrfje };
+}
+
+// جلب صفحة مع تتبّع التحويلات يدوياً ودمج كوكيز كل قفزة (نفس منطق getTokens القديم)
+async function fetchPageFollowingRedirects(startUrl, headers, jar) {
+    let url = startUrl;
     let resp = null;
-    const baseHeaders = geminiHeaders(cookiesToString(jar.cookies));
+    const baseHeaders = { ...headers };
     delete baseHeaders['content-type'];
 
     for (let hop = 0; hop < 5; hop++) {
@@ -130,18 +185,13 @@ async function getTokens(jar) {
         }
         break;
     }
+    return String(resp?.data || '');
+}
 
-    const page = String(resp?.data || '');
-    let snlm0e = null;
-    let fdrfje = null;
-    for (const pattern of [/"SNlM0e":"(.*?)"/, /'SNlM0e':'(.*?)'/, /SNlM0e["\s]*:["\s]*"([^"]+)"/]) {
-        const m = page.match(pattern);
-        if (m) { snlm0e = m[1]; break; }
-    }
-    for (const pattern of [/"FdrFJe":"([\d-]+)"/, /'FdrFJe':'([\d-]+)'/, /FdrFJe["\s]*:["\s]*"([\d-]+)"/]) {
-        const m = page.match(pattern);
-        if (m) { fdrfje = m[1]; break; }
-    }
+// ---------- جلب توكني الجلسة SNlM0e + FdrFJe (المسار المصادق بالكوكيز) ----------
+async function getTokens(jar) {
+    const page = await fetchPageFollowingRedirects(GEMINI_APP_URL, geminiHeaders(cookiesToString(jar.cookies)), jar);
+    const { snlm0e, fdrfje } = extractSessionTokens(page);
     if (!snlm0e) {
         console.error(`[geminiWeb] SNlM0e not found (page len ${page.length}) — الكوكيز غير صالحة أو منتهية`);
         return null;
@@ -150,7 +200,26 @@ async function getTokens(jar) {
     return { snlm0e, fdrfje };
 }
 
-// ---------- إرسال رسالة (نداء StreamGenerate نفسه في البروكسي) ----------
+// ---------- 🔥 جلب توكني الجلسة في وضع الضيف (نقل حرفي لـ _gemini_fallback_get_tokens) ----------
+// نطلب gemini.google.com مباشرة بدون كوكيز المستخدم ونستخرج SNlM0e + FdrFJe من الرد،
+// والجرة تحتفظ بكوكيز المجهولين (NID...) لإعادة استخدامها في POST.
+async function getGuestTokens(jar) {
+    try {
+        const page = await fetchPageFollowingRedirects(GEMINI_BASE, geminiGuestHeaders(), jar);
+        const { snlm0e, fdrfje } = extractSessionTokens(page);
+        if (!snlm0e) {
+            console.error(`[geminiWeb] guest: SNlM0e not found in anonymous response (page len ${page.length})`);
+            return null;
+        }
+        console.log(`[geminiWeb] guest tokens OK snlm0e=${snlm0e.substring(0, 8)}... fdrfje=${fdrfje || '-'}`);
+        return { snlm0e, fdrfje };
+    } catch (e) {
+        console.error(`[geminiWeb] guest: token fetch failed: ${e.message}`);
+        return null;
+    }
+}
+
+// ---------- إرسال رسالة (نداء StreamGenerate نفسه في البروكسي — المسار المصادق) ----------
 function buildContext(conv) {
     if (!conv) return ['', '', '', null, null, null, null, null, null, ''];
     return [
@@ -160,6 +229,64 @@ function buildContext(conv) {
         null, null, null, null, null, null,
         conv.at_token || ''
     ];
+}
+
+// استهلاك رد StreamGenerate التدريجي (مشترك بين المسارين — نفس منطق البروكسي:
+// لقطات تدريجية تنمو؛ نقبل ما يمتد النص السابق، وأطول لقطة احتياطاً)
+async function consumeStreamGenerate(response, conv) {
+    let fullText = '';
+    let longestSeen = '';
+    const newConv = conv ? { ...conv } : {};
+
+    await new Promise((resolve, reject) => {
+        response.data.on('data', chunk => {
+            chunk.toString().split('\n').forEach(line => {
+                const raw = line.trim();
+                if (!raw) return;
+                try {
+                    const a1 = JSON.parse(raw);
+                    if (!Array.isArray(a1) || !a1.length) return;
+                    if (a1[0]?.length >= 3 && a1[0][2]) {
+                        const c2 = JSON.parse(a1[0][2]);
+                        try {
+                            if (!newConv.conversation_id) {
+                                const convMeta = c2[1];
+                                if (convMeta && convMeta.length >= 2) {
+                                    newConv.conversation_id = convMeta[0];
+                                    newConv.response_id = convMeta[1];
+                                }
+                            }
+                        } catch (_) { /* ignore */ }
+                        try {
+                            const candidates = c2[4];
+                            if (candidates && candidates[0]) {
+                                const choice = candidates[0];
+                                if (choice[0]) newConv.choice_id = choice[0];
+                                const text = choice[1]?.[0] || '';
+                                if (text) {
+                                    if (text.length > longestSeen.length) longestSeen = text;
+                                    if (text.startsWith(fullText) && text.length > fullText.length) {
+                                        fullText = text;
+                                    }
+                                }
+                            }
+                        } catch (_) { /* ignore */ }
+                        try {
+                            if (c2[3] && typeof c2[3] === 'object') {
+                                const atVal = c2[3]['26'];
+                                if (atVal) newConv.at_token = atVal;
+                            }
+                        } catch (_) { /* ignore */ }
+                    }
+                } catch (_) { /* سطر غير JSON — تجاهل */ }
+            });
+        });
+        response.data.on('end', resolve);
+        response.data.on('error', reject);
+    });
+
+    if (!fullText && longestSeen) fullText = longestSeen;
+    return { text: fullText, conv: newConv.conversation_id ? newConv : null };
 }
 
 async function sendMessage(jar, tokens, prompt, conv, timeoutMs) {
@@ -207,61 +334,54 @@ async function sendMessage(jar, tokens, prompt, conv, timeoutMs) {
         throw new Error(`Gemini Web HTTP ${response.status}: ${errBody.replace(/\s+/g, ' ').substring(0, 160)}`);
     }
 
-    let fullText = '';
-    let longestSeen = '';
-    const newConv = conv ? { ...conv } : {};
+    return consumeStreamGenerate(response, conv);
+}
 
-    await new Promise((resolve, reject) => {
-        response.data.on('data', chunk => {
-            chunk.toString().split('\n').forEach(line => {
-                const raw = line.trim();
-                if (!raw) return;
-                try {
-                    const a1 = JSON.parse(raw);
-                    if (!Array.isArray(a1) || !a1.length) return;
-                    if (a1[0]?.length >= 3 && a1[0][2]) {
-                        const c2 = JSON.parse(a1[0][2]);
-                        try {
-                            if (!newConv.conversation_id) {
-                                const convMeta = c2[1];
-                                if (convMeta && convMeta.length >= 2) {
-                                    newConv.conversation_id = convMeta[0];
-                                    newConv.response_id = convMeta[1];
-                                }
-                            }
-                        } catch (_) { /* ignore */ }
-                        try {
-                            const candidates = c2[4];
-                            if (candidates && candidates[0]) {
-                                const choice = candidates[0];
-                                if (choice[0]) newConv.choice_id = choice[0];
-                                const text = choice[1]?.[0] || '';
-                                if (text) {
-                                    if (text.length > longestSeen.length) longestSeen = text;
-                                    // نفس منطق البروكسي: لقطات تدريجية تنمو؛ نقبل ما يمتد النص السابق
-                                    if (text.startsWith(fullText) && text.length > fullText.length) {
-                                        fullText = text;
-                                    }
-                                }
-                            }
-                        } catch (_) { /* ignore */ }
-                        try {
-                            if (c2[3] && typeof c2[3] === 'object') {
-                                const atVal = c2[3]['26'];
-                                if (atVal) newConv.at_token = atVal;
-                            }
-                        } catch (_) { /* ignore */ }
-                    }
-                } catch (_) { /* سطر غير JSON — تجاهل */ }
-            });
-        });
-        response.data.on('end', resolve);
-        response.data.on('error', reject);
+// ---------- 🔥 إرسال رسالة في وضع الضيف (نقل حرفي لـ _gemini_fallback_send) ----------
+// بدون أي حالة محادثة — كل طلب مستقل تماماً كما في البروكسي.
+async function sendGuestMessage(jar, tokens, prompt, timeoutMs) {
+    const d1 = [
+        [prompt, 0, null, [], null, null, 0],
+        ['en'],
+        [null, null, null, null, null, []],
+        null, null, null, [], 0, [], [], 1, 0
+    ];
+    const payload = {
+        at: tokens.snlm0e,
+        'f.req': JSON.stringify([null, JSON.stringify(d1)])
+    };
+    const params = {
+        bl: GEMINI_GUEST_BL,
+        hl: 'en',
+        _reqid: String(Math.floor(Math.random() * 90_000) + 10_000),
+        rt: 'c',
+        'f.sid': tokens.fdrfje || ''
+    };
+
+    const headers = geminiGuestHeaders();
+    headers['x-goog-ext-525001261-jspb'] = GEMINI_GUEST_MODEL_JSPB;
+
+    const response = await axios.post(GEMINI_GUEST_STREAM_URL, new URLSearchParams(payload).toString(), {
+        params,
+        headers,
+        timeout: timeoutMs || 300000,
+        responseType: 'stream',
+        maxRedirects: 0,
+        validateStatus: s => s < 500
     });
 
-    // أمان: إن لم ينمو النص تدريجياً (لقطات متفرقة) خذ أطول لقطة رأيناها
-    if (!fullText && longestSeen) fullText = longestSeen;
-    return { text: fullText, conv: newConv.conversation_id ? newConv : null };
+    mergeSetCookies(jar, response.headers?.['set-cookie']);
+
+    if (response.status >= 400) {
+        let errBody = '';
+        response.data.on('data', c => { errBody += c.toString(); if (errBody.length > 400) response.data.destroy(); });
+        await new Promise(resolve => response.data.on('end', resolve).on('close', resolve).on('error', resolve));
+        // رسالة صادقة: رفض Google لوضع الضيف من هذا الخادم (يحدث مع بعض عناوين IP)
+        throw new GeminiWebAuthError(`رفض gemini.google.com طلب وضع الضيف (HTTP ${response.status}): ${errBody.replace(/\s+/g, ' ').substring(0, 120)} — الوصول المجهول غير متاح من هذا الخادم، أضف كوكيز حساب Google في حقل المفاتيح`);
+    }
+
+    const { text } = await consumeStreamGenerate(response, null);
+    return { text };
 }
 
 // ---------- كشف القطع: هل الرد انتهى في منتصف الجملة؟ ----------
@@ -292,66 +412,133 @@ function stitchWithoutOverlap(existing, addition) {
     return a + (needsSpace ? '\n' : '') + b;
 }
 
-// ---------- النقطة العامة: askGeminiWeb ----------
-// options: { token (كوكيز), timeout, context (حالة المحادثة اللاصقة — نفس نمط askQwen), log }
-async function askGeminiWeb(prompt, options = {}) {
-    const token = options.token || '';
-    if (!token || token.startsWith('dummy-key-for-')) {
-        throw new GeminiWebAuthError('لا توجد كوكيز Gemini — أضف كوكيز gemini.google.com في حقل المفاتيح');
-    }
-    if (!String(token).includes('__Secure-1PSID=') && !String(token).includes('SID=')) {
-        throw new GeminiWebAuthError('المفتاح لا يبدو كوكيز Gemini صالحة (يجب أن يحتوي __Secure-1PSID=...) — انسخ الكوكيز من متصفح مسجّل الدخول في gemini.google.com');
-    }
-    const log = typeof options.log === 'function' ? options.log : null;
-    const jar = getJar(token);
-    const context = options.context || {};
-    let conv = context.geminiConv || null;
+// ---------- 🔥🔥🔥 وضع الضيف الكامل (بدون كوكيز) 🔥🔥🔥 ----------
+// نفس سلوك fallback البروكسي: جلسة مجهولة → طلب مستقل بلا محادثة لاصقة.
+// ضد القطع: بما أن وضع الضيف بلا محادثة لاصقة، إعادة الإرسال تشمل المهمة الأصلية
+// كاملة + نقطة التوقف، مع منع التكرار وقصّ التداخل عند الدمج.
+async function runGuestMode(prompt, { timeoutMs, log }) {
+    const jar = getGuestJar();
 
-    // 1) توكنات الجلسة (مع تتبّع الكوكيز الدوّارة)
-    let tokens = await getTokens(jar);
+    // 1) توكنات الجلسة المجهولة (محاولة ثانية بعد مهلة قصيرة مثل المسار المصادق)
+    let tokens = await getGuestTokens(jar);
     if (!tokens) {
-        // محاولة ثانية بعد تحديث الكوكيز من التحويلات (مثل سلوك البروكسي مع PSIDTS الجديدة)
         await new Promise(r => setTimeout(r, 1200));
-        tokens = await getTokens(jar);
+        tokens = await getGuestTokens(jar);
     }
     if (!tokens) {
-        throw new GeminiWebAuthError('تعذر جلب جلسة Gemini Web — الكوكيز غير صالحة أو منتهية. افتح gemini.google.com في المتصفح وانسخ كوكيز جديدة ثم حدّث المفاتيح');
+        throw new GeminiWebAuthError('تعذر تشغيل وضع الضيف: لم يُعثر على توكن جلسة مجهولة في صفحة gemini.google.com (قد يكون الوصول المجهول محظوراً من هذا الخادم). أضف كوكيز حساب Google في حقل المفاتيح لتجربة موثوقة');
     }
 
-    // 2) الطلب الأول
-    const timeoutMs = options.timeout || 300000;
-    let { text, conv: newConv } = await sendMessage(jar, tokens, prompt, conv, timeoutMs);
-    conv = newConv;
-    if (context) context.geminiConv = conv;
-    let resultText = text || '';
+    // 2) الطلب الأول (مستقل — بلا حالة محادثة)
+    const first = await sendGuestMessage(jar, tokens, prompt, timeoutMs);
+    let resultText = first.text || '';
 
-    // 3) 🔥 الإكمال التلقائي ضد القطع ("يترجم نصفه / آخره كأنه انقطع")
+    // 3) 🔥 إكمال تلقائي ضد القطع في وضع الضيف
     let continuationRounds = 0;
     const MAX_CONTINUATIONS = 2;
     while (looksIncomplete(resultText) && continuationRounds < MAX_CONTINUATIONS) {
         continuationRounds++;
         const tail = resultText.slice(-90).replace(/\s+/g, ' ');
-        if (log) log(`الرد كان مقطوعاً في نهايته — جاري الإكمال تلقائياً في نفس المحادثة (جولة ${continuationRounds}/${MAX_CONTINUATIONS})...`, 'info');
-        console.log(`[geminiWeb] continuation round ${continuationRounds} (text len ${resultText.length})`);
+        if (log) log(`الرد في وضع الضيف كان مقطوعاً — إعادة إرسال المهمة مع الإكمال من نقطة التوقف (جولة ${continuationRounds}/${MAX_CONTINUATIONS})...`, 'info');
+        console.log(`[geminiWeb] guest continuation round ${continuationRounds} (text len ${resultText.length})`);
         try {
-            const contPrompt = `أكمل المهمة السابقة من حيث توقفت تماماً. ابدأ مباشرة بعد نهاية النص السابق الذي انتهى بـ: «...${tail}»\nلا تكرر أي جملة أو فقرة سبقت، ولا تعِد الترجمة من البداية، ولا تضف مقدمات أو شرحاً — أكمل النص فقط حتى نهايته ثم توقف.`;
-            const cont = await sendMessage(jar, tokens, contPrompt, conv, timeoutMs);
+            const contPrompt = `${prompt}\n\n---\nمهمة إلحاحية: ردك السابق على هذه المهمة نفسها انقطع قبل اكتماله. آخر ما انتهى إليه النص هو: «...${tail}»\nأرسل بقية النص فقط بدءاً من النقطة التي توقفت عندها مباشرة. لا تكرر أي جملة أو فقرة سبقت، ولا تبدأ من البداية، ولا تضف مقدمات أو شرحاً — البقية فقط حتى النهاية ثم توقف.`;
+            const cont = await sendGuestMessage(jar, tokens, contPrompt, timeoutMs);
             if (!cont.text || !cont.text.trim()) break;
-            conv = cont.conv || conv;
-            if (context) context.geminiConv = conv;
             const before = resultText.length;
             resultText = stitchWithoutOverlap(resultText, cont.text);
             if (resultText.length <= before) break; // لم يُضف شيء جديد — توقف
         } catch (contErr) {
-            console.error(`[geminiWeb] continuation failed: ${contErr.message}`);
+            console.error(`[geminiWeb] guest continuation failed: ${contErr.message}`);
             break;
         }
     }
 
     if (!resultText.trim()) {
-        throw new Error('Gemini Web أعاد رداً فارغاً');
+        throw new Error('Gemini Web (وضع الضيف) أعاد رداً فارغاً');
     }
     return resultText;
 }
 
-module.exports = { askGeminiWeb, GeminiWebAuthError };
+// ---------- النقطة العامة: askGeminiWeb ----------
+// options: { token (كوكيز), timeout, context (حالة المحادثة اللاصقة — نفس نمط askQwen), log }
+//
+// 🔥 منطق وضع الضيف (طلب المستخدم):
+//   - لا كوكيز إطلاقاً / مفتاح وهمي / مفتاح لا يشبه الكوكيز → وضع الضيف مباشرة مع تنبيه واضح.
+//   - كوكيز موجودة لكن جلستها فشلت → الانتقال تلقائياً إلى وضع الضيف مع تنبيه واضح
+//     (نفس سطر البروكسي: "cookie-based tokens failed → switching to cookie-less fallback").
+async function askGeminiWeb(prompt, options = {}) {
+    const log = typeof options.log === 'function' ? options.log : null;
+    const rawToken = String(options.token || '').trim();
+    const isDummy = !rawToken || rawToken.startsWith('dummy-key-for-');
+    const cookieLike = looksLikeGeminiCookies(rawToken);
+    const timeoutMs = options.timeout || 300000;
+    const context = options.context || {};
+    let conv = context.geminiConv || null;
+
+    // ============ المسار المصادق (كوكيز حقيقية) ============
+    if (!isDummy && cookieLike) {
+        const jar = getJar(rawToken);
+
+        // 1) توكنات الجلسة (مع تتبّع الكوكيز الدوّارة)
+        let tokens = await getTokens(jar);
+        if (!tokens) {
+            // محاولة ثانية بعد تحديث الكوكيز من التحويلات (مثل سلوك البروكسي مع PSIDTS الجديدة)
+            await new Promise(r => setTimeout(r, 1200));
+            tokens = await getTokens(jar);
+        }
+        if (!tokens) {
+            // 🔥🔥 الانتقال إلى وضع الضيف مع تنبيه واضح (طلب المستخدم صراحة) 🔥🔥
+            if (log) log('⚠️ فشل جلب جلسة Gemini بالكوكيز (منتهية أو غير صالحة) — الانتقال الآن إلى وضع الضيف (بدون حساب)...', 'warning');
+            console.warn('[geminiWeb] cookie-based tokens failed → switching to GUEST mode');
+            return runGuestMode(prompt, { timeoutMs, log });
+        }
+
+        // 2) الطلب الأول
+        let { text, conv: newConv } = await sendMessage(jar, tokens, prompt, conv, timeoutMs);
+        conv = newConv;
+        if (context) context.geminiConv = conv;
+        let resultText = text || '';
+
+        // 3) 🔥 الإكمال التلقائي ضد القطع ("يترجم نصفه / آخره كأنه انقطع")
+        let continuationRounds = 0;
+        const MAX_CONTINUATIONS = 2;
+        while (looksIncomplete(resultText) && continuationRounds < MAX_CONTINUATIONS) {
+            continuationRounds++;
+            const tail = resultText.slice(-90).replace(/\s+/g, ' ');
+            if (log) log(`الرد كان مقطوعاً في نهايته — جاري الإكمال تلقائياً في نفس المحادثة (جولة ${continuationRounds}/${MAX_CONTINUATIONS})...`, 'info');
+            console.log(`[geminiWeb] continuation round ${continuationRounds} (text len ${resultText.length})`);
+            try {
+                const contPrompt = `أكمل المهمة السابقة من حيث توقفت تماماً. ابدأ مباشرة بعد نهاية النص السابق الذي انتهى بـ: «...${tail}»\nلا تكرر أي جملة أو فقرة سبقت، ولا تعِد الترجمة من البداية، ولا تضف مقدمات أو شرحاً — أكمل النص فقط حتى نهايته ثم توقف.`;
+                const cont = await sendMessage(jar, tokens, contPrompt, conv, timeoutMs);
+                if (!cont.text || !cont.text.trim()) break;
+                conv = cont.conv || conv;
+                if (context) context.geminiConv = conv;
+                const before = resultText.length;
+                resultText = stitchWithoutOverlap(resultText, cont.text);
+                if (resultText.length <= before) break; // لم يُضف شيء جديد — توقف
+            } catch (contErr) {
+                console.error(`[geminiWeb] continuation failed: ${contErr.message}`);
+                break;
+            }
+        }
+
+        if (!resultText.trim()) {
+            throw new Error('Gemini Web أعاد رداً فارغاً');
+        }
+        return resultText;
+    }
+
+    // ============ وضع الضيف من البداية (تنبيه واضح قبل الدخول) ============
+    if (log) {
+        if (!isDummy) {
+            log('⚠️ المفتاح المُدخل لا يبدو كوكيز Gemini صالحة (يجب أن يحتوي __Secure-1PSID=...) — سيتم استخدام وضع الضيف (بدون حساب) بدلاً منه', 'warning');
+        } else {
+            log('🟡 وضع الضيف: لا توجد كوكيز Gemini — سيتم استخدام الوصول المجهول (بدون حساب) إلى gemini.google.com', 'warning');
+        }
+    }
+    console.warn(`[geminiWeb] entering GUEST mode (reason: ${isDummy ? 'no-cookies' : 'key-not-cookie-like'})`);
+    return runGuestMode(prompt, { timeoutMs, log });
+}
+
+module.exports = { askGeminiWeb, GeminiWebAuthError, GUEST_TOKEN_SENTINEL, looksLikeGeminiCookies };
