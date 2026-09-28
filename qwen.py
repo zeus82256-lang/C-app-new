@@ -1,526 +1,936 @@
-
 import os
 import re
-import json
+import io
 import time
 import uuid
+import json
 import base64
-from pathlib import Path
-from typing import Any, Dict, Optional, Generator
-
+import hmac
+import hashlib
+import asyncio
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone, timedelta
 import requests
+import httpx
+from user_agent import generate_user_agent
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.helpers import escape_markdown
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters,
+    ContextTypes
+)
 
+# @FF_MZ
+BOT_TOKEN = "xxxxxxxxxxxxx"
+ACCOUNTS_FILE = "qwen_accounts.json"
+TEMP_API_URL = "https://api.internal.temp-mail.io/api/v3"
+BASE_QWEN_URL = "https://chat.qwen.ai/api/v2"
 
+CANCEL_EVENTS = {}
 
-def parse_cookies_str(cookies_str: str) -> dict:
-    cookies = {}
-    for part in cookies_str.split(';'):
-        if '=' in part:
-            k, v = part.strip().split('=', 1)
-            cookies[k] = v
-    return cookies
+def get_base_headers(content_type: str = "application/json", is_app: bool = True) -> dict:
+    headers = {}
+    if is_app:
+        headers['User-Agent'] = "Dalvik/2.1.0 (Linux; U; Android 16; CPH2631 Build/BP2A.250605.015) AliApp(QWENCHAT/2.7.2) AppType/Release AplusBridgeLite"
+    else:
+        headers['User-Agent'] = generate_user_agent()
+    
+    if content_type:
+        headers['Content-Type'] = content_type
+    return headers
 
-
-class QwenAPI:
-    BASE = "https://chat.qwen.ai"
-
-    DEVICE_ID = os.getenv("QWEN_DEVICE_ID", "ai41028e1f8c77e8b2786e747bbb688d45")
-    MINI_WUA_NEW = os.getenv("QWEN_MINI_WUA_NEW", "aFgR23MLtqLGGJyrcbapgd+3XceWqBxoJgwW5OfWJyoy3xEC7dShaw+ngiFDudGDdY6tt1kIeyR2PVktTjGdU3Bq8hFdQ4COyBLsSGPWyu6LrCN93vNCG600RwsH2PZgTpNQVxwdd5WDtQJl/bbuWLjXYRlDIHL+VeV7aQR6TkveYD25QvPjRymkV")
-    MINI_WUA_CHAT = os.getenv("QWEN_MINI_WUA_CHAT", "amQS4zB7f+nI4zFIidbQfWJS4DFq6eY/JGTsMp6g0eEgI1hW/WjAixbY00rXCEfaU1m0k8YFrAS7FdfKBfhdNv3tVDb9W9lKxCkU9N7WoxP6NBjjq7KDfBtkYRQwFDVeAnTLV3as78GbA/GIYRwe/sGfa+Ec4kEd6w8P5tnHKvatdiI6yyDOBdQyG")
-    APP_WAF = os.getenv("QWEN_APP_WAF", "Z9Tr56YmQpXcO2K_d_3nAbJvRqMLFW8HTNjvRguWHEowM1xY")
-    AUTH_TOKEN = os.getenv("QWEN_AUTH_TOKEN", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjJjMzNlM2I3LTRjZGMtNDIzNi05ZDQ4LTYxMGNkOGY0YjU1ZiIsImxhc3RfcGFzc3dvcmRfY2hhbmdlIjoxNzg0MzA3OTgyLCJleHAiOjE3ODg0NjAxMTd9.0Qks1iSkJlNXuJZwOXIqbBPVb2_nCFbZe3qBBI6kDak")
-    USER_ID = os.getenv("QWEN_USER_ID", "ae55d1b2-652b-4128-a2ab-d8af014d06dd")
-    COOKIES_STR = os.getenv("QWEN_COOKIES_STR", "")
-
-    UA_NEW = "Dalvik/2.1.0 (Linux; U; Android 15; RMX3834 Build/AP3A.240905.015.A2),Dalvik/2.1.0 (Linux; U; Android 15; RMX3834 Build/AP3A.240905.015.A2) AliApp(QWENCHAT/2.7.2) AppType/Release AplusBridgeLite"
-    UA_CHAT = "Dalvik/2.1.0 (Linux; U; Android 15; RMX3834 Build/AP3A.240905.015.A2) AliApp(QWENCHAT/2.7.2) AppType/Release AplusBridgeLite,Dalvik/2.1.0 (Linux; U; Android 15; RMX3834 Build/AP3A.240905.015.A2)"
-
-    def __init__(self):
-        self.s = requests.Session()
-        self.thinking_enabled = True
-        self.auto_search = True
-        self.last_response_id = None
-        self.cookies = parse_cookies_str(self.COOKIES_STR) if self.COOKIES_STR else {}
-        self.cookies.setdefault("x-ap", "eu-central-1")
-        self.cookies.setdefault("acw_tc", "0a03e58c17857397926041890e494252933302e11e7e13facd87298e0a89a3")
-        if self.AUTH_TOKEN:
-            self.cookies["token"] = self.AUTH_TOKEN
-        for k, v in self.cookies.items():
-            self.s.cookies.set(k, v, domain="chat.qwen.ai", path="/")
-
-    def _headers(self, kind="chat", auth=False, stream=False) -> Dict[str, str]:
-        h = {
-            "X-Platform": "android",
-            "Accept": "*/*,text/event-stream" if stream else "application/json",
-            "User-Agent": self.UA_CHAT if kind == "chat" else self.UA_NEW,
-            "x-device-id": self.DEVICE_ID,
-            "source": "app",
-            "x-mini-wua": self.MINI_WUA_CHAT if kind == "chat" else self.MINI_WUA_NEW,
-            "x-request-id": str(uuid.uuid4()),
-            "Accept-Language": "en-US",
-            "Accept-Charset": "UTF-8",
-            "Content-Type": "application/json; charset=UTF-8" if kind == "chat" else "application/json",
-            "Host": "chat.qwen.ai",
-            "Connection": "Keep-Alive",
-            "Accept-Encoding": "gzip, deflate",
-        }
-        if kind == "chat":
-            h["Cache-Control"] = "no-store"
-            h["app_waf"] = self.APP_WAF
-        if auth and self.AUTH_TOKEN:
-            h["Authorization"] = "Bearer " + self.AUTH_TOKEN
-        return h
-
-    def _post_json(self, url: str, payload: Dict[str, Any], headers: Dict[str, str], stream=False):
-        r = self.s.post(url, headers=headers, data=json.dumps(payload), cookies=self.cookies, stream=stream, timeout=120)
-        if r.status_code >= 400:
-            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:1000]}")
-        return r
-
-    def h5_headers(self) -> Dict[str, str]:
-        return {
-            "Accept": "application/json, text/plain, */*",
-            "Content-Type": "application/json",
-            "Accept-Language": "ar-BH,ar;q=0.9",
-            "Version": "0.2.81",
-            "source": "h5",
-            "X-Request-Id": str(uuid.uuid4()),
-            "Timezone": time.strftime("%a %b %d %Y %H:%M:%S GMT+0300"),
-        }
-
-    def new_chat(self, mode="normal") -> str:
-        url = self.BASE + "/api/v2/chats/new"
-        payload = {"chat_mode": "normal", "project_id": ""}
-        headers = self._headers("new", auth=True)
-        headers["Accept"] = "application/json"
-        headers["Accept-Encoding"] = "gzip"
-        headers["X-Platform"] = "android"
-        r = self._post_json(url, payload, headers)
-        data = r.json()
-        cid = data.get("chat_id") or data.get("id") or data.get("data", {}).get("chat_id") or data.get("data", {}).get("id")
-        if not cid:
-            raise RuntimeError("لم أجد chat_id في الرد: " + json.dumps(data, ensure_ascii=False)[:1000])
-        return cid
-
-    def get_chat(self, chat_id: str, limit: int = 6) -> Dict[str, Any]:
-        url = f"{self.BASE}/api/v2/chats/{chat_id}?direction=up&limit={limit}"
-        r = self.s.get(url, headers=self._headers("new"), timeout=60)
-        if r.status_code >= 400:
-            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:1000]}")
-        return r.json()
-
-    def get_current_id(self, chat_id: str) -> Optional[str]:
+def load_accounts_data() -> dict:
+    if os.path.exists(ACCOUNTS_FILE):
         try:
-            data = self.get_chat(chat_id)
-            d = data.get("data", {})
-            cur = d.get("currentId") or d.get("chat", {}).get("history", {}).get("currentId")
-            if cur:
-                return cur
-            msgs = d.get("chat", {}).get("messages", []) or []
-            for m in reversed(msgs):
-                if isinstance(m, dict) and m.get("role") == "assistant" and m.get("id"):
-                    return m.get("id")
-            for m in reversed(msgs):
-                if isinstance(m, dict) and m.get("id"):
-                    return m.get("id")
+            with open(ACCOUNTS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
         except Exception:
-            return None
-        return None
+            pass
+    return {"accounts": [], "active_image_index": -1, "active_video_index": -1}
 
-    def text_payload(self, chat_id: str, prompt: str, stream=True, model="qwen3.8-max", parent_id: Optional[str] = None) -> Dict[str, Any]:
-        ts = int(time.time())
-        fid = str(uuid.uuid4())
-        msg = {
-            "id": None,
-            "fid": fid,
-            "chat_type": "t2t",
-            "content": prompt,
-            "role": "user",
-            "feature_config": {
-                "thinking_enabled": self.thinking_enabled,
-                "output_schema": "phase",
-                "research_mode": "normal",
-                "auto_thinking": self.thinking_enabled,
-                "thinking_mode": "Deep" if self.thinking_enabled else "Fast",
-                "thinking_format": "summary",
-                "auto_search": self.auto_search,
-            },
-            "timestamp": ts,
-            "sub_chat_type": "t2t",
-            "models": [model],
-            "model": "",
-            "files": [],
-            "user_action": "chat",
-            "extra": {"meta": {"subChatType": "t2t"}},
-        }
+def save_accounts_data(data: dict):
+    with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
-        payload = {
-            "stream": stream,
-            "version": "2.1",
-            "incremental_output": True,
-            "chatId": chat_id,
-            "chat_id": chat_id,
-            "chat_mode": "normal",
-            "model": model,
-            "messages": [msg],
-            "timestamp": ts,
-        }
+def is_rate_limited_response(response_obj) -> bool:
+    if isinstance(response_obj, dict):
+        if response_obj.get("code") == "RateLimited" or response_obj.get("data", {}).get("code") == "RateLimited":
+            return True
+        if "RateLimited" in json.dumps(response_obj):
+            return True
+    elif isinstance(response_obj, str):
+        if "RateLimited" in response_obj:
+            return True
+    return False
 
-        # بعد أول رد: parent هو response_id/currentId السابق
-        if parent_id:
-            msg["parentId"] = parent_id
-            msg["parent_id"] = parent_id
-            payload["parentId"] = parent_id
-            payload["parent_id"] = parent_id
-        else:
-            payload["parentId"] = ""
-            payload["parent_id"] = None
-            msg["parentId"] = None
-            msg["parent_id"] = None
+def create_temp_email() -> str:
+    try:
+        r = requests.post(
+            f"{TEMP_API_URL}/email/new",
+            headers=get_base_headers(is_app=False),
+            json={"min_name_length": 10, "max_name_length": 10},
+            timeout=15
+        )
+        if r.ok:
+            return r.json().get("email")
+    except Exception:
+        pass
+    return None
 
-        return payload
+def signup_qwen(email: str, name: str, password: str) -> bool:
+    url = f"{BASE_QWEN_URL}/auths/signup"
+    headers = get_base_headers()
+    payload = {
+        "name": name,
+        "email": email,
+        "password": password,
+        "profile_image_url": "",
+        "oauth_sub": "",
+        "oauth_token": ""
+    }
+    try:
+        r = requests.post(url, json=payload, headers=headers, timeout=15)
+        return r.status_code in [200, 201]
+    except Exception:
+        return False
 
-    def chat(self, chat_id: str, prompt: str, stream=True, model="qwen3.8-max", parent_id: Optional[str] = None):
-        url = f"{self.BASE}/api/v2/chat/completions"
-        payload = self.text_payload(chat_id, prompt, stream=stream, model=model, parent_id=parent_id)
-        headers = self._headers("chat", auth=True, stream=stream)
-        # مطابق للطلب: chat_id أيضاً في query params
-        r = self.s.post(url, params={"chat_id": chat_id}, data=json.dumps(payload), headers=headers, cookies=self.cookies, stream=stream, timeout=120)
-        if r.status_code >= 400:
-            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:1000]}")
-        if stream:
-            return self.parse_sse(r)
-        return r.json()
+def get_activation_link(email: str, max_attempts=8, delay=3) -> str:
+    ua = generate_user_agent()
+    for _ in range(max_attempts):
+        try:
+            r = requests.get(f"{TEMP_API_URL}/email/{email}/messages", headers={"User-Agent": ua}, timeout=10)
+            if r.ok:
+                for m in r.json():
+                    body = m.get("body_text") or m.get("body_html") or m.get("body") or ""
+                    match = re.search(r'https://chat\.qwen\.ai/api/v1/auths/activate\?[^\s\)\"\']+', body)
+                    if match:
+                        return match.group(0)
+        except Exception:
+            pass
+        time.sleep(delay)
+    return None
 
-    def parse_sse(self, r) -> Generator[str, None, None]:
-        self.last_response_id = None
-        self.last_created_parent_id = None
-        for raw in r.iter_lines(decode_unicode=True):
-            if not raw:
-                continue
-            line = raw.strip()
-            if line.startswith("data:"):
-                line = line[5:].strip()
-            if line in ("[DONE]", "done"):
+def activate_account(activation_url: str) -> bool:
+    try:
+        r = requests.get(activation_url, headers=get_base_headers(content_type=None, is_app=False), timeout=15)
+        return r.status_code in [200, 201]
+    except Exception:
+        return False
+
+# @FF_MZ
+def signin_qwen(email: str, password: str) -> str:
+    url = f"{BASE_QWEN_URL}/auths/signin"
+    headers = get_base_headers()
+    payload = {"email": email, "password": password}
+    try:
+        r = requests.post(url, json=payload, headers=headers, timeout=15)
+        if r.ok:
+            data = r.json()
+            if data.get("success") and "data" in data:
+                return data["data"].get("token")
+    except Exception:
+        pass
+    return None
+
+def create_and_save_new_account() -> str:
+    password = "899409576f885e962bb8aecc95ed24efc9b46a0872fdd8e79ed1d6fd72aeb358"
+    name = "User_" + uuid.uuid4().hex[:6]
+
+    for attempt in range(5):
+        email = create_temp_email()
+        if not email:
+            continue
+        
+        if not signup_qwen(email, name, password):
+            continue
+            
+        act_link = get_activation_link(email)
+        if not act_link:
+            continue
+            
+        if activate_account(act_link):
+            token = signin_qwen(email, password)
+            if token:
+                data = load_accounts_data()
+                new_acc = {
+                    "email": email,
+                    "password": password,
+                    "token": token,
+                    "image_limit_until": 0,
+                    "video_limit_until": 0
+                }
+                data["accounts"].append(new_acc)
+                data["active_image_index"] = len(data["accounts"]) - 1
+                data["active_video_index"] = len(data["accounts"]) - 1
+                save_accounts_data(data)
+                return token
+    raise Exception("فشل إنشاء حساب جديد بعد عدة محاولات.")
+
+def get_valid_qwen_token(service_type: str = "image") -> str:
+    data = load_accounts_data()
+    now_ts = int(time.time())
+    limit_key = "image_limit_until" if service_type == "image" else "video_limit_until"
+    active_key = "active_image_index" if service_type == "image" else "active_video_index"
+
+    for idx, acc in enumerate(data["accounts"]):
+        if acc.get(limit_key, 0) <= now_ts:
+            data[active_key] = idx
+            save_accounts_data(data)
+            return acc["token"]
+
+    return create_and_save_new_account()
+
+def mark_account_rate_limited(service_type: str = "image"):
+    data = load_accounts_data()
+    limit_key = "image_limit_until" if service_type == "image" else "video_limit_until"
+    active_key = "active_image_index" if service_type == "image" else "active_video_index"
+    
+    active_idx = data.get(active_key, -1)
+    if 0 <= active_idx < len(data["accounts"]):
+        unban_time = int((datetime.now(timezone.utc) + timedelta(hours=24)).timestamp())
+        data["accounts"][active_idx][limit_key] = unban_time
+        data[active_key] = -1
+        save_accounts_data(data)
+
+def get_qwen_headers(service_type: str = "image") -> dict:
+    token = get_valid_qwen_token(service_type)
+    headers = get_base_headers(content_type="application/json; charset=UTF-8")
+    headers.update({
+        'Accept': "*/*,text/event-stream" if service_type == "image" else "application/json",
+        'Authorization': f"Bearer {token}",
+        'x-device-id': "0",
+        'source': "app",
+        'Accept-Language': "en-US",
+        'Cookie': f"x-ap=eu-central-1; token={token}"
+    })
+    return headers
+
+def generate_oss_signature(secret_key, method, content_md5, content_type, date, canonical_headers, canonical_resource):
+    string_to_sign = f"{method}\n{content_md5}\n{content_type}\n{date}\n{canonical_headers}{canonical_resource}"
+    h = hmac.new(secret_key.encode('utf-8'), string_to_sign.encode('utf-8'), hashlib.sha1)
+    return base64.b64encode(h.digest()).decode('utf-8')
+
+# @FF_MZ
+def upload_image_to_qwen_oss(photo_bytes: bytes, service_type: str = "image") -> dict:
+    file_size = str(len(photo_bytes))
+    filename = f"{uuid.uuid4()}_IMG.jpg"
+
+    sts_url = "https://chat.qwen.ai/api/v2/files/getstsToken"
+    payload = {"filename": filename, "filetype": "image", "filesize": file_size}
+    headers = get_qwen_headers(service_type)
+    headers['x-request-id'] = str(uuid.uuid4())
+    
+    res = requests.post(sts_url, json=payload, headers=headers).json()
+    if is_rate_limited_response(res):
+        mark_account_rate_limited(service_type)
+        return upload_image_to_qwen_oss(photo_bytes, service_type)
+        
+    if "data" not in res:
+        raise Exception(f"فشل تصريح الرفع:\n{json.dumps(res, ensure_ascii=False)}")
+    
+    sts_res = res["data"]
+    access_key_id = sts_res["access_key_id"]
+    access_key_secret = sts_res["access_key_secret"]
+    security_token = sts_res["security_token"]
+    file_path = sts_res["file_path"]
+    file_id = sts_res["file_id"]
+    bucket = sts_res["bucketname"]
+    host = f"{bucket}.{sts_res['endpoint']}"
+
+    init_url = f"https://{host}/{file_path}?uploads"
+    gmt_date = datetime.now(timezone.utc).strftime('%a, %d %b %Y %H:%M:%S GMT')
+    canon_headers = f"x-oss-security-token:{security_token}\n"
+    canon_resource = f"/{bucket}/{file_path}?uploads"
+    
+    sig = generate_oss_signature(access_key_secret, "POST", "", "image/jpeg", gmt_date, canon_headers, canon_resource)
+    init_headers = {
+        'Authorization': f'OSS {access_key_id}:{sig}',
+        'User-Agent': 'aliyun-sdk-android/2.9.21',
+        'Host': host,
+        'x-oss-security-token': security_token,
+        'Date': gmt_date,
+        'Content-Type': 'image/jpeg',
+        'Content-Length': '0'
+    }
+    init_res = requests.post(init_url, headers=init_headers)
+    root = ET.fromstring(init_res.text)
+    upload_id = root.find('{*}UploadId').text
+
+    part_url = f"https://{host}/{file_path}?uploadId={upload_id}&partNumber=1"
+    gmt_date = datetime.now(timezone.utc).strftime('%a, %d %b %Y %H:%M:%S GMT')
+    content_md5 = base64.b64encode(hashlib.md5(photo_bytes).digest()).decode('utf-8')
+    canon_resource = f"/{bucket}/{file_path}?partNumber=1&uploadId={upload_id}"
+    
+    sig = generate_oss_signature(access_key_secret, "PUT", content_md5, "image/jpeg", gmt_date, canon_headers, canon_resource)
+    part_headers = {
+        'Authorization': f'OSS {access_key_id}:{sig}',
+        'User-Agent': 'aliyun-sdk-android/2.9.21',
+        'Host': host,
+        'x-oss-security-token': security_token,
+        'Date': gmt_date,
+        'Content-MD5': content_md5,
+        'Content-Type': 'image/jpeg',
+        'Content-Length': file_size
+    }
+    part_res = requests.put(part_url, data=photo_bytes, headers=part_headers)
+    etag = part_res.headers.get("ETag", "").replace('"', '')
+
+    complete_url = f"https://{host}/{file_path}?uploadId={upload_id}"
+    gmt_date = datetime.now(timezone.utc).strftime('%a, %d %b %Y %H:%M:%S GMT')
+    complete_body = f"<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{etag}</ETag></Part></CompleteMultipartUpload>"
+    canon_resource = f"/{bucket}/{file_path}?uploadId={upload_id}"
+    
+    sig = generate_oss_signature(access_key_secret, "POST", "", "image/jpeg", gmt_date, canon_headers, canon_resource)
+    complete_headers = {
+        'Authorization': f'OSS {access_key_id}:{sig}',
+        'User-Agent': 'aliyun-sdk-android/2.9.21',
+        'Host': host,
+        'x-oss-security-token': security_token,
+        'Date': gmt_date,
+        'Content-Type': 'image/jpeg',
+        'Content-Length': str(len(complete_body))
+    }
+    requests.post(complete_url, data=complete_body, headers=complete_headers)
+
+    signed_url = sts_res.get("file_url", f"https://{host}/{file_path}")
+    return {
+        "type": "image",
+        "file": {
+            "data": {},
+            "filename": filename,
+            "id": file_id,
+            "meta": {"name": filename}
+        },
+        "id": file_id,
+        "filename": filename,
+        "name": filename,
+        "url": signed_url
+    }
+
+def create_new_chat(service_type: str = "image") -> str:
+    url = "https://chat.qwen.ai/api/v2/chats/new"
+    payload = {"chat_mode": "normal", "project_id": ""}
+    headers = get_qwen_headers(service_type)
+    headers['x-request-id'] = str(uuid.uuid4())
+    
+    res = requests.post(url, json=payload, headers=headers).json()
+    if is_rate_limited_response(res):
+        mark_account_rate_limited(service_type)
+        return create_new_chat(service_type)
+        
+    if "data" not in res:
+        raise Exception(f"فشل إنشاء المحادثة:\n{json.dumps(res, ensure_ascii=False)}")
+    return res["data"]["id"]
+
+def delete_chat(chat_id: str, service_type: str = "image") -> bool:
+    if not chat_id:
+        return False
+    url = f"https://chat.qwen.ai/api/v2/chats/{chat_id}"
+    headers = get_qwen_headers(service_type)
+    headers['x-request-id'] = str(uuid.uuid4())
+    headers['Content-Type'] = "application/x-www-form-urlencoded"
+    try:
+        r = requests.delete(url, headers=headers, timeout=15)
+        return r.status_code in [200, 204]
+    except Exception:
+        return False
+
+# @FF_MZ
+def generate_qwen_image(prompt: str, chat_id: str, uploaded_files: list = None) -> str:
+    url = f"https://chat.qwen.ai/api/v2/chat/completions?chat_id={chat_id}"
+    headers = get_qwen_headers("image")
+    headers['x-request-id'] = str(uuid.uuid4())
+
+    files_payload = []
+    if uploaded_files:
+        for item in uploaded_files:
+            files_payload.append({
+                "type": "image",
+                "file": {
+                    "data": {},
+                    "filename": item["filename"],
+                    "id": item["id"],
+                    "meta": {"name": item["filename"]}
+                },
+                "id": item["id"],
+                "url": item["url"],
+                "name": item["filename"],
+                "image_width": 1024,
+                "image_height": 1024
+            })
+
+    now_ts = int(time.time())
+    message_data = {
+        "chat_type": "t2i",
+        "content": prompt if prompt else "",
+        "role": "user",
+        "feature_config": {
+            "output_schema": "phase",
+            "thinking_enabled": False,
+            "thinking_format": "summary",
+            "auto_thinking": True,
+            "auto_search": True
+        },
+        "timestamp": now_ts,
+        "sub_chat_type": "t2i",
+        "models": ["qwen3.8-max"],
+        "user_action": "chat",
+        "extra": {"meta": {"subChatType": "t2i"}}
+    }
+    
+    if files_payload:
+        message_data["files"] = files_payload
+
+    payload = {
+        "stream": True,
+        "incremental_output": True,
+        "chat_id": chat_id,
+        "chat_mode": "normal",
+        "model": "qwen3.8-max",
+        "messages": [message_data],
+        "timestamp": now_ts,
+        "size": "16:9",
+        "share_id": "",
+        "version": "2.1",
+        "origin_branch_message_id": ""
+    }
+
+    response = requests.post(url, json=payload, headers=headers, stream=True, timeout=120)
+    image_url = None
+
+    for line in response.iter_lines():
+        if not line:
+            continue
+        line_str = line.decode('utf-8')
+
+        if is_rate_limited_response(line_str):
+            mark_account_rate_limited("image")
+            new_chat_id = create_new_chat("image")
+            return generate_qwen_image(prompt, new_chat_id, uploaded_files)
+
+        if line_str.startswith("data: "):
+            data_content = line_str[6:].strip()
+            if data_content == "[DONE]":
                 break
             try:
-                obj = json.loads(line)
-            except Exception:
+                data_json = json.loads(data_content)
+                if is_rate_limited_response(data_json):
+                    mark_account_rate_limited("image")
+                    new_chat_id = create_new_chat("image")
+                    return generate_qwen_image(prompt, new_chat_id, uploaded_files)
+
+                if "choices" in data_json and len(data_json["choices"]) > 0:
+                    delta = data_json["choices"][0].get("delta", {})
+                    content = delta.get("content", "")
+                    if content.startswith("http"):
+                        image_url = content
+            except json.JSONDecodeError:
                 continue
 
-            created = obj.get("response.created") if isinstance(obj, dict) else None
-            if isinstance(created, dict) and created.get("response_id"):
-                self.last_response_id = created.get("response_id")
-                self.last_created_parent_id = created.get("parent_id")
+    return image_url
 
-            if isinstance(obj, dict) and obj.get("response_id"):
-                self.last_response_id = obj.get("response_id")
+async def send_video_request(chat_id: str, prompt_text: str, image_obj=None):
+    url = "https://chat.qwen.ai/api/v2/chat/completions"
+    current_ts = int(time.time())
+    sub_type = "i2v" if image_obj else "t2v"
+    
+    message_content = {
+        "chat_type": sub_type,
+        "content": prompt_text,
+        "role": "user",
+        "feature_config": {
+            "output_schema": "phase",
+            "thinking_enabled": True,
+            "thinking_format": "summary",
+            "auto_thinking": True,
+            "auto_search": True
+        },
+        "timestamp": current_ts,
+        "sub_chat_type": sub_type,
+        "models": ["qwen3.8-max"],
+        "user_action": "chat",
+        "extra": {"meta": {"subChatType": sub_type}}
+    }
 
-            txt = self.extract_text(obj)
-            if txt:
-                yield txt
+    if image_obj:
+        message_content["files"] = [image_obj]
 
-    def extract_text(self, obj: Any) -> str:
-        if obj is None:
-            return ""
-        if isinstance(obj, str):
-            return obj
-        if isinstance(obj, list):
-            return "".join(self.extract_text(x) for x in obj)
-        if not isinstance(obj, dict):
-            return ""
+    payload = {
+        "stream": False,
+        "incremental_output": True,
+        "chat_id": chat_id,
+        "chat_mode": "normal",
+        "model": "qwen3.8-max",
+        "messages": [message_content],
+        "timestamp": current_ts,
+        "size": "16:9",
+        "share_id": "",
+        "version": "2.1",
+        "origin_branch_message_id": ""
+    }
 
-        # لا نطبع نص التفكير غالباً، فقط content/answer/output عند توفرها
-        for path in [
-            ("choices", 0, "delta", "content"),
-            ("choices", 0, "message", "content"),
-            ("data", "choices", 0, "delta", "content"),
-            ("data", "choices", 0, "message", "content"),
-            ("message", "content"),
-            ("delta", "content"),
-            ("data", "content"),
-            ("content",),
-            ("answer",),
-            ("output", "text"),
-            ("text",),
-        ]:
-            cur = obj
-            ok = True
-            for k in path:
-                if isinstance(k, int) and isinstance(cur, list) and len(cur) > k:
-                    cur = cur[k]
-                elif isinstance(k, str) and isinstance(cur, dict) and k in cur:
-                    cur = cur[k]
-                else:
-                    ok = False
-                    break
-            if ok and isinstance(cur, str) and cur:
-                return cur
+    headers = await asyncio.to_thread(get_qwen_headers, "video")
+    async with httpx.AsyncClient(timeout=45.0) as client:
+        res = await client.post(url, params={'chat_id': chat_id}, json=payload, headers=headers)
+        res_json = res.json()
+        
+        if is_rate_limited_response(res_json):
+            await asyncio.to_thread(mark_account_rate_limited, "video")
+            new_chat_id = await asyncio.to_thread(create_new_chat, "video")
+            return await send_video_request(new_chat_id, prompt_text, image_obj)
 
-        # Qwen أحياناً يرسل phases/events
-        for key in ("messages", "contents", "items", "events", "phases", "data"):
-            if key in obj:
-                txt = self.extract_text(obj[key])
-                if txt:
-                    return txt
-        return ""
+    messages = res_json.get("data", {}).get("messages", [])
+    if messages and "extra" in messages[0]:
+        task_id = messages[0]["extra"].get("wanx", {}).get("task_id")
+        if task_id:
+            return task_id
+            
+    raise Exception("لم يتم العثور على task_id الخاص بتوليد الفيديو.")
 
-    def video_payload(self, chat_id: str, prompt: str, size="16:9", model="qwen3.7-plus", parent_id: Optional[str] = None) -> Dict[str, Any]:
-        ts = int(time.time())
-        parent_id = parent_id or str(uuid.uuid4())
-        return {
-            "stream": False,
-            "incremental_output": True,
-            "chat_id": chat_id,
-            "chat_mode": "normal",
-            "model": model,
-            "parent_id": parent_id,
-            "messages": [{
-                "chat_type": "t2v",
-                "content": prompt,
-                "role": "user",
-                "feature_config": {
-                    "output_schema": "phase",
-                    "thinking_enabled": self.thinking_enabled,
-                    "thinking_format": "summary",
-                    "auto_thinking": self.thinking_enabled,
-                    "auto_search": self.auto_search,
-                },
-                "parentId": parent_id,
-                "parent_id": parent_id,
-                "timestamp": ts,
-                "sub_chat_type": "t2v",
-                "models": [model],
-                "user_action": "chat",
-                "extra": {"meta": {"subChatType": "t2v"}},
-            }],
-            "timestamp": ts,
-            "size": size,
-            "share_id": "",
-            "version": "2.1",
-            "origin_branch_message_id": "",
-        }
-
-    def generate_video(self, chat_id: str, prompt: str, size="16:9", parent_id: Optional[str] = None) -> Dict[str, Any]:
-        url = f"{self.BASE}/api/v2/chat/completions?chat_id={chat_id}"
-        payload = self.video_payload(chat_id, prompt, size=size, parent_id=parent_id)
-        r = self._post_json(url, payload, self._headers("chat", auth=True))
-        data = r.json()
-        data["_parent_id"] = payload["parent_id"]
+def extract_video_url(data):
+    if isinstance(data, str) and data.startswith("http") and (".mp4" in data or "aliyun" in data or "cdn.qwenlm.ai" in data):
         return data
+    if isinstance(data, dict):
+        if data.get("status") in ["FAILED", "ERROR", "CANCELED"]:
+            raise Exception(f"فشلت عملية توليد الفيديو: {data.get('error_message', 'خطأ غير معروف')}")
+        for k in ["url", "video_url", "file_url"]:
+            if k in data and isinstance(data[k], str) and data[k].startswith("http"):
+                return data[k]
+        for v in data.values():
+            res = extract_video_url(v)
+            if res: return res
+    elif isinstance(data, list):
+        for item in data:
+            res = extract_video_url(item)
+            if res: return res
+    return None
 
-    def task_status(self, task_id: str) -> Dict[str, Any]:
-        url = f"{self.BASE}/api/v1/tasks/status/{task_id}"
-        r = self.s.get(url, headers=self._headers("new", auth=True), timeout=60)
-        if r.status_code >= 400:
-            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:1000]}")
-        return r.json()
+# @FF_MZ
+async def poll_for_video(task_id, cancel_event: asyncio.Event = None, max_attempts=90):
+    url = f"https://chat.qwen.ai/api/v1/tasks/status/{task_id}"
+    headers = await asyncio.to_thread(get_qwen_headers, "video")
+    
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        for _ in range(max_attempts):
+            if cancel_event and cancel_event.is_set():
+                raise asyncio.CancelledError("تم إلغاء العمليه بواسطة المستخدم.")
+                
+            await asyncio.sleep(10)
+            try:
+                res = await client.get(url, headers=headers)
+                if res.status_code != 200:
+                    continue
+                
+                res_data = res.json()
+                if is_rate_limited_response(res_data):
+                    await asyncio.to_thread(mark_account_rate_limited, "video")
+                    headers = await asyncio.to_thread(get_qwen_headers, "video")
+                    continue
 
-    def find_task_id(self, obj: Any) -> Optional[str]:
-        if isinstance(obj, dict):
-            for k in ("task_id", "taskId", "taskIdStr", "id", "resource_id"):
-                v = obj.get(k)
-                if isinstance(v, str) and re.fullmatch(r"[0-9a-fA-F-]{20,}", v):
-                    return v
-            for v in obj.values():
-                found = self.find_task_id(v)
-                if found:
-                    return found
-        elif isinstance(obj, list):
-            for x in obj:
-                found = self.find_task_id(x)
-                if found:
-                    return found
-        return None
+                if res_data.get("success") is False:
+                    raise Exception(f"فشل الطلب: {res_data.get('message', 'خطأ غير معروف')}")
+                    
+                video_url = extract_video_url(res_data)
+                if video_url:
+                    return video_url
+            except httpx.HTTPError:
+                pass
+            except Exception as e:
+                raise e
+    raise Exception("انتهت مهلة التوليد ولم يكتمل الفيديو.")
 
-    def find_video_url(self, obj: Any) -> Optional[str]:
-        if isinstance(obj, str):
-            m = re.search(r"https://cdn\.qwenlm\.ai/[^\s\"']+\.mp4(?:\?key=[^\s\"']+)?", obj)
-            return m.group(0) if m else None
-        if isinstance(obj, dict):
-            for k in ("video_url", "url", "download_url", "resource_url"):
-                v = obj.get(k)
-                if isinstance(v, str) and ".mp4" in v:
-                    return v
-            for v in obj.values():
-                found = self.find_video_url(v)
-                if found:
-                    return found
-        elif isinstance(obj, list):
-            for x in obj:
-                found = self.find_video_url(x)
-                if found:
-                    return found
-        return None
+def download_file_bytes(url: str, is_video: bool = False) -> bytes:
+    headers = get_base_headers(content_type=None)
+    headers['Referer'] = 'https://chat.qwen.ai/'
+    res = requests.get(url, headers=headers, timeout=120 if is_video else 60)
+    res.raise_for_status()
+    return res.content
 
-    def download(self, url: str, out: str):
-        with self.s.get(url, stream=True, timeout=300) as r:
-            if r.status_code >= 400:
-                raise RuntimeError(f"HTTP {r.status_code}: {r.text[:500]}")
-            with open(out, "wb") as f:
-                for chunk in r.iter_content(1024 * 256):
-                    if chunk:
-                        f.write(chunk)
-        return out
-
-
-def main():
-    q = QwenAPI()
-    chats: Dict[str, Dict[str, Any]] = {}
-    current = None
-    name = "الرئيسية"
-    stream = True
-    model = "qwen3.8-max"
-
-    print("=" * 60)
-    print("Qwen API Client")
-    print("=" * 60)
-    print("/new [اسم] | /list | /switch id | /stream | /think | /search | /model name | /raw سؤال | /video وصف | /status task_id | /exit")
-
+async def send_result_photo(message_obj, photo_url: str):
     try:
-        current = q.new_chat("normal")
-        chats[current] = {"name": name, "current_id": None, "message_count": 0}
-        print(f"✅ chat_id: {current}")
-    except Exception as e:
-        print(f"❌ فشل إنشاء محادثة: {e}")
+        await message_obj.reply_photo(photo=photo_url)
+    except Exception:
+        img_bytes = await asyncio.to_thread(download_file_bytes, photo_url, False)
+        await message_obj.reply_photo(photo=io.BytesIO(img_bytes))
+
+async def send_result_video(message_obj, video_url: str):
+    try:
+        await message_obj.reply_video(video=video_url)
+    except Exception:
+        video_bytes = await asyncio.to_thread(download_file_bytes, video_url, True)
+        await message_obj.reply_video(video=io.BytesIO(video_bytes))
+
+async def update_timer_status(status_msg, start_time: float, stop_event: asyncio.Event, target_seconds: int = 60, process_id: str = None):
+    spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    idx = 0
+    bar_length = 10
+    
+    reply_markup = None
+    if process_id:
+        keyboard = [[InlineKeyboardButton("🚫 إيقاف العملية", callback_data=f"cancel_{process_id}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    while not stop_event.is_set():
+        elapsed = int(time.time() - start_time)
+        mins, secs = divmod(elapsed, 60)
+        time_str = f"{mins:02d}:{secs:02d}"
+        
+        progress = min(elapsed / target_seconds, 1.0)
+        filled = int(bar_length * progress)
+        bar = "█" * filled + "░" * (bar_length - filled)
+        spin = spinner[idx % len(spinner)]
+        
+        text = f"{spin} **جاري المعالجة...**\n`{time_str}` `[{bar}]`"
+        try:
+            await status_msg.edit_text(text, parse_mode="Markdown", reply_markup=reply_markup)
+        except Exception:
+            pass
+            
+        idx += 1
+        await asyncio.sleep(2)
+
+# @FF_MZ
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "mode" not in context.user_data:
+        context.user_data["mode"] = "image"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🖼️ إنشاء صورة", callback_data="set_mode_image"),
+            InlineKeyboardButton("🎬 إنشاء فيديو", callback_data="set_mode_video"),
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    current_mode_str = "🖼️ إنشاء صورة" if context.user_data["mode"] == "image" else "🎬 إنشاء فيديو"
+
+    raw_text = (
+        f"👋 اهلا بيك\n\n"
+        f"الوضع الحالي المختار: {current_mode_str}\n\n"
+        f"يرجى تحديد الخيار المطلوب من الأزرار أدناه:\n\n"
+        f"تمت الانشاء بواسطة @FF_MZ"
+    )
+    
+    safe_text = escape_markdown(raw_text, version=2)
+
+    await update.message.reply_text(
+        safe_text,
+        reply_markup=reply_markup,
+        parse_mode="MarkdownV2"
+    )
+
+async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data.startswith("cancel_"):
+        proc_id = query.data.replace("cancel_", "")
+        if proc_id in CANCEL_EVENTS:
+            CANCEL_EVENTS[proc_id].set()
+            await query.edit_message_text("🛑 تم إلغاء العملية بناءً على طلبك.")
         return
 
-    while True:
-        try:
-            text = input(f"\n[{chats[current]['name']}] أنت: ").strip()
-        except (KeyboardInterrupt, EOFError):
-            print("\nخروج")
+    if query.data == "set_mode_image":
+        context.user_data["mode"] = "image"
+        txt = "✅ تم تحديد الوضع: 🖼️ إنشاء صورة\n\n• أرسل نصاً لوصف الصورة المطلوب إنشاءها.\n• أو أرسل حتى 3 صور مع الوصف النصي للتعديل عليها."
+        await query.edit_message_text(escape_markdown(txt, version=2), parse_mode="MarkdownV2")
+    elif query.data == "set_mode_video":
+        context.user_data["mode"] = "video"
+        txt = "✅ تم تحديد الوضع: 🎬 إنشاء فيديو\n\n• أرسل نصاً لوصف الفيديو المطلوب (Text-to-Video).\n• أو أرسل صورة واحدة كحد أقصى مع الوصف لتحريكها (Image-to-Video)."
+        await query.edit_message_text(escape_markdown(txt, version=2), parse_mode="MarkdownV2")
+
+async def task_generate_image_text(message_obj, prompt: str):
+    process_id = uuid.uuid4().hex[:8]
+    cancel_event = asyncio.Event()
+    CANCEL_EVENTS[process_id] = cancel_event
+
+    start_time = time.time()
+    status_msg = await message_obj.reply_text("⠋ **جاري التجهيز...**", parse_mode="Markdown")
+    stop_event = asyncio.Event()
+    timer_task = asyncio.create_task(update_timer_status(status_msg, start_time, stop_event, target_seconds=30, process_id=process_id))
+    
+    chat_id = None
+    try:
+        chat_id = await asyncio.to_thread(create_new_chat, "image")
+        if cancel_event.is_set(): raise asyncio.CancelledError()
+
+        img_url = await asyncio.to_thread(generate_qwen_image, prompt, chat_id)
+        if cancel_event.is_set(): raise asyncio.CancelledError()
+
+        stop_event.set()
+        await timer_task
+        
+        if img_url:
+            await send_result_photo(message_obj, img_url)
+            await status_msg.delete()
+        else:
+            await status_msg.edit_text("تعذر استخراج رابط الصورة.")
+    except asyncio.CancelledError:
+        stop_event.set()
+        await timer_task
+    except Exception as e:
+        stop_event.set()
+        await timer_task
+        await status_msg.edit_text(escape_markdown(f"حدث خطأ: {str(e)}", version=2), parse_mode="MarkdownV2")
+    finally:
+        CANCEL_EVENTS.pop(process_id, None)
+        if chat_id:
+            await asyncio.to_thread(delete_chat, chat_id, "image")
+
+# @FF_MZ
+async def task_generate_video_text(message_obj, prompt: str):
+    process_id = uuid.uuid4().hex[:8]
+    cancel_event = asyncio.Event()
+    CANCEL_EVENTS[process_id] = cancel_event
+
+    start_time = time.time()
+    status_msg = await message_obj.reply_text("⠋ **جاري التجهيز...**", parse_mode="Markdown")
+    stop_event = asyncio.Event()
+    timer_task = asyncio.create_task(update_timer_status(status_msg, start_time, stop_event, target_seconds=90, process_id=process_id))
+    
+    chat_id = None
+    try:
+        chat_id = await asyncio.to_thread(create_new_chat, "video")
+        if cancel_event.is_set(): raise asyncio.CancelledError()
+
+        task_id = await send_video_request(chat_id, prompt)
+        if cancel_event.is_set(): raise asyncio.CancelledError()
+
+        video_url = await poll_for_video(task_id, cancel_event=cancel_event)
+        
+        stop_event.set()
+        await timer_task
+        
+        await send_result_video(message_obj, video_url)
+        await status_msg.delete()
+    except asyncio.CancelledError:
+        stop_event.set()
+        await timer_task
+    except Exception as e:
+        stop_event.set()
+        await timer_task
+        await status_msg.edit_text(escape_markdown(f"❌ حدث خطأ أثناء توليد الفيديو:\n{str(e)}", version=2), parse_mode="MarkdownV2")
+    finally:
+        CANCEL_EVENTS.pop(process_id, None)
+        if chat_id:
+            await asyncio.to_thread(delete_chat, chat_id, "video")
+
+async def handle_text_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    mode = context.user_data.get("mode", "image")
+    prompt = update.message.text
+
+    if mode == "image":
+        asyncio.create_task(task_generate_image_text(update.message, prompt))
+    else:
+        asyncio.create_task(task_generate_video_text(update.message, prompt))
+
+async def task_process_single_photo_image(message_obj, photo_bytes: bytes, caption: str):
+    process_id = uuid.uuid4().hex[:8]
+    cancel_event = asyncio.Event()
+    CANCEL_EVENTS[process_id] = cancel_event
+
+    start_time = time.time()
+    status_msg = await message_obj.reply_text("⠋ **جاري المعالجة...**", parse_mode="Markdown")
+    stop_event = asyncio.Event()
+    timer_task = asyncio.create_task(update_timer_status(status_msg, start_time, stop_event, target_seconds=30, process_id=process_id))
+    
+    chat_id = None
+    try:
+        uploaded = await asyncio.to_thread(upload_image_to_qwen_oss, photo_bytes, "image")
+        if cancel_event.is_set(): raise asyncio.CancelledError()
+
+        chat_id = await asyncio.to_thread(create_new_chat, "image")
+        if cancel_event.is_set(): raise asyncio.CancelledError()
+
+        img_url = await asyncio.to_thread(generate_qwen_image, caption, chat_id, [uploaded])
+        if cancel_event.is_set(): raise asyncio.CancelledError()
+
+        stop_event.set()
+        await timer_task
+        
+        if img_url:
+            await send_result_photo(message_obj, img_url)
+            await status_msg.delete()
+        else:
+            await status_msg.edit_text("لم يتم إرجاع رابط الصورة.")
+    except asyncio.CancelledError:
+        stop_event.set()
+        await timer_task
+    except Exception as e:
+        stop_event.set()
+        await timer_task
+        await status_msg.edit_text(escape_markdown(f"حدث خطأ أثناء المعالجة: {str(e)}", version=2), parse_mode="MarkdownV2")
+    finally:
+        CANCEL_EVENTS.pop(process_id, None)
+        if chat_id:
+            await asyncio.to_thread(delete_chat, chat_id, "image")
+
+# @FF_MZ
+async def task_process_single_photo_video(message_obj, photo_bytes: bytes, caption: str):
+    process_id = uuid.uuid4().hex[:8]
+    cancel_event = asyncio.Event()
+    CANCEL_EVENTS[process_id] = cancel_event
+
+    start_time = time.time()
+    status_msg = await message_obj.reply_text("⠋ **جاري المعالجة...**", parse_mode="Markdown")
+    stop_event = asyncio.Event()
+    timer_task = asyncio.create_task(update_timer_status(status_msg, start_time, stop_event, target_seconds=110, process_id=process_id))
+    
+    chat_id = None
+    try:
+        image_obj = await asyncio.to_thread(upload_image_to_qwen_oss, photo_bytes, "video")
+        if cancel_event.is_set(): raise asyncio.CancelledError()
+
+        chat_id = await asyncio.to_thread(create_new_chat, "video")
+        if cancel_event.is_set(): raise asyncio.CancelledError()
+
+        task_id = await send_video_request(chat_id, caption, image_obj)
+        if cancel_event.is_set(): raise asyncio.CancelledError()
+
+        video_url = await poll_for_video(task_id, cancel_event=cancel_event)
+        
+        stop_event.set()
+        await timer_task
+        
+        await send_result_video(message_obj, video_url)
+        await status_msg.delete()
+    except asyncio.CancelledError:
+        stop_event.set()
+        await timer_task
+    except Exception as e:
+        stop_event.set()
+        await timer_task
+        await status_msg.edit_text(escape_markdown(f"❌ حدث خطأ أثناء المعالجة: {str(e)}", version=2), parse_mode="MarkdownV2")
+    finally:
+        CANCEL_EVENTS.pop(process_id, None)
+        if chat_id:
+            await asyncio.to_thread(delete_chat, chat_id, "video")
+
+async def handle_photo_media_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    mode = context.user_data.get("mode", "image")
+    media_group_id = update.message.media_group_id
+
+    if mode == "video" and media_group_id:
+        await update.message.reply_text("⚠️ في وضع توليد الفيديو يُسمح بإرسال صورة واحدة فقط كحد أقصى لتحريكها.")
+        return
+
+    if media_group_id:
+        if "album_store" not in context.bot_data:
+            context.bot_data["album_store"] = {}
+            
+        if media_group_id not in context.bot_data["album_store"]:
+            context.bot_data["album_store"][media_group_id] = {
+                "messages": [],
+                "task": None
+            }
+            
+        context.bot_data["album_store"][media_group_id]["messages"].append(update.message)
+        
+        if context.bot_data["album_store"][media_group_id]["task"]:
+            context.bot_data["album_store"][media_group_id]["task"].schedule_removal()
+            
+        context.bot_data["album_store"][media_group_id]["task"] = context.job_queue.run_once(
+            process_album_images_job, 1.5, data={"media_group_id": media_group_id, "chat_id": update.effective_chat.id}
+        )
+    else:
+        photo_file = await update.message.photo[-1].get_file()
+        photo_bytes = bytes(await photo_file.download_as_bytearray())
+        caption = update.message.caption or ""
+
+        if mode == "image":
+            asyncio.create_task(task_process_single_photo_image(update.message, photo_bytes, caption))
+        else:
+            asyncio.create_task(task_process_single_photo_video(update.message, photo_bytes, caption))
+
+async def task_process_album_images(context, chat_id: int, messages: list):
+    process_id = uuid.uuid4().hex[:8]
+    cancel_event = asyncio.Event()
+    CANCEL_EVENTS[process_id] = cancel_event
+
+    start_time = time.time()
+    status_msg = await context.bot.send_message(chat_id=chat_id, text="⠋ **جاري المعالجة...**", parse_mode="Markdown")
+    stop_event = asyncio.Event()
+    timer_task = asyncio.create_task(update_timer_status(status_msg, start_time, stop_event, target_seconds=45, process_id=process_id))
+    
+    caption = ""
+    qwen_chat_id = None
+    for msg in messages:
+        if msg.caption:
+            caption = msg.caption
             break
-        if not text:
-            continue
-        if text == "/exit":
-            break
+            
+    try:
+        uploaded_files = []
+        for msg in messages[:3]:
+            if cancel_event.is_set(): raise asyncio.CancelledError()
+            photo_file = await msg.photo[-1].get_file()
+            photo_bytes = bytes(await photo_file.download_as_bytearray())
+            uploaded = await asyncio.to_thread(upload_image_to_qwen_oss, photo_bytes, "image")
+            uploaded_files.append(uploaded)
 
-        if text.startswith("/"):
-            cmd, _, arg = text.partition(" ")
-            arg = arg.strip()
-            if cmd == "/new":
-                try:
-                    cid = q.new_chat("normal")
-                    chats[cid] = {"name": arg or f"محادثة {len(chats)+1}", "current_id": None, "message_count": 0}
-                    current = cid
-                    print(f"✅ {cid}")
-                except Exception as e:
-                    print(f"❌ {e}")
-                continue
-            if cmd == "/list":
-                for cid, info in chats.items():
-                    print(f"{cid[:12]}... | {info['name']}" + (" 🔵" if cid == current else ""))
-                continue
-            if cmd == "/switch":
-                found = [cid for cid in chats if arg and (cid.startswith(arg) or arg in cid)]
-                if found:
-                    current = found[0]
-                    print("✅ تم التبديل")
-                else:
-                    print("❌ غير موجود")
-                continue
-            if cmd == "/stream":
-                stream = not stream
-                print("✅ stream =", stream)
-                continue
-            if cmd == "/think":
-                q.thinking_enabled = not q.thinking_enabled
-                print("✅ التفكير =", "مفعل" if q.thinking_enabled else "متوقف")
-                continue
-            if cmd == "/search":
-                q.auto_search = not q.auto_search
-                print("✅ البحث التلقائي =", "مفعل" if q.auto_search else "متوقف")
-                continue
-            if cmd == "/model":
-                if arg:
-                    model = arg
-                print("model =", model)
-                continue
-            if cmd == "/history":
-                try:
-                    data = q.get_chat(current)
-                    msgs = data.get("data", {}).get("chat", {}).get("messages", [])
-                    if not msgs:
-                        hist = data.get("data", {}).get("chat", {}).get("history", {}).get("messages", {})
-                        msgs = list(hist.values()) if isinstance(hist, dict) else []
-                    print(f"عدد الرسائل في السيرفر: {len(msgs)}")
-                    for m in msgs[-8:]:
-                        role = m.get("role")
-                        content = m.get("content") or ""
-                        if not content and m.get("content_list"):
-                            content = "".join(x.get("content", "") for x in m.get("content_list", []) if x.get("phase") == "answer")
-                        print(f"- {role}: {content[:120]}")
-                except Exception as e:
-                    print(f"❌ history error: {e}")
-                continue
-            if cmd == "/raw":
-                if not arg:
-                    print("اكتب السؤال بعد /raw")
-                    continue
-                try:
-                    resp = q.chat(current, arg, stream=False, model=model, parent_id=(chats[current].get("current_id") if chats[current].get("message_count",0)>0 else None))
-                    print(json.dumps(resp, ensure_ascii=False, indent=2))
-                except Exception as e:
-                    print(f"❌ {e}")
-                continue
-            if cmd == "/status":
-                if not arg:
-                    print("اكتب task_id")
-                    continue
-                try:
-                    resp = q.task_status(arg)
-                    print(json.dumps(resp, ensure_ascii=False, indent=2))
-                    url = q.find_video_url(resp)
-                    if url:
-                        out = f"qwen_video_{arg}.mp4"
-                        q.download(url, out)
-                        print(f"✅ تم تنزيل الفيديو: {out}")
-                except Exception as e:
-                    print(f"❌ {e}")
-                continue
-            if cmd == "/video":
-                if not arg:
-                    print("اكتب الوصف بعد /video")
-                    continue
-                try:
-                    video_chat = q.new_chat("normal")
-                    resp = q.generate_video(video_chat, arg)
-                    print(json.dumps(resp, ensure_ascii=False, indent=2))
-                    task = q.find_task_id(resp)
-                    if task:
-                        print(f"✅ task_id: {task}")
-                        print(f"تابع الحالة بالأمر: /status {task}")
-                    else:
-                        print("⚠️ لم أجد task_id، استخدم /raw أو انسخ الرد لفحصه")
-                except Exception as e:
-                    print(f"❌ {e}")
-                continue
-            print("أمر غير معروف")
-            continue
+        if cancel_event.is_set(): raise asyncio.CancelledError()
+        qwen_chat_id = await asyncio.to_thread(create_new_chat, "image")
 
-        try:
-            if stream:
-                print("🤖 Qwen: ", end="", flush=True)
-                full = ""
-                for chunk in q.chat(current, text, stream=True, model=model, parent_id=(chats[current].get("current_id") if chats[current].get("message_count",0)>0 else None)):
-                    full += chunk
-                    print(chunk, end="", flush=True)
-                print()
-                if full:
-                    chats[current]["message_count"] = chats[current].get("message_count", 0) + 1
-                    chats[current]["message_count"] = chats[current].get("message_count", 0) + 1
-                chats[current]["current_id"] = q.last_response_id or q.get_current_id(current) or chats[current].get("current_id")
-                if not full:
-                    print("⚠️ الرد فارغ. جرّب: /raw " + text)
-            else:
-                resp = q.chat(current, text, stream=False, model=model, parent_id=(chats[current].get("current_id") if chats[current].get("message_count",0)>0 else None))
-                out = q.extract_text(resp) or json.dumps(resp, ensure_ascii=False, indent=2)
-                print("🤖 Qwen:", out)
-                chats[current]["current_id"] = q.last_response_id or q.get_current_id(current) or chats[current].get("current_id")
-        except Exception as e:
-            print(f"❌ {e}")
+        if cancel_event.is_set(): raise asyncio.CancelledError()
+        img_url = await asyncio.to_thread(generate_qwen_image, caption, qwen_chat_id, uploaded_files)
+        
+        stop_event.set()
+        await timer_task
+        
+        if img_url:
+            await send_result_photo(status_msg, img_url)
+            await status_msg.delete()
+        else:
+            await status_msg.edit_text("لم يتم إرجاع رابط الصورة.")
+    except asyncio.CancelledError:
+        stop_event.set()
+        await timer_task
+    except Exception as e:
+        stop_event.set()
+        await timer_task
+        await status_msg.edit_text(escape_markdown(f"حدث خطأ أثناء المعالجة: {str(e)}", version=2), parse_mode="MarkdownV2")
+    finally:
+        CANCEL_EVENTS.pop(process_id, None)
+        if qwen_chat_id:
+            await asyncio.to_thread(delete_chat, qwen_chat_id, "image")
 
+async def process_album_images_job(context: ContextTypes.DEFAULT_TYPE):
+    job_data = context.job.data
+    media_group_id = job_data["media_group_id"]
+    chat_id = job_data["chat_id"]
+    
+    album_info = context.bot_data["album_store"].pop(media_group_id, None)
+    if not album_info:
+        return
+
+    asyncio.create_task(task_process_album_images(context, chat_id, album_info["messages"]))
+
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    pass
+
+# @FF_MZ
+def main():
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .read_timeout(300)
+        .write_timeout(300)
+        .connect_timeout(300)
+        .pool_timeout(300)
+        .build()
+    )
+    
+    app.add_error_handler(global_error_handler)
+    
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CallbackQueryHandler(button_callback_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_prompt))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo_media_group))
+    
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
