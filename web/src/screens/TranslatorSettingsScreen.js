@@ -34,6 +34,12 @@ const PROVIDER_TEMPLATES = [
     icon: 'sparkles-outline'
   },
   {
+    type: 'gemini_web',
+    title: 'Gemini Web',
+    subtitle: 'كوكيز حساب Google — إكمال تلقائي ضد قطع الفصول ومنع تكرار الفقرات',
+    icon: 'planet-outline'
+  },
+  {
     type: 'gemini',
     title: 'مزوّد مخصص (OpenAI متوافق)',
     subtitle: 'Base URL + مفاتيح + جلب النماذج تلقائياً من الرابط',
@@ -66,6 +72,11 @@ const isDeepSeekProvider = (provider) => {
 const isQwenProvider = (provider) => {
   const id = String(provider.providerId || '').toLowerCase();
   return id === 'qwen' || id.startsWith('qwen_');
+};
+
+const isGeminiWebProvider = (provider) => {
+  const id = String(provider.providerId || '').toLowerCase();
+  return id === 'gemini_web' || id.startsWith('gemini_web_');
 };
 
 const GlassContainer = ({ children, style }) => (
@@ -175,6 +186,15 @@ export default function TranslatorSettingsScreen({ navigation }) {
               selectedModel: 'qwen3.8-max',
               thinkingEnabled: true,
               searchEnabled: true
+          };
+      }
+      if (type === 'gemini_web') {
+          return {
+              ...base,
+              providerId: id,
+              name: 'Gemini Web',
+              models: [{ modelId: 'gemini-web', modelName: 'Gemini Web' }],
+              selectedModel: 'gemini-web'
           };
       }
       // مزوّد مخصص OpenAI-compatible — مستقل تماماً: رابطه ومفاتيحه ونماذجه
@@ -474,7 +494,7 @@ export default function TranslatorSettingsScreen({ navigation }) {
             {[...providers].sort((a, b) => a.priority - b.priority).map((provider, index) => {
                 const isExpanded = expandedProvider === provider.providerId;
                 const isSelected = selectedIds.includes(provider.providerId);
-                const isChatTemplate = isDeepSeekProvider(provider) || isQwenProvider(provider);
+                const isChatTemplate = isDeepSeekProvider(provider) || isQwenProvider(provider) || isGeminiWebProvider(provider);
                 return (
                     <GlassContainer key={provider.providerId} style={[styles.providerCard, isSelected && styles.providerCardSelected]}>
                         {/* رأس البطاقة */}
@@ -586,6 +606,13 @@ export default function TranslatorSettingsScreen({ navigation }) {
                                   </View>
                                 )}
 
+                                {isGeminiWebProvider(provider) && (
+                                  <View style={styles.deepSeekBox}>
+                                    <Text style={styles.miniLabel}>إعدادات Gemini Web</Text>
+                                    <Text style={styles.hintSmall}>يستخدم واجهة gemini.google.com عبر كوكيز حساب Google. عند انقطاع الرد في منتصف الفصل يتم إكماله تلقائياً في نفس المحادثة، والتكرار للفقرات يُكشف ويُعاد إصلاحه آلياً.</Text>
+                                  </View>
+                                )}
+
                                 {/* مزودو POW */}
                                 {isDeepSeekProvider(provider) && (
                                   <>
@@ -619,12 +646,12 @@ export default function TranslatorSettingsScreen({ navigation }) {
                                 )}
 
                                 {/* المفاتيح */}
-                                <Text style={styles.miniLabel}>{isDeepSeekProvider(provider) ? 'توكنات DeepSeek (كل توكن في سطر)' : isQwenProvider(provider) ? 'توكنات Qwen (كل توكن في سطر)' : 'مفاتيح API (كل مفتاح في سطر)'}</Text>
-                                <Text style={styles.hintSmall}>{isDeepSeekProvider(provider) ? '🔑 بالنسبة لـ DeepSeek: ضع توكنات الحساب هنا؛ سيتم استخدامها فعلياً بدل التوكن الافتراضي.' : isQwenProvider(provider) ? '🔑 بالنسبة لـ Qwen: ضع توكنات الحساب هنا وسيعاملها النظام مثل DeepSeek.' : '🔑 مفاتيح هذا المزوّد مستقلة تماماً ويُرسل معها الطلب إلى Base URL أعلاه.'}</Text>
+                                <Text style={styles.miniLabel}>{isDeepSeekProvider(provider) ? 'توكنات DeepSeek (كل توكن في سطر)' : isQwenProvider(provider) ? 'توكنات Qwen (كل توكن في سطر)' : isGeminiWebProvider(provider) ? 'كوكيز Gemini (كل جلسة كوكيز في سطر)' : 'مفاتيح API (كل مفتاح في سطر)'}</Text>
+                                <Text style={styles.hintSmall}>{isGeminiWebProvider(provider) ? '🍪 سجّل الدخول في gemini.google.com من المتصفح ← F12 ← Application ← Cookies ← انسخ قيمة __Secure-1PSID و __Secure-1PSIDTS بالشكل: __Secure-1PSID=...; __Secure-1PSIDTS=... (كل حساب في سطر = جلسة مستقلة). الكوكيز تنتهي دورياً — عند فشل الترجمة حدّثها.' : isDeepSeekProvider(provider) ? '🔑 بالنسبة لـ DeepSeek: ضع توكنات الحساب هنا؛ سيتم استخدامها فعلياً بدل التوكن الافتراضي.' : isQwenProvider(provider) ? '🔑 بالنسبة لـ Qwen: ضع توكنات الحساب هنا وسيعاملها النظام مثل DeepSeek.' : '🔑 مفاتيح هذا المزوّد مستقلة تماماً ويُرسل معها الطلب إلى Base URL أعلاه.'}</Text>
                                 <TextInput
                                     style={styles.keysInputSmall}
                                     multiline
-                                    placeholder={isDeepSeekProvider(provider) ? "DeepSeek token 1\nDeepSeek token 2" : isQwenProvider(provider) ? "Qwen token 1\nQwen token 2" : "sk-...\nمفتاح آخر"}
+                                    placeholder={isDeepSeekProvider(provider) ? "DeepSeek token 1\nDeepSeek token 2" : isQwenProvider(provider) ? "Qwen token 1\nQwen token 2" : isGeminiWebProvider(provider) ? "__Secure-1PSID=...; __Secure-1PSIDTS=..." : "sk-...\nمفتاح آخر"}
                                     placeholderTextColor="#666"
                                     value={provider._keysText || provider.apiKeys.join('\n')}
                                     onChangeText={(text) => updateProviderKeys(provider.providerId, text)}

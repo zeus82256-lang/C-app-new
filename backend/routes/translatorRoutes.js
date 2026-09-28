@@ -7,6 +7,9 @@ const TranslationJob = require('../models/translationJob.model.js');
 const Settings = require('../models/settings.model.js');
 const { askDeepSeek } = require('../services/deepseekAndroid.service.js');
 const { askQwen } = require('../services/qwenAndroid.service.js');
+// 🔥 Gemini Web — نقل مسار Gemini فقط من بروكسي المستخدم (jsnjbwjbw-ui/Proxy):
+// كوكيز gemini.google.com → SNlM0e/FdrFJe → StreamGenerate + إكمال تلقائي ضد القطع
+const { askGeminiWeb, GeminiWebAuthError } = require('../services/geminiWeb.service.js');
 // 🔥 نظام إنشاء حسابات Qwen تلقائياً (منقول من qwen.py):
 // عند عدم وجود مفتاح أو فشل كل المفاتيح يُنشأ حساب جديد وتُكمل الترجمة عليه — Qwen فقط.
 const qwenAutoAccount = require('../services/qwenAutoAccount.service.js');
@@ -226,8 +229,15 @@ function isQwenProvider(provider) {
     return providerId === 'qwen' || providerId.startsWith('qwen_');
 }
 
+// 🔥 Gemini Web: مزوّد كوكيز حساب Google عبر واجهة الويب (مثل قالب deepseek/qwen —
+// المفاتيح = سلاسل كوكيز من gemini.google.com وليست مفاتيح API رسمية)
+function isGeminiWebProvider(provider) {
+    const providerId = String(provider.providerId || '').toLowerCase();
+    return providerId === 'gemini_web' || providerId.startsWith('gemini_web_');
+}
+
 function isStickyChatProvider(provider) {
-    return isDeepSeekProvider(provider) || isQwenProvider(provider);
+    return isDeepSeekProvider(provider) || isQwenProvider(provider) || isGeminiWebProvider(provider);
 }
 
 const ARABIC_FULL_CHAPTER_WORD_THRESHOLD = 800;
@@ -388,6 +398,11 @@ function validateTranslatedChapter(translatedText, sourceContent) {
     if (text.length < 80 && source.length >= 200) reasons.push('الناتج قصير جداً ولا يبدو فصلاً مترجماً كاملاً');
     if (!sourceLooksShort && source.length >= 500 && text.length < source.length * 0.20) reasons.push('الناتج أقصر بكثير من الفصل الأصلي');
     if (getArabicLetterCount(text) < 50) reasons.push('الناتج لا يحتوي على نص عربي كافٍ');
+    // 🔥 كشف تكرار الفقرات (شكوى المستخدم على Gemini Web: "يكرر نفس الفقرات في الفصل"):
+    // فقرة طويلة (≥60 حرفاً) بعد التطبيع تظهر 3+ مرات، أو فقرتان مميزتان+ تكررتا مرتين+
+    // = فشل واضح يعاد الترجمة/الإصلاح بسببه. آمن من الإنذارات الكاذبة (مقاطع حوار قصيرة < 60 حرفاً غير محسوبة).
+    const repeatedInfo = detectRepeatedParagraphs(text);
+    if (repeatedInfo) reasons.push(repeatedInfo);
     if (englishResidues.length > 0) reasons.push(`الناتج يحتوي على كلمات إنجليزية غير مترجمة: ${englishResidues.slice(0, 12).join(', ')}`);
     if (foreignResidues.length > 0) reasons.push(`الناتج يحتوي على نص أجنبي غير مترجم (صيني/كوري/ياباني/غيره): ${foreignResidues.slice(0, 8).map(r => r.length > 24 ? r.substring(0, 24) + '…' : r).join(' ، ')}`);
     if (isLikelyAiRefusalOrMeta(text)) reasons.push('الناتج يبدو كرسالة من الذكاء الاصطناعي أو تعليمات وليس فصلاً مترجماً');
@@ -396,6 +411,30 @@ function validateTranslatedChapter(translatedText, sourceContent) {
     }
 
     return { ok: reasons.length === 0, reasons, englishResidues, foreignResidues, residues: [...englishResidues, ...foreignResidues], arabicWords, sourceWords, wordRatio };
+}
+
+// 🔥 كشف تكرار الفقرات في النص المترجم (بلاغ المستخدم على Gemini Web):
+// يطبّع الفقرات (طول ≥ 60 حرفاً) ويعدّ التكرارات الحرفية — حوار رواية شرعي قصير لا يُحتسب.
+function detectRepeatedParagraphs(translatedText) {
+    try {
+        const paragraphs = String(translatedText || '')
+            .split(/\n+/)
+            .map(p => p.trim().replace(/\s+/g, ' '))
+            .filter(p => p.length >= 60);
+        if (paragraphs.length < 3) return null;
+        const counts = new Map();
+        for (const p of paragraphs) counts.set(p, (counts.get(p) || 0) + 1);
+        const repeated = [...counts.entries()].filter(([, c]) => c >= 2);
+        if (!repeated.length) return null;
+        const worst = repeated.reduce((a, b) => (b[1] > a[1] ? b : a));
+        // نُفشل عند: تكرار 3+ لفقرة، أو فقرتان مكررتان+، أو فقرة واحدة مكررة مرتين
+        // لكنها طويلة (≥100 حرف) — الزخارف/التراتيل المقصودة في الروايات قصيرة عادة فلا تُحتسب.
+        if (worst[1] >= 3 || repeated.length >= 2 || worst[0].length >= 100) {
+            const preview = worst[0].length > 50 ? worst[0].substring(0, 50) + '…' : worst[0];
+            return `الناتج يكرر نفس الفقرات (${repeated.length} فقرة مكررة، أسوأها تكررت ${worst[1]} مرات): «${preview}» — يجب أن يكون كل فقرة محتواها الخاص دون تكرار`;
+        }
+        return null;
+    } catch (_) { return null; }
 }
 
 async function translateResiduesOnly(provider, modelToUse, key, translatedText, residues, options) {
@@ -575,6 +614,24 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
                 options.conversationBatchKey,
                 options.conversationScopeKey
             )
+        });
+    }
+
+    // ---- 🔥 Gemini Web (كوكيز حساب Google — نقل مسار Gemini فقط من بروكسي المستخدم) ----
+    // نفس آلية المحادثة اللاصقة للـ DeepSeek/Qwen (لكل توكن-كوكيز محادثاته الخاصة)،
+    // مع إكمال تلقائي داخل الخدمة عند انقطاع الرد (يمنع "نصف الفصل/آخره مقطوع")
+    if (isGeminiWebProvider(provider)) {
+        return askGeminiWeb(prompt, {
+            token: apiKey && !apiKey.startsWith('dummy-key-for-') ? apiKey : undefined,
+            thinkingEnabled: Boolean(provider.thinkingEnabled),
+            timeout: options.timeout || 300000,
+            context: getDeepSeekConversationContext(
+                options.conversationContexts,
+                options.conversationPurpose,
+                options.conversationBatchKey,
+                options.conversationScopeKey
+            ),
+            log: typeof options.log === 'function' ? options.log : null
         });
     }
 
@@ -810,7 +867,9 @@ ${sourceContent}
                                 conversationContexts,
                                 conversationPurpose: 'chapters',
                                 conversationBatchKey,
-                                conversationScopeKey
+                                conversationScopeKey,
+                                // 🔥 يسمح لخدمة Gemini Web بإظهار ملاحظات الإكمال التلقائي في سجل المهمة
+                                log: (msg, level) => pushLog(jobId, `[Gemini Web] ${msg}`, level || 'info')
                             });
                         } catch (genErr) {
                             // 🔥 قاتل حلقة "نفس الحساب": أي فشل توليد لحظياً يوسم التوكن حسب نوعه

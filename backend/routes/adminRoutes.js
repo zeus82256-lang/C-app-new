@@ -5,6 +5,8 @@ const jwt = require('jsonwebtoken');
 const axios = require('axios'); // 🔥 NEW: for custom/OpenRouter providers
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { askQwen } = require('../services/qwenAndroid.service.js');
+// 🔥 Gemini Web — نقل مسار Gemini فقط من بروكسي المستخدم (ترجمة البيانات الوصفية أيضاً)
+const { askGeminiWeb } = require('../services/geminiWeb.service.js');
 const { askDeepSeek } = require('../services/deepseekAndroid.service.js');
 // 🔥 نظام إنشاء حسابات Qwen تلقائياً (منقول من qwen.py) — نفس السلوك المستخدم في مسار ترجمة الفصول
 const qwenAutoAccount = require('../services/qwenAutoAccount.service.js');
@@ -71,6 +73,12 @@ function findLLMModel(provider) {
 function isQwenProvider(provider) {
     const providerId = String(provider.providerId || '').toLowerCase();
     return providerId === 'qwen' || providerId.startsWith('qwen_');
+}
+
+// 🔥 Gemini Web: مزوّد كوكيز حساب Google عبر واجهة الويب (mirror of translatorRoutes)
+function isGeminiWebProvider(provider) {
+    const providerId = String(provider.providerId || '').toLowerCase();
+    return providerId === 'gemini_web' || providerId.startsWith('gemini_web_');
 }
 
 // 🔥 NEW: DeepSeek Android helpers (mirror of translatorRoutes) – كانت مفقودة بالكامل
@@ -171,6 +179,14 @@ async function callTranslationProvider(provider, modelName, apiKey, prompt, opti
             thinkingEnabled: Boolean(provider.thinkingEnabled),
             searchEnabled: provider.searchEnabled !== false,
             timeout: options.timeout || 500000
+        });
+    }
+
+    // ---- 🔥 Gemini Web (كوكيز حساب Google — نقل مسار Gemini فقط من بروكسي المستخدم) ----
+    if (isGeminiWebProvider(provider)) {
+        return askGeminiWeb(prompt, {
+            token: apiKey && !apiKey.startsWith('dummy-key-for-') ? apiKey : undefined,
+            timeout: options.timeout || 300000
         });
     }
 
