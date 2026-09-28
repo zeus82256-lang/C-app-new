@@ -460,6 +460,18 @@ async function runGuestMode(prompt, { timeoutMs, log }) {
     return resultText;
 }
 
+// ---------- 🔥 هل هذا الفشل يعني أن الكوكيز نفسها لا تعمل (فيستحق الانتقال لوضع الضيف)؟ ----------
+// - Parse Error / Header overflow: ترويسات Google الضخمة (كوكيز دوّارة) تجاوزت حد Node —
+//   يُحل جذرياً برفع --max-http-header-size في سكربت التشغيل، وهنا نضمن ألا يسقط المزوّد بسببه
+// - HTTP 401/403 أو GeminiWebAuthError: الكوكيز مرفوضة/ميتة
+// أما 429 (RateLimited) وغيرها فتبقى صادقة بلا سقوط صامت لوضع الضيف
+function isCookieLevelFailure(err) {
+    const msg = String(err?.message || '');
+    return err instanceof GeminiWebAuthError
+        || /header overflow|parse error|hpe_header_overflow/i.test(msg)
+        || /HTTP 40[13]\b/.test(msg);
+}
+
 // ---------- النقطة العامة: askGeminiWeb ----------
 // options: { token (كوكيز), timeout, context (حالة المحادثة اللاصقة — نفس نمط askQwen), log }
 //
@@ -481,21 +493,37 @@ async function askGeminiWeb(prompt, options = {}) {
         const jar = getJar(rawToken);
 
         // 1) توكنات الجلسة (مع تتبّع الكوكيز الدوّارة)
-        let tokens = await getTokens(jar);
+        // 🔥 أي رمي خطأ (مثل Parse Error: Header overflow) يُعامل كفشل كوكيز — لا يُسقط المزوّد
+        let tokens = null;
+        let tokenErr = null;
+        try { tokens = await getTokens(jar); } catch (e) { tokenErr = e; }
         if (!tokens) {
             // محاولة ثانية بعد تحديث الكوكيز من التحويلات (مثل سلوك البروكسي مع PSIDTS الجديدة)
             await new Promise(r => setTimeout(r, 1200));
-            tokens = await getTokens(jar);
+            try { tokens = await getTokens(jar); } catch (e) { tokenErr = e; }
         }
         if (!tokens) {
-            // 🔥🔥 الانتقال إلى وضع الضيف مع تنبيه واضح (طلب المستخدم صراحة) 🔥🔥
-            if (log) log('⚠️ فشل جلب جلسة Gemini بالكوكيز (منتهية أو غير صالحة) — الانتقال الآن إلى وضع الضيف (بدون حساب)...', 'warning');
-            console.warn('[geminiWeb] cookie-based tokens failed → switching to GUEST mode');
+            // 🔥🔥 الانتقال إلى وضع الضيف مع تنبيه واضح — طلب المستخدم صراحة:
+            // "المفترض حتى لو لم تعمل الكوكيز يجب أن يعمل وضع الضيف" 🔥🔥
+            const why = tokenErr ? tokenErr.message : 'منتهية أو غير صالحة (لا SNlM0e)';
+            if (log) log(`⚠️ فشل جلب جلسة Gemini بالكوكيز (${why}) — الانتقال الآن إلى وضع الضيف (بدون حساب)...`, 'warning');
+            console.warn(`[geminiWeb] cookie-based tokens failed (${tokenErr?.message || 'no SNlM0e'}) → switching to GUEST mode`);
             return runGuestMode(prompt, { timeoutMs, log });
         }
 
-        // 2) الطلب الأول
-        let { text, conv: newConv } = await sendMessage(jar, tokens, prompt, conv, timeoutMs);
+        // 2) الطلب الأول — 🔥 فشل مستوى الكوكيز (Header overflow / 401 / 403) → انتقال للضيف بدلاً من إسقاط المزوّد
+        let first;
+        try {
+            first = await sendMessage(jar, tokens, prompt, conv, timeoutMs);
+        } catch (sendErr) {
+            if (isCookieLevelFailure(sendErr)) {
+                if (log) log(`⚠️ فشل إرسال Gemini Web بالكوكيز (${sendErr.message}) — الانتقال الآن إلى وضع الضيف (بدون حساب)...`, 'warning');
+                console.warn(`[geminiWeb] authed send failed (${sendErr.message}) → switching to GUEST mode`);
+                return runGuestMode(prompt, { timeoutMs, log });
+            }
+            throw sendErr;
+        }
+        let { text, conv: newConv } = first;
         conv = newConv;
         if (context) context.geminiConv = conv;
         let resultText = text || '';
