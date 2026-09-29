@@ -14,6 +14,8 @@ const { askGeminiWeb, GeminiWebAuthError, GUEST_TOKEN_SENTINEL } = require('../s
 // 🔥 نظام إنشاء حسابات Qwen تلقائياً (منقول من qwen.py):
 // عند عدم وجود مفتاح أو فشل كل المفاتيح يُنشأ حساب جديد وتُكمل الترجمة عليه — Qwen فقط.
 const qwenAutoAccount = require('../services/qwenAutoAccount.service.js');
+// 🔥 مرآة محتوى الفصول (MongoDB) — مزامنة مخرجات الترجمة مع شبكة أمان حصة Firestore
+const chapterMirror = require('../services/chapterMirror.service.js');
 
 const DEEPSEEK_CHAPTERS_PER_CONVERSATION = 100;
 const DEEPSEEK_MAX_ATTEMPTS_PER_TOKEN = 5;
@@ -1326,6 +1328,8 @@ if (jsonMatch) {
                             content: translatedText,
                             lastUpdated: new Date()
                         }, { merge: true });
+                    // 🔥 مزامنة المرآة (الترجمة الجديدة تصير متاحة حتى مع نفاد الحصة)
+                    chapterMirror.upsertMirror(freshNovel._id.toString(), chapterNum, translatedText);
                     
                 } catch (fsSaveErr) {
                     throw new Error(`فشل الحفظ في Firestore: ${fsSaveErr.message}`);
@@ -1390,6 +1394,8 @@ if (jsonMatch) {
                         await firestore.collection('novels').doc(freshNovel._id.toString())
                             .collection('chapters').doc(chapterNum.toString())
                             .set({ content: translatedText }, { merge: true });
+                        // 🔥 مزامنة المرآة
+                        chapterMirror.upsertMirror(freshNovel._id.toString(), chapterNum, translatedText);
                         
                         const now = new Date();
                         const existingChapterIndex = freshNovel.chapters.findIndex(c => c.number === chapterNum);

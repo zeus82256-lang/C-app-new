@@ -19,6 +19,8 @@ const Novel = require('../models/novel.model.js');
 const NovelLibrary = require('../models/novelLibrary.model.js'); 
 const Comment = require('../models/comment.model.js');
 const Settings = require('../models/settings.model.js'); 
+// 🔥 مرآة محتوى الفصول (MongoDB + ذاكرة فورية) — ضد نفاد حصة Firestore
+const chapterMirror = require('../services/chapterMirror.service.js');
 
 // Helper to escape regex special characters
 function escapeRegExp(string) {
@@ -910,28 +912,24 @@ module.exports = function(app, verifyToken, upload) {
 
             let content = "لا يوجد محتوى.";
             
-            if (firestore) {
-                try {
-                    const docRef = firestore.collection('novels').doc(novelId).collection('chapters').doc(chapterMeta.number.toString());
-                    const docSnap = await docRef.get();
-                    if (docSnap.exists) {
-                        content = docSnap.data().content;
-                    } else {
-                        console.warn(`⚠️ Chapter content not found in Firestore for novel ${novelId}, chapter ${chapterMeta.number}`);
-                    }
-                } catch (firestoreError) {
-                    console.error("❌ Firestore Fetch Error:", firestoreError.message);
-                    if (firestoreError.message.includes("UNAUTHENTICATED")) {
-                        return res.status(500).json({ 
-                            message: "خطأ في الاتصال بقاعدة البيانات (غير مصرح). يرجى التأكد من إعدادات Firebase.",
-                            details: firestoreError.message 
-                        });
-                    }
-                    throw firestoreError;
+            // 🔥 القراءة عبر الطبقة الموحّدة (ذاكرة → Firestore → مرآة MongoDB)
+            // تصلح: RESOURCE_EXHAUSTED (نفاد حصة Firestore) الذي كان يفشل كل الفصول بـ HTTP 500
+            try {
+                const fetched = await chapterMirror.fetchChapterContent(firestore, novelId, chapterMeta.number);
+                if (fetched != null) content = fetched;
+            } catch (contentError) {
+                if (String(contentError?.message || '').includes('FIRESTORE_NOT_INITIALIZED')) {
+                    console.error("❌ Firestore is not initialized. Cannot fetch chapter content.");
+                    return res.status(500).json({ message: "قاعدة البيانات غير متصلة حالياً. يرجى مراجعة المسؤول." });
                 }
-            } else {
-                console.error("❌ Firestore is not initialized. Cannot fetch chapter content.");
-                return res.status(500).json({ message: "قاعدة البيانات غير متصلة حالياً. يرجى مراجعة المسؤول." });
+                if (chapterMirror.isFirestoreQuotaError(contentError)) {
+                    return res.status(503).json({
+                        message: "حصة قاعدة البيانات (Firestore) نفدت مؤقتاً وتُعاد تلقائياً منتصف الليل بتوقيت باسيفيك. الفصول المقروءة سابقاً تبقى متاحة من الذاكرة المؤقتة.",
+                        details: 'RESOURCE_EXHAUSTED'
+                    });
+                }
+                console.error("❌ Firestore Fetch Error:", contentError.message);
+                throw contentError;
             }
 
             // 🔥 CLEANER + SEPARATION LOGIC 🔥

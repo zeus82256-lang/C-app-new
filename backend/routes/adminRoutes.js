@@ -10,6 +10,8 @@ const { askGeminiWeb, GUEST_TOKEN_SENTINEL } = require('../services/geminiWeb.se
 const { askDeepSeek } = require('../services/deepseekAndroid.service.js');
 // 🔥 نظام إنشاء حسابات Qwen تلقائياً (منقول من qwen.py) — نفس السلوك المستخدم في مسار ترجمة الفصول
 const qwenAutoAccount = require('../services/qwenAutoAccount.service.js');
+// 🔥 مرآة محتوى الفصول (MongoDB) — مزامنة مسارات الكتابة مع شبكة أمان حصة Firestore
+const chapterMirror = require('../services/chapterMirror.service.js');
 
 // --- Config Imports ---
 let firestore, cloudinary;
@@ -786,6 +788,8 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         try {
             const { word } = req.body; 
             if (!word) return res.status(400).json({ message: "Word required" });
+            // 🔥 محتوى كل الفصول تغيّر → إبطال مرآة المحتوى كاملة (تُعاد البناء من القراءات)
+            chapterMirror.clearAllMirror();
 
             // 1. Save to Blacklist (GLOBAL)
             let settings = await getGlobalSettings();
@@ -850,6 +854,8 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         try {
             const index = parseInt(req.params.index);
             const { word } = req.body;
+            // 🔥 إبطال مرآة المحتوى (التنظيف يعاد على كل الفصول)
+            chapterMirror.clearAllMirror();
             
             let settings = await getGlobalSettings();
             if (settings && settings.globalBlocklist[index]) {
@@ -953,6 +959,8 @@ app.put('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
             // 1. حذف الفصول من Firestore (إن وجدت)
             if (firestore) {
                 try {
+                    // 🔥 إبطال مرآة محتوى هذه الرواية
+                    chapterMirror.clearNovelMirror(novelId);
                     const chaptersRef = firestore.collection('novels').doc(novelId).collection('chapters');
                     const snapshot = await chaptersRef.get();
                     
@@ -1004,6 +1012,8 @@ app.put('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
                 settings.globalBlocklist = settings.globalBlocklist.filter(w => w !== word);
                 await settings.save();
             }
+            // 🔥 إبطال مرآة المحتوى (التنظيف يخص كل الفصول)
+            chapterMirror.clearAllMirror();
             res.json({ message: "Removed from list" });
         } catch (e) {
             res.status(500).json({ error: e.message });
@@ -1530,6 +1540,8 @@ app.put('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
                                 content: chap.content,
                                 lastUpdated: new Date()
                             }, { merge: true });
+                        // 🔥 مزامنة المرآة
+                        chapterMirror.upsertMirror(novel._id.toString(), chap.number, chap.content);
                     }
                     
                     // Only add to MongoDB if novel is NOT private
@@ -1910,6 +1922,8 @@ app.post('/api/admin/chapters', verifyAdmin, async (req, res) => {
                     content,
                     lastUpdated: new Date()
                 });
+            // 🔥 مزامنة المرآة
+            chapterMirror.upsertMirror(novelId, number, content);
         }
 
         novel.chapters.push({
@@ -1951,6 +1965,8 @@ app.put('/api/admin/chapters/:novelId/:chapterNumber', verifyAdmin, async (req, 
             if (content) updateData.content = content;
             await firestore.collection('novels').doc(novelId).collection('chapters')
                 .doc(chapterNumber.toString()).update(updateData);
+            // 🔥 مزامنة المرآة (تعديل المحتوى)
+            if (content) chapterMirror.upsertMirror(novelId, chapterNumber, content);
         }
 
         await logScraper(`✅ تم تعديل الفصل ${chapterNumber}`, 'success');
@@ -1977,6 +1993,8 @@ app.delete('/api/admin/chapters/:novelId/:chapterNumber', verifyAdmin, async (re
         if (firestore) {
             await firestore.collection('novels').doc(novelId).collection('chapters')
                 .doc(chapterNumber.toString()).delete();
+            // 🔥 مزامنة المرآة
+            chapterMirror.deleteMirror(novelId, chapterNumber);
         }
 
         await logScraper(`🗑️ تم حذف الفصل ${chapterNumber} من ${novel.title}`, 'success');
@@ -2007,6 +2025,8 @@ app.post('/api/admin/chapters/batch-delete', verifyAdmin, async (req, res) => {
                 batch.delete(chaptersRef.doc(num.toString()));
             });
             await batch.commit();
+            // 🔥 مزامنة المرآة
+            chapterNumbers.forEach(num => chapterMirror.deleteMirror(novelId, num));
         }
 
         await logScraper(`🗑️ تم حذف ${chapterNumbers.length} فصل من ${novel.title}`, 'success');
@@ -2072,6 +2092,8 @@ app.post('/api/admin/chapters/bulk-upload', verifyAdmin, uploadZip.single('zip')
                             content,
                             lastUpdated: new Date()
                         });
+                    // 🔥 مزامنة المرآة
+                    chapterMirror.upsertMirror(novelId, chapterNumber, content);
                 }
 
                 novel.chapters.push({
