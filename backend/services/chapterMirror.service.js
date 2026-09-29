@@ -7,6 +7,8 @@
 // ترجمة) تُبقي المرآة متزامنة عبر هذه الدوال — كلها fire & forget بلا تعطيل
 // الطلب الأصلي ولا إسقاطه إن فشلت المرآة (المرآة شبكة أمان فقط).
 const ChapterContentMirror = require('../models/chapterContentMirror.model.js');
+// كاش قائمة الفصول المدموجة — يُبطل تلقائياً مع كل كتابة فصل (كل مسارات الكتابة تمر هنا)
+const chaptersListCache = require('./chaptersListCache.service.js');
 
 // ---------- الذاكرة الفورية ----------
 const memCache = new Map(); // `${novelId}:${number}` -> { content, at }
@@ -43,6 +45,7 @@ function memClearAll() {
 // ---------- عمليات المرآة (كلها آمنة الفشل) ----------
 function upsertMirror(novelId, number, content) {
     memSet(novelId, number, content);
+    chaptersListCache.invalidate(novelId);
     return ChapterContentMirror.updateOne(
         { novelId: String(novelId), number: Number(number) },
         { content: String(content || ''), updatedAt: new Date() },
@@ -52,18 +55,21 @@ function upsertMirror(novelId, number, content) {
 
 function deleteMirror(novelId, number) {
     memDelete(novelId, number);
+    chaptersListCache.invalidate(novelId);
     return ChapterContentMirror.deleteOne({ novelId: String(novelId), number: Number(number) })
         .catch((e) => console.error('❌ mirror delete failed:', e.message));
 }
 
 function clearNovelMirror(novelId) {
     memClearNovel(novelId);
+    chaptersListCache.invalidate(novelId);
     return ChapterContentMirror.deleteMany({ novelId: String(novelId) })
         .catch((e) => console.error('❌ mirror clear-novel failed:', e.message));
 }
 
 function clearAllMirror() {
     memClearAll();
+    chaptersListCache.invalidateAll();
     return ChapterContentMirror.deleteMany({})
         .catch((e) => console.error('❌ mirror clear-all failed:', e.message));
 }
@@ -95,6 +101,7 @@ async function fetchChapterContent(firestore, novelId, chapterNumber) {
             { content, updatedAt: new Date() },
             { upsert: true }
         ).catch((e) => console.error('❌ mirror upsert failed:', e.message));
+        // قراءة المحتوى لا تغيّر قائمة الفصول — لا إبطال هنا عمداً
         return content;
     } catch (firestoreError) {
         if (isFirestoreQuotaError(firestoreError)) {

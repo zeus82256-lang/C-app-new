@@ -21,6 +21,8 @@ const Comment = require('../models/comment.model.js');
 const Settings = require('../models/settings.model.js'); 
 // 🔥 مرآة محتوى الفصول (MongoDB + ذاكرة فورية) — ضد نفاد حصة Firestore
 const chapterMirror = require('../services/chapterMirror.service.js');
+// 🔥 كاش قائمة الفصول المدموجة — صفحات/ترتيب/بحث بصفر استهلاك قاعدة بيانات
+const chaptersListCache = require('../services/chaptersListCache.service.js');
 
 // Helper to escape regex special characters
 function escapeRegExp(string) {
@@ -760,79 +762,93 @@ module.exports = function(app, verifyToken, upload) {
             const search = String(req.query.search || '').trim();
 
             const role = getUserRole(req);
-
-            // جلب بيانات الرواية الأساسية
-            const novel = await Novel.findById(id).select('status chapters sourceChaptersCount');
-            if (!novel) return res.status(404).json({ message: 'Novel not found' });
+            const isAdmin = role === 'admin';
 
             // -----------------------------------------------------------------
-            // التعديل الجديد: دمج الفصول من MongoDB وFirestore
+            // 🔥🔥🔥 كاش القائمة المدموجة (سرعة الخارق + صفر استهلاك Firestore) 🔥🔥🔥
+            // القائمة المدموجة/المرتبة/المصفاة تُبنى مرة واحدة لكل (رواية×دور)
+            // وتُحفظ دقيقة كاملة. كل طلب لاحق (صفحات/ترتيب/بحث) يشتغل على النسخة
+            // المخزنة — يعني انتقال المستخدم بين الصفحات لا يكلف قاعدة البيانات
+            // ولا Firestore شيئاً مهما كان عدد المستخدمين المتزامنين.
             // -----------------------------------------------------------------
-            let allChapters = [];
+            let uniqueChapters = chaptersListCache.get(id, isAdmin);
 
-            // 1. الفصول من MongoDB (بيانات وصفية فقط)
-            if (novel.chapters && novel.chapters.length > 0) {
-                const mongoChapters = novel.chapters.map(c => ({
-                    number: c.number,
-                    title: c.title,
-                    createdAt: c.createdAt,
-                    views: c.views || 0,
-                    source: 'mongodb'
-                }));
-                allChapters = allChapters.concat(mongoChapters);
-            }
+            if (!uniqueChapters) {
+                // جلب بيانات الرواية الأساسية
+                const novel = await Novel.findById(id).select('status chapters sourceChaptersCount');
+                if (!novel) return res.status(404).json({ message: 'Novel not found' });
 
-            // 2. الفصول من Firestore (إذا كان متصلاً)
-            if (firestore) {
-                try {
-                    const chaptersRef = firestore.collection('novels').doc(id).collection('chapters');
-                    const snapshot = await chaptersRef.get();
+                // دمج الفصول من MongoDB وFirestore
+                let allChapters = [];
 
-                    const firestoreChapters = [];
-                    snapshot.forEach(doc => {
-                        const data = doc.data();
-                        const number = parseInt(doc.id);
-                        if (!isNaN(number)) {
-                            firestoreChapters.push({
-                                number: number,
-                                title: data.title || `الفصل ${number}`,
-                                createdAt: data.lastUpdated ? data.lastUpdated.toDate() : new Date(),
-                                views: 0,
-                                source: 'firestore'
-                            });
-                        }
-                    });
-                    allChapters = allChapters.concat(firestoreChapters);
-                } catch (firestoreError) {
-                    console.error("Firestore fetch error (ignoring):", firestoreError.message);
-                    // نتجاهل الخطأ ونكمل بالفصول المتاحة
+                // 1. الفصول من MongoDB (بيانات وصفية فقط)
+                if (novel.chapters && novel.chapters.length > 0) {
+                    const mongoChapters = novel.chapters.map(c => ({
+                        number: c.number,
+                        title: c.title,
+                        createdAt: c.createdAt,
+                        views: c.views || 0,
+                        source: 'mongodb'
+                    }));
+                    allChapters = allChapters.concat(mongoChapters);
                 }
-            }
 
-            // 3. إزالة التكرار (الأفضلية لبيانات MongoDB لأنها أحدث)
-            const uniqueChaptersMap = new Map();
-            allChapters.forEach(ch => {
-                const existing = uniqueChaptersMap.get(ch.number);
-                if (!existing || ch.source === 'mongodb') {
-                    uniqueChaptersMap.set(ch.number, ch);
+                // 2. الفصول من Firestore (إذا كان متصلاً)
+                if (firestore) {
+                    try {
+                        const chaptersRef = firestore.collection('novels').doc(id).collection('chapters');
+                        const snapshot = await chaptersRef.get();
+
+                        const firestoreChapters = [];
+                        snapshot.forEach(doc => {
+                            const data = doc.data();
+                            const number = parseInt(doc.id);
+                            if (!isNaN(number)) {
+                                firestoreChapters.push({
+                                    number: number,
+                                    title: data.title || `الفصل ${number}`,
+                                    createdAt: data.lastUpdated ? data.lastUpdated.toDate() : new Date(),
+                                    views: 0,
+                                    source: 'firestore'
+                                });
+                            }
+                        });
+                        allChapters = allChapters.concat(firestoreChapters);
+                    } catch (firestoreError) {
+                        console.error("Firestore fetch error (ignoring):", firestoreError.message);
+                        // نتجاهل الخطأ ونكمل بالفصول المتاحة
+                    }
                 }
-            });
-            let uniqueChapters = Array.from(uniqueChaptersMap.values());
 
-            // 4. ترتيب حسب رقم الفصل
-            uniqueChapters.sort((a, b) => a.number - b.number);
-            if (sortOrder === -1) uniqueChapters.reverse();
+                // 3. إزالة التكرار (الأفضلية لبيانات MongoDB لأنها أحدث)
+                const uniqueChaptersMap = new Map();
+                allChapters.forEach(ch => {
+                    const existing = uniqueChaptersMap.get(ch.number);
+                    if (!existing || ch.source === 'mongodb') {
+                        uniqueChaptersMap.set(ch.number, ch);
+                    }
+                });
+                uniqueChapters = Array.from(uniqueChaptersMap.values());
 
-            // 5. تطبيق التصفية (إخفاء الفصول المخفية لغير الأدمن)
-            if (role !== 'admin') {
-                uniqueChapters = uniqueChapters.filter(ch => !isChapterHidden(ch.title));
+                // 4. ترتيب حسب رقم الفصل (تصاعدي دائماً في الكاش — الاتجاه يُطبق لاحقاً)
+                uniqueChapters.sort((a, b) => a.number - b.number);
+
+                // 5. تطبيق التصفية (إخفاء الفصول المخفية لغير الأدمن)
+                if (!isAdmin) {
+                    uniqueChapters = uniqueChapters.filter(ch => !isChapterHidden(ch.title));
+                }
+
+                chaptersListCache.set(id, isAdmin, uniqueChapters);
             }
 
-            // 🔥 5.5 البحث: برقم الفصل (تطابق جزئي) أو بعنوانه (جزئي غير حساس للحالة)
+            // 6. الاتجاه + البحث + التقسيم — كلها على النسخة المخزنة (رخيصة جداً)
+            let resultChapters = sortOrder === -1 ? uniqueChapters.slice().reverse() : uniqueChapters;
+
+            // 🔥 البحث: برقم الفصل (تطابق جزئي) أو بعنوانه (جزئي غير حساس للحالة)
             if (search) {
                 const q = search.toLowerCase();
                 const qNum = String(parseInt(search, 10));
-                uniqueChapters = uniqueChapters.filter(ch => {
+                resultChapters = resultChapters.filter(ch => {
                     const numStr = String(ch.number);
                     const numMatch = !isNaN(parseInt(search, 10)) && (numStr === qNum || numStr.startsWith(qNum));
                     const titleMatch = String(ch.title || '').toLowerCase().includes(q);
@@ -840,14 +856,22 @@ module.exports = function(app, verifyToken, upload) {
                 });
             }
 
-            const totalMatches = uniqueChapters.length;
+            const totalMatches = resultChapters.length;
             const totalPages = Math.ceil(totalMatches / limit) || 1;
 
-            // 6. التقسيم (Pagination)
-            const paginatedChapters = uniqueChapters.slice(skip, skip + limit);
+            // التقسيم (Pagination)
+            const paginatedChapters = resultChapters.slice(skip, skip + limit);
 
-            // 7. إزالة حقل `source` قبل الإرسال للواجهة
+            // إزالة حقل `source` قبل الإرسال للواجهة
             const responseChapters = paginatedChapters.map(({ source, ...rest }) => rest);
+
+            // 🔥 ترويسات تخزين مؤقت على مستوى المتصفح/CDN — طلبات الضيوف تتكرر
+            // بكثرة فتخدمها الذاكرة أو الـ CDN دون وصول للخادم أصلاً.
+            if (isAdmin) {
+                res.set('Cache-Control', 'private, no-store');
+            } else {
+                res.set('Cache-Control', 'public, max-age=60, stale-while-revalidate=300');
+            }
 
             // 🔥 Response now carries paging metadata (totalPages computed AFTER
             // search filtering so the novel page pagination stays correct).
