@@ -197,8 +197,8 @@ module.exports = function(app, verifyToken) {
     });
 
     app.get('/auth/google/callback', async (req, res) => {
+        const { code, state } = req.query;
         try {
-            const { code, state } = req.query;
             const { tokens } = await oauth2Client.getToken(code);
             oauth2Client.setCredentials(tokens);
             const userInfoResponse = await oauth2Client.request({ url: 'https://www.googleapis.com/oauth2/v3/userinfo' });
@@ -242,11 +242,20 @@ module.exports = function(app, verifyToken) {
             } else if (state === 'mobile' || state.startsWith('aplcionszeus://')) {
                 const deepLink = state === 'mobile' ? `aplcionszeus://auth?token=${token}` : `${state}?token=${token}`;
                 res.redirect(deepLink);
+            } else if (state && /^https?:\/\//i.test(state)) {
+                // 🌐 WEB: return to the exact site page that started the login
+                // (e.g. https://site/auth/google/callback) with the JWT appended.
+                const separator = state.includes('?') ? '&' : '?';
+                res.redirect(`${state}${separator}token=${token}`);
             } else {
                 res.redirect(`https://c-production-6948.up.railway.app/?token=${token}`);
             }
         } catch (error) {
             console.error('Auth error:', error);
+            if (state && /^https?:\/\//i.test(state)) {
+                const separator = state.includes('?') ? '&' : '?';
+                return res.redirect(`${state}${separator}auth_error=true`);
+            }
             res.redirect('https://c-production-6948.up.railway.app/?auth_error=true');
         }
     });
