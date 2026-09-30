@@ -3,7 +3,8 @@
  *   POST /api/security/captcha  → تحقق Turnstile وإصدار رمز مرور مؤقت (عام)
  *   GET  /api/security/honeypot → فخ السكرابرز — حظر فوري (عام، يُفهرس عمداً)
  *   GET  /api/admin/security/bans  → قائمة الحظر (admin)
- *   POST /api/admin/security/unban → فك حظر (admin)
+ *   POST /api/admin/security/unban → فك حظر عنوان واحد (admin)
+ *   POST /api/admin/security/unban-all → فك حظر الجميع (admin)
  *   GET  /api/admin/security/stats → إحصاءات (admin)
  */
 const security = require('../services/security.service');
@@ -41,6 +42,12 @@ module.exports = (app, verifyToken, verifyAdmin) => {
     if (!ip) return res.status(400).json({ message: 'ip مطلوب' });
     security.unbanIp(ip);
     res.json({ success: true });
+  });
+
+  // فك حظر جميع العناوين + مسح عدادات المخالفات (صفحة بيضاء فورية)
+  app.post('/api/admin/security/unban-all', verifyAdmin, async (req, res) => {
+    const removed = security.unbanAllIps();
+    res.json({ success: true, removed });
   });
 
   app.get('/api/admin/security/stats', verifyAdmin, async (req, res) => {
