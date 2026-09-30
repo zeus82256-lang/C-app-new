@@ -94,6 +94,13 @@ app.use(async (req, res, next) => {
     next();
 });
 
+// =========================================================
+// 🛡️ طبقة الحماية (قبل كل المسارات):
+// حظر IP مخالف + حدود معدل عام وفصول + فخ السكرابر
+// =========================================================
+const security = require('./services/security.service');
+app.use(security.securityMiddleware);
+
 // Middleware Definitions
 function verifyToken(req, res, next) {
     const authHeader = req.headers['authorization'];
@@ -136,6 +143,11 @@ require('./routes/titleGenRoutes')(app, verifyToken, verifyAdmin);
 
 // تحميل المسارات العامة
 require('./routes/publicRoutes')(app, verifyToken, upload);
+
+// 🛡️ مسارات الأمان + 📊 التحليلات + 🗺️ sitemap الديناميكي
+require('./routes/securityRoutes')(app, verifyToken, verifyAdmin);
+require('./routes/analyticsRoutes')(app, verifyToken, verifyAdmin);
+app.get('/api/sitemap', require('./routes/sitemapRoute'));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {

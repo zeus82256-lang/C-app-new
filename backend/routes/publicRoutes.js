@@ -655,11 +655,15 @@ module.exports = function(app, verifyToken, upload) {
                         lastChapterUpdate: 1,
                         createdAt: 1,
                         rating: 1,
+                        authorEmail: 1,
+                        authorId: 1,
                         // 🔥 CRITICAL FIX: Do NOT project chapters array.
                         // Calculate count database side
                         chaptersCount: { $size: { $ifNull: ["$chapters", []] } },
                         // Get only the LAST chapter for "Latest Updates"
-                        lastChapter: { $arrayElemAt: [ "$chapters", -1 ] } // Assuming chapters are sorted by push
+                        lastChapter: { $arrayElemAt: [ "$chapters", -1 ] }, // Assuming chapters are sorted by push
+                        // 🔥 آخر 5 فصول لقسم «آخر التحديثات» في الرئيسية
+                        recentChapters: { $slice: ["$chapters", -5] }
                     }
                 },
                 { $sort: sortStage },
