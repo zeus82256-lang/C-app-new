@@ -35,6 +35,7 @@ const windows = new Map();       // ip → { global: [ts], chapters: [ts], colle
 const bans = new Map();          // ip → { reason, until, requests }
 const violations = new Map();    // ip → [ts] أحداث تجاوز التهديدات (للتصعيد)
 const lastMinuteTotal = new Map(); // ip → count (لإحصاءات الأمان)
+const readerFlags = new Map();   // ip → { score, reasons, t } بلاغات نمط القراءة الآلي (من الموقع)
 
 const LIMITS = {
   global: { max: 240, windowMs: 60_000 },
@@ -54,6 +55,11 @@ const VIOLATION_WINDOW_MS = 15 * 60 * 1000;
 /** كم مخالفة تهدئة خلال نافذة الـ15د قبل اللجوء للحظر — رقم سخي عمداً:
  *  من يحترم Retry-After مرة واحدة لا يقترب منه أبداً. */
 const VIOLATIONS_FOR_BAN = 10;
+
+/** صلاحية بلاغ نمط القراءة الآلي (يأتي من موقع الويب — readerRisk) */
+const READER_FLAG_TTL_MS = 30 * 60 * 1000;
+/** معامل شد ميزانية الفصول للعناوين المرصودة بنمط آلي (نصف الميزانية) */
+const FLAGGED_CAP_FACTOR = 0.5;
 
 const hasTurnstile = () => !!process.env.TURNSTILE_SECRET;
 const CHAPTER_RE = /^\/api\/novels\/[^/]+\/chapters\//;
@@ -185,9 +191,16 @@ function securityMiddleware(req, res, next) {
   const isChapterReq = CHAPTER_RE.test(req.path);
   if (isChapterReq) {
     const batch = req.headers['x-moon-batch'] === 'offline-download';
-    const cap = identity?.isUser
+    let cap = identity?.isUser
       ? (batch ? LIMITS.chapters.batchUser : LIMITS.chapters.user)
       : (batch ? LIMITS.chapters.batchGuest : LIMITS.chapters.guest);
+
+    // 🎫 جلسة قراءة صالحة (متصفح حقيقي يشغّل JS) → ميزانية كاملة
+    const readerSessionOk = hasValidReaderSession(req.headers['x-reader-session']);
+    // 🛡️ بلاغ نمط آلي من موقع الويب (فصول متتالية بسرعة غير بشرية) → شد تدريجي
+    // (نصف الميزانية) — خطوة وسيطة لطيفة قبل التهدئة، لا حظر ولا رفض.
+    const flagged = isReaderFlagged(ip);
+    if (flagged && !readerSessionOk && !batch) cap = Math.max(8, Math.round(cap * FLAGGED_CAP_FACTOR));
 
     trimWindow(w.chapters, LIMITS.global.windowMs);
     w.chapters.push(Date.now());
@@ -325,6 +338,49 @@ function checkCaptchaPass(passToken) {
   }
 }
 
+// ─── جلسة القراءة (على نمط reader-session في قراءة مجرة الروايات) ───
+// تذكرة موقّعة قصيرة العمر يصدرها الخادم للمتصفح الحقيقي (يشغّل JS) وتُرفق
+// مع طلبات الفصول. **إشارة وليست قفل** — التطبيق والعملاء المشروعون بدون
+// تذكرة لا يُرفضون أبداً؛ غيابها فقط إشارة مخاطرة عند السرعات العالية.
+
+/** إصدار تذكرة جلسة قراءة (10 دقائق) */
+function issueReaderSession(ip) {
+  return jwt.sign({ kind: 'reader-session', ip }, process.env.JWT_SECRET || 'moon-secret', { expiresIn: '10m' });
+}
+
+/** هل تذكرة جلسة القراءة صالحة؟ */
+function hasValidReaderSession(token) {
+  if (!token || typeof token !== 'string') return false;
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'moon-secret');
+    return decoded.kind === 'reader-session';
+  } catch {
+    return false;
+  }
+}
+
+// ─── بلاغات نمط القراءة الآلي (من موقع الويب — readerRisk) ───
+
+/** تسجيل بلاغ: الموقع رصد 8+ فصول متتالية ببقاء قصير جداً (نمط سحب آلي) */
+function recordReaderFlag(ip, score, reasons) {
+  readerFlags.set(ip, {
+    score: Math.max(0, Math.min(1000, Number(score) || 100)),
+    reasons: Array.isArray(reasons) ? reasons.slice(0, 6).map(String) : [],
+    t: Date.now(),
+  });
+}
+
+/** هل العنوان يحمل بلاغاً حياً؟ */
+function isReaderFlagged(ip) {
+  const flag = readerFlags.get(ip);
+  if (!flag) return false;
+  if (Date.now() - flag.t > READER_FLAG_TTL_MS) {
+    readerFlags.delete(ip);
+    return false;
+  }
+  return true;
+}
+
 /** إحصاءات الأمان للوحة الإدارة */
 function securityStats() {
   let requestsLastMinute = 0;
@@ -341,6 +397,7 @@ function securityStats() {
   return {
     bannedIps: bans.size,
     trackedIps: windows.size,
+    flaggedReaders: readerFlags.size,
     requestsLastMinute,
     throttlesLastMinute,
     captchaChallenges: hasTurnstile() ? 'Turnstile مفعّل' : 'تهدئة زمنية',
@@ -371,6 +428,10 @@ module.exports = {
   identify,
   issueCaptchaPass,
   checkCaptchaPass,
+  issueReaderSession,
+  hasValidReaderSession,
+  recordReaderFlag,
+  isReaderFlagged,
   securityStats,
   listBans,
   unbanIp,
