@@ -1074,7 +1074,10 @@ module.exports = function(app, verifyToken, upload) {
                     lastChapterId: lastChapterId || 0,
                     readChapters: lastChapterId ? [lastChapterId] : [], 
                     lastChapterTitle,
-                    progress: lastChapterId ? Math.round((1 / totalChapters) * 100) : 0
+                    // 🔧 حد أدنى 1% مع أول فصل يُقرأ — روايات المئات/الآلاف من الفصول
+                    // كانت تُنتج round(1/2504*100)=0 فتُحجب من السجل (progress>0) وتظهر
+                    // وكأن القراءة من الموقع لا تتزامن إطلاقاً
+                    progress: lastChapterId ? Math.max(1, Math.round((1 / totalChapters) * 100)) : 0
                 });
                 if (isFavorite) isNewFavorite = true;
             } else {
@@ -1091,7 +1094,8 @@ module.exports = function(app, verifyToken, upload) {
                     libraryItem.lastChapterTitle = lastChapterTitle;
                     libraryItem.readChapters.addToSet(lastChapterId);
                     const readCount = libraryItem.readChapters.length;
-                    libraryItem.progress = Math.min(100, Math.round((readCount / totalChapters) * 100));
+                    // 🔧 حد أدنى 1% — نفس سبب الفرع أعلاه (روايات طويلة جداً)
+                    libraryItem.progress = Math.min(100, Math.max(1, Math.round((readCount / totalChapters) * 100)));
                 }
                 libraryItem.lastReadAt = new Date();
             }
@@ -1131,7 +1135,10 @@ module.exports = function(app, verifyToken, upload) {
 
             let query = { user: targetId };
             if (type === 'favorites') query.isFavorite = true;
-            else if (type === 'history') query.progress = { $gt: 0 };
+            // 🔧 السجل: أي عنصر له آخر فصل مقروء (>0) يُعد تاريخاً — الاعتماد على
+            // progress>0 وحده كان يُسقط أول قراءات الروايات الطويلة (2500+ فصل
+            // = 0.2% تُقرّب إلى 0) فبدت القراءة من الموقع «لا تتزامن»
+            else if (type === 'history') query.$or = [{ progress: { $gt: 0 } }, { lastChapterId: { $gt: 0 } }];
             
             const items = await NovelLibrary.find(query)
                 .sort({ lastReadAt: -1 })
