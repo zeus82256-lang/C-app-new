@@ -69,6 +69,10 @@ RETURN ONLY JSON:` },
     // 🔥 ScraperAPI keys for the novel scraper service (multi-key rotation)
     scraperApiKeys: [{ type: String }],
 
+    // 🍪 كوكيز TomatoMTL (حساب قارئ tomatomtl.com) — حقل واجهة السكرابر.
+    // فارغ = السكرابر يستخدم الكوكيز الثابتة بداخله (remember_* طويل الأمد).
+    tomatomtlCookies: { type: String, default: '' },
+
     // 🔥 Multi-provider translation support (DeepSeek / Qwen / Gemini / OpenRouter / Cloudflare / custom)
     translationProviders: [{
         providerId: { type: String, required: true }, // e.g., 'gemini', 'openrouter', 'deepseek_...', 'qwen_...', 'custom1'

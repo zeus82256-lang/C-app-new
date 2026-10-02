@@ -17,11 +17,15 @@ import { useToast } from '../context/ToastContext';
 import api from '../services/api';
 import { useFocusEffect } from '@react-navigation/native';
 
-// 🔹 شاشة إدارة مفاتيح ScraperAPI
-// كل مفتاح في سطر مستقل (أو مفصول بفواصل) — تُحفظ في الخادم وتُدفع
+// 🔹 شاشة إدارة مفاتيح ScraperAPI + كوكيز TomatoMTL
+// المفاتيح: كل مفتاح في سطر مستقل (أو مفصول بفواصل) — تُحفظ في الخادم وتُدفع
 // تلقائياً لخدمة السكرابر، مع عرض حالة الرصيد لكل مفتاح.
+// كوكيز TomatoMTL: جلسة حساب tomatomtl.com لسحب رواياته (الواجهة نفسها في الموقع والتطبيق)
+// — الحقل الفارغ يعني استخدام الكوكيز الثابتة داخل كود السكرابر.
 
 const EXAMPLE_KEYS = 'مثال:\n6ac34ae7f246b2588b5a5fbd45899a92\nd8f2a1c3e4b5a6978f0d2c3b4a5f6e7d\n1a2b3c4d5e6f70819a2b3c4d5e6f7081';
+
+const MT_EXAMPLE = 'مثال (ترويسة Cookie كاملة من المتصفح):\ncf_clearance=alvbHRPkSSaWrtoOVhRFGrz8P_tbInkp…; _ga=GA1.1.1632139315.1790935815; translator_button=en; remember_6TpGq1xR_F05q3tke-JkBw=wJwdY-taHOAxK15ymm9RarLW%7E5pnIX134L0vGDX5N3ROrYxcV_4xWJFLS; PHPSESSID=t349n0dhnsm74n6mqasln6rvne';
 
 const GlassCard = ({ children, style }) => (
   <View style={[styles.glassCard, style]}>{children}</View>
@@ -34,6 +38,11 @@ export default function ScraperKeysScreen({ navigation }) {
   const [saving, setSaving] = useState(false);
   const [checking, setChecking] = useState(false);
   const [statuses, setStatuses] = useState([]);
+  // 🍪 كوكيز TomatoMTL
+  const [mtText, setMtText] = useState('');
+  const [mtSaving, setMtSaving] = useState(false);
+  const [mtChecking, setMtChecking] = useState(false);
+  const [mtResult, setMtResult] = useState(null);
 
   const loadKeys = async () => {
     setLoading(true);
@@ -41,6 +50,8 @@ export default function ScraperKeysScreen({ navigation }) {
       const res = await api.get('/api/admin/scraper-keys');
       const keys = res.data?.keys || [];
       setText(keys.join('\n'));
+      setMtText(res.data?.tomatomtlCookies || '');
+      setMtResult(null);
     } catch (e) {
       console.log('load keys failed:', e.message);
     } finally {
@@ -85,6 +96,34 @@ export default function ScraperKeysScreen({ navigation }) {
       showToast('فشل فحص الأرصدة', 'error');
     } finally {
       setChecking(false);
+    }
+  };
+
+  // 🍪 حفظ كوكيز TomatoMTL (فارغ = إعادة للثابتة بالكود)
+  const handleSaveCookies = async () => {
+    setMtSaving(true);
+    try {
+      const res = await api.post('/api/admin/scraper-keys', { tomatomtlCookies: mtText.trim() });
+      const t = res.data?.tomatomtl;
+      showToast(t?.cleared ? 'فُرِّغت الكوكيز — يعود السكرابر للثابتة بالكود' : 'حُفظت الكوكيز وأُرسلت للسكرابر', 'success');
+    } catch (e) {
+      showToast(e.response?.data?.error || 'فشل حفظ الكوكيز', 'error');
+    } finally {
+      setMtSaving(false);
+    }
+  };
+
+  // 🍪 فحص حي: هل جلسة الحساب تعمل فعلاً من السكرابر؟
+  const handleCheckSession = async () => {
+    setMtChecking(true);
+    setMtResult(null);
+    try {
+      const res = await api.post('/api/admin/scraper-keys/check-tomatomtl', {});
+      setMtResult(res.data || { ok: false, message: 'رد غير متوقع' });
+    } catch (e) {
+      setMtResult({ ok: false, message: e.response?.data?.message || 'فشل الفحص' });
+    } finally {
+      setMtChecking(false);
     }
   };
 
@@ -196,6 +235,83 @@ export default function ScraperKeysScreen({ navigation }) {
                 {statuses.map((s, i) => renderStatus({ item: s, index: i }))}
               </View>
             )}
+
+            {/* 🍪 كوكيز TomatoMTL — نفس واجهة الموقع تماماً */}
+            <GlassCard style={styles.infoCard}>
+              <View style={styles.infoRow}>
+                <Ionicons name="nutrition" size={18} color="#ff6b6b" />
+                <Text style={styles.infoTitle}>كوكيز TomatoMTL — حساب القراءة</Text>
+              </View>
+              <Text style={styles.infoText}>
+                موقع TomatoMTL يتطلب حساباً لقراءة الفصول — السكرابر يستخدم كوكيز حسابك للمسح. المهم بين الكوكيز ثلاثة فقط والبقية (إعلانات/تحليلات) تُتجاهل تلقائياً:{'\n'}
+                1) remember_... = «تذكرني» يصلح ≈ 5 سنوات — هو الموضوع ثابتاً في كود السكرابر.{'\n'}
+                2) PHPSESSID = جلسة قصيرة العمر (ساعات) — إن انتهى يعيد remember_ الدخول تلقائياً.{'\n'}
+                3) cf_clearance = حماية Cloudflare قصيرة ومرتبطة بجهازك/IP — جدّدها من هنا متى توقفت الجلسة.{'\n\n'}
+                أسهل طريقة: افتح tomatomtl.com مسجلاً الدخول ← F12 ← Network ← اضغط أي طلب ← انسخ قيمة ترويسة «cookie» كاملة والصقها هنا (كل الكوكيز معاً).{'\n'}
+                ترك الحقل فارغاً + حفظ = استخدام الكوكيز الثابتة في كود السكرابر.
+              </Text>
+              <View style={styles.envBox}>
+                <Text style={styles.envText}>{MT_EXAMPLE}</Text>
+              </View>
+            </GlassCard>
+
+            <GlassCard style={styles.inputCard}>
+              <Text style={styles.inputLabel}>ترويسة الكوكيز (سطر واحد):</Text>
+              <TextInput
+                style={styles.input}
+                multiline
+                textAlignVertical="top"
+                placeholder={MT_EXAMPLE}
+                placeholderTextColor="#555"
+                value={mtText}
+                onChangeText={setMtText}
+                autoCapitalize="none"
+                autoCorrect={false}
+                keyboardType="ascii-capable"
+              />
+              <View style={styles.mtBtnRow}>
+                <TouchableOpacity
+                  style={[styles.saveBtn, { flex: 1 }, mtSaving && styles.disabledBtn]}
+                  onPress={handleSaveCookies}
+                  disabled={mtSaving}
+                >
+                  {mtSaving ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <>
+                      <Ionicons name="cloud-upload" size={18} color="#fff" />
+                      <Text style={styles.saveBtnText}>حفظ وإرسال للسكرابر</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.checkBtn, mtChecking && styles.disabledBtn]}
+                  onPress={handleCheckSession}
+                  disabled={mtChecking}
+                >
+                  {mtChecking ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <>
+                      <Ionicons name="pulse" size={18} color="#fff" />
+                      <Text style={styles.saveBtnText}>فحص الجلسة</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
+              {mtResult && (
+                <View style={[styles.mtResultBox, { borderColor: mtResult.ok ? 'rgba(74,222,128,0.5)' : 'rgba(248,113,113,0.5)' }]}>
+                  <Ionicons
+                    name={mtResult.ok ? 'checkmark-circle' : 'alert-circle'}
+                    size={18}
+                    color={mtResult.ok ? '#4ade80' : '#f87171'}
+                  />
+                  <Text style={[styles.mtResultText, { color: mtResult.ok ? '#4ade80' : '#f87171' }]}>
+                    {mtResult.message}
+                  </Text>
+                </View>
+              )}
+            </GlassCard>
           </ScrollView>
         )}
       </SafeAreaView>
@@ -260,6 +376,29 @@ const styles = StyleSheet.create({
   },
   disabledBtn: { opacity: 0.5 },
   saveBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 14 },
+
+  mtBtnRow: { marginTop: 12, flexDirection: 'row', gap: 10 },
+  checkBtn: {
+    backgroundColor: '#374151',
+    borderRadius: 12,
+    paddingVertical: 13,
+    paddingHorizontal: 16,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 8,
+  },
+  mtResultBox: {
+    marginTop: 12,
+    borderWidth: 1,
+    borderRadius: 10,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    padding: 12,
+    flexDirection: 'row-reverse',
+    alignItems: 'flex-start',
+    gap: 8,
+  },
+  mtResultText: { flex: 1, fontSize: 12, lineHeight: 18, textAlign: 'right' },
 
   sectionTitle: { color: '#fff', fontSize: 14, fontWeight: 'bold', marginBottom: 10, textAlign: 'right' },
   statusCard: {

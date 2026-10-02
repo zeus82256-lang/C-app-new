@@ -1307,6 +1307,30 @@ app.put('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
         }
     };
 
+    // 🍪 تنقية كوكيز TomatoMTL: ترويسة Cookie واحدة — تُقبل فارغة (إعادة للثابتة بالكود)
+    const _sanitizeTomatomtlCookies = (raw) => {
+        let v = String(raw ?? '').replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+        if (!v) return { value: '' };
+        v = v.replace(/\s*;\s*/g, '; ').replace(/;\s*$/, '');
+        if (v.length > 8000) return { error: 'ترويسة الكوكيز أطول من اللازم — الصق قيمة ترويسة Cookie واحدة فقط من المتصفح.' };
+        if (/[\u0000-\u001f\u007f]/.test(v)) return { error: 'الكوكيز يجب أن تكون ترويسة واحدة بلا محارف تحكم.' };
+        if (!/PHPSESSID=/i.test(v) && !/remember_[A-Za-z0-9_-]+=/i.test(v)) {
+            return { error: 'لا توجد جلسة حساب في الكوكيز — يجب أن تحتوي PHPSESSID= أو remember_...= من tomatomtl.com بعد تسجيل الدخول.' };
+        }
+        return { value: v };
+    };
+
+    const _pushCookiesToScraper = async (cookies) => {
+        try {
+            const r = await axios.post(`${SCRAPER_SERVICE_URL}/tomatomtl/cookies`,
+                { cookies },
+                { headers: { 'Authorization': SCRAPER_API_SECRET, 'Content-Type': 'application/json' }, timeout: 20000 });
+            return { pushed: true, message: r.data && r.data.message };
+        } catch (e) {
+            return { pushed: false, message: e.message };
+        }
+    };
+
     // GET: قراءة المفاتيح (المشرف بالتوكن أو السكرابر بالسري)
     app.get('/api/admin/scraper-keys', async (req, res, next) => {
         const secret = req.headers['authorization'] || req.headers['x-api-secret'];
@@ -1316,31 +1340,50 @@ app.put('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
         try {
             let settings = await Settings.findOne();
             if (!settings) settings = await Settings.create({});
-            res.json({ keys: settings.scraperApiKeys || [] });
+            res.json({ keys: settings.scraperApiKeys || [], tomatomtlCookies: settings.tomatomtlCookies || '' });
         } catch (e) {
             res.status(500).json({ error: e.message });
         }
     });
 
-    // POST: حفظ المفاتيح + دفعها للسكرابر + فحص أرصدة كل مفتاح
+    // POST: حفظ المفاتيح و/أو كوكيز TomatoMTL + دفعهما للسكرابر + فحص أرصدة المفاتيح
+    // (المفتاحان قديمان: {keys} وحده يعمل كما كان — والجديد {tomatomtlCookies} أو معاً)
     app.post('/api/admin/scraper-keys', verifyAdmin, async (req, res) => {
         try {
-            const { keys } = req.body || {};
-            const clean = _sanitizeScraperKeys(keys);
-            if (clean.length === 0) {
-                return res.status(400).json({ error: 'لا يوجد أي مفتاح صالح — تأكد أن كل مفتاح في سطر مستقل (أو مفصول بفواصل) وأن طوله صحيح.' });
-            }
+            const { keys, tomatomtlCookies } = req.body || {};
             let settings = await Settings.findOne();
             if (!settings) settings = await Settings.create({});
-            settings.scraperApiKeys = clean;
-            await settings.save();
+            const out = {};
 
-            // دفع فوري للسكرابر (إن فشل لا يمنع الحفظ — السكرابر يسحبها لاحقاً بنفسه)
-            const push = await _pushKeysToScraper(clean);
-            const statuses = await Promise.all(clean.map(_checkScraperApiKey));
-            await logScraper(`🛰️ تم تحديث مفاتيح ScraperAPI: ${clean.length} مفتاح(مفاتيح) صالح` + (push.pushed ? ' وتم إرسالها للسكرابر.' : ' (فشل الإرسال للسكرابر — سيسحبها تلقائياً لاحقاً).'), 'success');
+            if (keys !== undefined && keys !== null && String(Array.isArray(keys) ? keys.join(',') : keys).trim() !== '') {
+                const clean = _sanitizeScraperKeys(keys);
+                if (clean.length === 0) {
+                    return res.status(400).json({ error: 'لا يوجد أي مفتاح صالح — تأكد أن كل مفتاح في سطر مستقل (أو مفصول بفواصل) وأن طوله صحيح.' });
+                }
+                settings.scraperApiKeys = clean;
+                await settings.save();
+                const push = await _pushKeysToScraper(clean);
+                const statuses = await Promise.all(clean.map(_checkScraperApiKey));
+                await logScraper(`🛰️ تم تحديث مفاتيح ScraperAPI: ${clean.length} مفتاح(مفاتيح) صالح` + (push.pushed ? ' وتم إرسالها للسكرابر.' : ' (فشل الإرسال للسكرابر — سيسحبها تلقائياً لاحقاً).'), 'success');
+                out.saved = clean.length;
+                out.push = push;
+                out.statuses = statuses;
+            }
 
-            res.json({ saved: clean.length, push, statuses });
+            if (tomatomtlCookies !== undefined && tomatomtlCookies !== null) {
+                const c = _sanitizeTomatomtlCookies(tomatomtlCookies);
+                if (c.error) return res.status(400).json({ error: c.error });
+                settings.tomatomtlCookies = c.value;
+                await settings.save();
+                const pushC = await _pushCookiesToScraper(c.value);
+                await logScraper('🍅 تم تحديث كوكيز TomatoMTL' + (c.value ? ' وتم إرسالها للسكرابر.' : ' — إعادة للكوكيز الثابتة بالكود.') + (pushC.pushed ? '' : ' (فشل الإرسال الفوري — السكرابر سيسحبها تلقائياً).'), 'success');
+                out.tomatomtl = { saved: true, cleared: !c.value, push: pushC };
+            }
+
+            if (out.saved === undefined && !out.tomatomtl) {
+                return res.status(400).json({ error: 'لا يوجد شيء للحفظ — أرسل keys أو tomatomtlCookies.' });
+            }
+            res.json(out);
         } catch (e) {
             res.status(500).json({ error: e.message });
         }
@@ -1355,6 +1398,18 @@ app.put('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
             res.json({ total: keys.length, statuses });
         } catch (e) {
             res.status(500).json({ error: e.message });
+        }
+    });
+
+    // 🍪 فحص حي لجلسة TomatoMTL: يمر عبر السكرابر (هو من يمتلك الكوكيز الفعلية)
+    app.post('/api/admin/scraper-keys/check-tomatomtl', verifyAdmin, async (req, res) => {
+        try {
+            const r = await axios.post(`${SCRAPER_SERVICE_URL}/tomatomtl/check`, {},
+                { headers: { 'Authorization': SCRAPER_API_SECRET, 'Content-Type': 'application/json' }, timeout: 120000 });
+            res.json(r.data || { ok: false, message: 'رد غير متوقع من السكرابر' });
+        } catch (e) {
+            const details = e.response && e.response.data && e.response.data.message ? e.response.data.message : e.message;
+            res.status(502).json({ ok: false, message: 'تعذر فحص الجلسة عبر السكرابر: ' + details });
         }
     });
 
