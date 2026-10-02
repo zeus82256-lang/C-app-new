@@ -48,8 +48,10 @@ const PROVIDER_TEMPLATES = [
 ];
 
 const DEFAULT_POW_PROVIDERS = [
-  { id: 'railway', name: 'Railway', url: 'https://web-production-c09dc.up.railway.app/pow' },
-  { id: 'ngrok', name: 'Ngrok', url: 'https://immunize-quintet-trimmer.ngrok-free.dev/get_pow' }
+  // 🔥 Railway/Ngrok القديمة ماتت (404) — الوكيل الجديد هو العامل الوحيد
+  { id: 'zeus', name: 'Zeus POW', url: 'http://107.172.78.104:8800/get_pow' },
+  { id: 'railway', name: 'Railway (قديم)', url: 'https://web-production-c09dc.up.railway.app/pow' },
+  { id: 'ngrok', name: 'Ngrok (قديم)', url: 'https://immunize-quintet-trimmer.ngrok-free.dev/get_pow' }
 ];
 
 const normalizePowProviderUrl = (url) => {
@@ -133,7 +135,7 @@ export default function TranslatorSettingsScreen({ navigation }) {
                   deepSeekTokens: p.deepSeekTokens || [],
                   qwenTokens: p.qwenTokens || [],
                   powProviders: normalizePowProviders(p.powProviders),
-                  selectedPowProviderId: p.selectedPowProviderId || 'railway',
+                  selectedPowProviderId: p.selectedPowProviderId || 'zeus',
                   modelsFetched: false
               }));
               setProviders(normalized);
@@ -174,7 +176,7 @@ export default function TranslatorSettingsScreen({ navigation }) {
               models: [{ modelId: 'deepseek-chat', modelName: 'DeepSeek Chat' }],
               selectedModel: 'deepseek-chat',
               powProviders: normalizePowProviders(DEFAULT_POW_PROVIDERS),
-              selectedPowProviderId: 'railway'
+              selectedPowProviderId: 'zeus'
           };
       }
       if (type === 'qwen') {
@@ -230,12 +232,10 @@ export default function TranslatorSettingsScreen({ navigation }) {
           deepSeekModelType: p.deepSeekModelType,
           deepSeekTokens: isDeepSeekProvider(p) ? (p.apiKeys || []) : (p.deepSeekTokens || []),
           qwenTokens: isQwenProvider(p) ? (p.apiKeys || []) : (p.qwenTokens || []),
-          powProviders: isDeepSeekProvider(p) ? normalizePowProviders(p.powProviders).filter(pow => (pow.url || '').trim() !== '').map(pow => ({
-              id: pow.id,
-              name: pow.name,
-              url: normalizePowProviderUrl(pow.url)
-          })) : [],
-          selectedPowProviderId: isDeepSeekProvider(p) ? (p.selectedPowProviderId || 'railway') : ''
+          powProviders: isDeepSeekProvider(p) ? normalizePowProviders(p.powProviders)
+              .filter(pow => (pow.url || '').trim() !== '')
+              .map(pow => ({ id: pow.id, name: pow.name, url: normalizePowProviderUrl(pow.url) })) : [],
+          selectedPowProviderId: isDeepSeekProvider(p) ? (p.selectedPowProviderId || 'zeus') : ''
       }));
 
       await api.post('/api/translator/settings', {
@@ -363,6 +363,25 @@ export default function TranslatorSettingsScreen({ navigation }) {
               ? (updatedPowProviders[0]?.id || '')
               : p.selectedPowProviderId;
           return { ...p, powProviders: updatedPowProviders, selectedPowProviderId };
+      }));
+  };
+
+  // 🔥 إضافة خادم POW مخصص — سطر قابل للتحرير (اسم + رابط) يُحفظ مع الإعدادات
+  const addPowProvider = (providerId) => {
+      setProviders(providers.map(p => {
+          if (p.providerId !== providerId) return p;
+          const current = normalizePowProviders(p.powProviders);
+          const newRow = { id: `pow_${Date.now()}`, name: 'خادم مخصص', url: '', _custom: true };
+          return { ...p, powProviders: [...current, newRow] };
+      }));
+  };
+
+  // تعديل حقل في صف POW (الاسم أو الرابط) — للخوادم المخصصة
+  const updatePowField = (providerId, powId, field, value) => {
+      setProviders(providers.map(p => {
+          if (p.providerId !== providerId) return p;
+          const updatedPowProviders = normalizePowProviders(p.powProviders).map(pow => pow.id === powId ? { ...pow, [field]: value } : pow);
+          return { ...p, powProviders: updatedPowProviders };
       }));
   };
 
@@ -618,8 +637,10 @@ export default function TranslatorSettingsScreen({ navigation }) {
                                 {isDeepSeekProvider(provider) && (
                                   <>
                                   <Text style={styles.miniLabel}>مزود POW</Text>
-                                <Text style={styles.hintSmall}>يبقى Railway هو الافتراضي، ويمكن التبديل إلى Ngrok عند الحاجة.</Text>
-                                {normalizePowProviders(provider.powProviders).map((pow) => (
+                                <Text style={styles.hintSmall}>الخوادم الافتراضية معروضة أدناه، ويمكنك إضافة خادم POW مخصص برابطك الخاص واختياره من القائمة.</Text>
+                                {normalizePowProviders(provider.powProviders).map((pow) => {
+                                    const isCustom = Boolean(pow._custom) || !(pow.url || '').trim();
+                                    return (
                                     <View key={pow.id} style={styles.powProviderRow}>
                                         <TouchableOpacity
                                             style={styles.removeModelBtn}
@@ -628,12 +649,33 @@ export default function TranslatorSettingsScreen({ navigation }) {
                                             <Ionicons name="trash-outline" size={20} color="#ff6666" />
                                         </TouchableOpacity>
                                         <TouchableOpacity
-                                            style={styles.powProviderSelect}
+                                            style={[styles.powProviderSelect, provider.selectedPowProviderId === pow.id && { borderColor: '#fff' }]}
                                             onPress={() => selectPowProvider(provider.providerId, pow.id)}
                                         >
                                             <View style={{flex: 1}}>
-                                                <Text style={styles.powProviderName}>{pow.name}</Text>
-                                                <Text style={styles.powProviderUrl}>{pow.url}</Text>
+                                                <Text style={styles.powProviderName}>{pow.name || 'خادم مخصص'}</Text>
+                                                {!isCustom && <Text style={styles.powProviderUrl}>{pow.url}</Text>}
+                                                {isCustom && (
+                                                    <View style={{ marginTop: 6, gap: 6 }}>
+                                                        <TextInput
+                                                            style={[styles.miniInput, { fontSize: 12, padding: 8 }]}
+                                                            placeholder="اسم الخادم"
+                                                            placeholderTextColor="#666"
+                                                            value={pow.name || ''}
+                                                            onChangeText={(text) => updatePowField(provider.providerId, pow.id, 'name', text)}
+                                                        />
+                                                        <TextInput
+                                                            style={[styles.miniInput, { fontSize: 12, padding: 8, fontFamily: 'monospace' }]}
+                                                            placeholder="http://your-server:8800/get_pow"
+                                                            placeholderTextColor="#666"
+                                                            autoCapitalize="none"
+                                                            autoCorrect={false}
+                                                            keyboardType="url"
+                                                            value={pow.url || ''}
+                                                            onChangeText={(text) => updatePowField(provider.providerId, pow.id, 'url', text)}
+                                                        />
+                                                    </View>
+                                                )}
                                             </View>
                                             <Ionicons
                                                 name={provider.selectedPowProviderId === pow.id ? "checkmark-circle" : "ellipse-outline"}
@@ -642,7 +684,18 @@ export default function TranslatorSettingsScreen({ navigation }) {
                                             />
                                         </TouchableOpacity>
                                     </View>
-                                ))}
+                                    );
+                                })}
+                                <TouchableOpacity
+                                    style={[styles.addModelBtn, {
+                                        borderWidth: 1, borderStyle: 'dashed', borderColor: '#444', borderRadius: 10,
+                                        paddingVertical: 10, marginTop: 4
+                                    }]}
+                                    onPress={() => addPowProvider(provider.providerId)}
+                                >
+                                    <Ionicons name="add-circle-outline" size={18} color="#ccc" />
+                                    <Text style={styles.addModelText}>إضافة خادم POW مخصص</Text>
+                                </TouchableOpacity>
                                   </>
                                 )}
 

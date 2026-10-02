@@ -1,7 +1,11 @@
 const axios = require('axios');
 
-const DEFAULT_DEEPSEEK_TOKEN = process.env.DEEPSEEK_APP_TOKEN || 'IVlSFv6JwO2TttyAhMW6Cu9/eMCDQhcfY0uHWu000SDnAyEwsYxtR8rFADgo22LM';
-const DEFAULT_POW_URL = process.env.DEEPSEEK_POW_URL || 'https://pow.up.railway.app/pow';
+// 🔥 تحديث 2.1.0 (أكتوبر 2026): تطبيق ديبسيك تحدّث وخوادم POW القديمة (Railway/Ngrok) ماتت (404).
+// البروتوكول المُتحقَّق منه حياً: تطبيق أندرويد 2.1.0 + وكيل POW الجديد الذي يعيد
+// x_ds_pow_response + solved_json معاً، والحِمولة الجديدة (audio_id + معاملات التوليد)
+// بدون حقل pow في الجسم (الإثبات في الترويسة x-ds-pow-response فقط).
+const DEFAULT_DEEPSEEK_TOKEN = process.env.DEEPSEEK_APP_TOKEN || 'nruEKXRUhcbkG/Dx81SmgsoDjesRIkWfaVC2jWuSVUK0iI0kEOyf7FX3R/mThNP3';
+const DEFAULT_POW_URL = process.env.DEEPSEEK_POW_URL || 'http://107.172.78.104:8800/get_pow';
 
 function removeDeepSeekFinishedMarker(text) {
     return (text || '').replace(/(?:\r?\n|\s)*FINISHED\s*$/i, '').trim();
@@ -25,20 +29,19 @@ function getTzOffset() {
 }
 
 function buildFullHeaders(token, powResponse) {
+    // نفس ترويسات تطبيق أندرويد 2.1.0 المُتحقَّق منها حياً — أي ترويسات إضافية
+    // قديمة (x-device-id/x-os-version) أُسقطت لأن الويب الحي يعمل بدونها تماماً.
     return {
-        'User-Agent': 'DeepSeek/2.1.1 Android/36',
+        'User-Agent': 'DeepSeek/2.1.0 Android/36',
         'Accept': 'application/json',
-        'Accept-Encoding': 'gzip',
+        'Accept-Encoding': 'identity',
         'Content-Type': 'application/json',
         'x-client-platform': 'android',
-        'x-client-version': '2.1.1',
+        'x-client-version': '2.1.0',
         'x-client-locale': 'ar',
         'x-client-bundle-id': 'com.deepseek.chat',
-        'x-rangers-id': generateRangersId(),
+        'x-rangers-id': '7693812033879281421',
         'x-client-timezone-offset': getTzOffset(),
-        'x-device-id': generateDeviceId(),
-        'x-os-version': '30',
-        'x-app-version': '2.1.1',
         'Authorization': `Bearer ${token}`,
         'X-DS-PoW-Response': powResponse,
         'accept-charset': 'UTF-8'
@@ -69,17 +72,20 @@ async function getFreshPow(powUrl, token) {
 }
 
 async function createChatSession(token) {
+    // نفس نداء التطبيق: POST بجسم فارغ وبنفس ترويسات الأندرويد
     const response = await axios.post('https://chat.deepseek.com/api/v0/chat_session/create', {}, {
         headers: {
-            'x-client-bundle-id': 'com.deepseek.chat',
-            'x-client-platform': 'web',
-            'x-client-version': '2.0.0',
-            'x-client-locale': 'en_US',
-            'x-client-timezone-offset': getTzOffset(),
-            'x-app-version': '2.0.0',
-            'Authorization': `Bearer ${token}`,
+            'User-Agent': 'DeepSeek/2.1.0 Android/36',
+            'Accept': 'application/json',
             'Content-Type': 'application/json',
-            'Accept': '*/*'
+            'x-client-platform': 'android',
+            'x-client-version': '2.1.0',
+            'x-client-locale': 'ar',
+            'x-client-bundle-id': 'com.deepseek.chat',
+            'x-rangers-id': '7693812033879281421',
+            'x-client-timezone-offset': getTzOffset(),
+            'Authorization': `Bearer ${token}`,
+            'accept-charset': 'UTF-8'
         },
         timeout: 60000
     });
@@ -133,16 +139,22 @@ async function askDeepSeek(prompt, options = {}) {
     const { powResponse, powData } = await getFreshPow(powUrl, token);
 
     const response = await axios.post('https://chat.deepseek.com/api/v0/chat/completion', {
+        // الحمولة الجديدة المُتحقَّق منها حياً (نفس تطبيق أندرويد 2.1.0):
+        // لا حقل pow في الجسم (الإثبات يُرسل في الترويسة فقط) + معاملات التوليد الكاملة.
         chat_session_id: sessionId,
-        parent_message_id: parentMessageId,
+        parent_message_id: parentMessageId || undefined,
         prompt,
         ref_file_ids: [],
         thinking_enabled: Boolean(options.thinkingEnabled),
         search_enabled: Boolean(options.searchEnabled),
-        model_type: options.modelType === 'expert' ? 'expert' : 'default',
-        action: null,
+        audio_id: null,
         preempt: false,
-        pow: powData,
+        model_type: options.modelType === 'expert' ? 'expert' : null,
+        temperature: typeof options.temperature === 'number' ? options.temperature : 0.7,
+        max_tokens: typeof options.maxTokens === 'number' ? options.maxTokens : 2048,
+        top_p: typeof options.topP === 'number' ? options.topP : 0.9,
+        frequency_penalty: typeof options.frequencyPenalty === 'number' ? options.frequencyPenalty : 0.0,
+        presence_penalty: typeof options.presencePenalty === 'number' ? options.presencePenalty : 0.0,
         stream: true
     }, {
         headers: buildFullHeaders(token, powResponse),

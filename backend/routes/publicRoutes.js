@@ -1423,14 +1423,21 @@ module.exports = function(app, verifyToken, upload) {
             }
 
             // 2. 🔥 PIPE THE IMAGE (Strong Protection + Bypass Restrictions) 🔥
+            // 🔥 wfxs.tw: أغلفة img.wfxs.tw محجوبة 403 من IP السيرفرات — تُجلب عبر
+            //    img-wfxs-tw.translate.goog، لكن وكيل الترجمة يرفض (403/302) أي طلب
+            //    يحمل ترويسة Referer — لذا تُجلب هنا بدون Referer نهائياً.
+            const proxiedHost = (() => { try { return new URL(originalUrl).host || ''; } catch { return ''; } })();
+            const needsNoReferer = /translate\.goog$/i.test(proxiedHost) || /(^|\.)wfxs\.tw$/i.test(proxiedHost);
             const response = await axios({
                 method: 'get',
                 url: originalUrl,
                 responseType: 'stream',
-                timeout: 10000,
+                timeout: 15000,
+                maxRedirects: 5,
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Referer': 'https://www.google.com/' 
+                    'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+                    ...(needsNoReferer ? {} : { 'Referer': 'https://www.google.com/' })
                 }
             });
 

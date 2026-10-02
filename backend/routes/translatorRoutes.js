@@ -20,9 +20,19 @@ const chapterMirror = require('../services/chapterMirror.service.js');
 const DEEPSEEK_CHAPTERS_PER_CONVERSATION = 100;
 const DEEPSEEK_MAX_ATTEMPTS_PER_TOKEN = 5;
 const DEFAULT_DEEPSEEK_POW_PROVIDERS = [
-    { id: 'railway', name: 'Railway', url: 'https://pow.up.railway.app/pow' },
-    { id: 'ngrok', name: 'Ngrok', url: 'https://immunize-quintet-trimmer.ngrok-free.dev/get_pow' }
+    // 🔥 خوادم Railway/Ngrok القديمة ماتت (404) — الوكيل الجديد هو الوحيد العامل (تم التحقق حياً)
+    { id: 'zeus', name: 'Zeus POW', url: 'http://107.172.78.104:8800/get_pow' },
+    { id: 'railway', name: 'Railway (قديم)', url: 'https://pow.up.railway.app/pow' },
+    { id: 'ngrok', name: 'Ngrok (قديم)', url: 'https://immunize-quintet-trimmer.ngrok-free.dev/get_pow' }
 ];
+// روابط معروف أنها ماتة — تُتجاوز تلقائياً حتى مع إعدادات مخزنة قديمة.
+// 🔥 مطابقة رابط كامل (وليس مضيفاً) حتى لا يُحجب خادم POW مخصص للمستخدم
+// يحدث أن يكون على ngrok أو Railway بعنوان مختلف تماماً.
+const DEAD_POW_URLS = [
+    'https://pow.up.railway.app/pow',
+    'https://web-production-c09dc.up.railway.app/pow',
+    'https://immunize-quintet-trimmer.ngrok-free.dev/get_pow'
+].map(u => u.replace(/\/+$/, '').toLowerCase());
 const stickyTokenAssignments = new Map();
 let stickyNextTokenIndex = 0;
 
@@ -37,7 +47,13 @@ function resolveDeepSeekPowUrl(provider) {
         ? provider.powProviders
         : DEFAULT_DEEPSEEK_POW_PROVIDERS;
     const selected = powProviders.find(p => p.id === provider.selectedPowProviderId) || powProviders[0];
-    return normalizePowProviderUrl(selected?.url);
+    const url = normalizePowProviderUrl(selected?.url);
+    // شفاء تلقائي: إعدادات قديمة مخزنة تشير لخادم ميت → وكيل جديد عامل
+    // (مطابقة الرابط الكامل فقط — الرابط المخصص للمستخدم لا يُمس أبداً)
+    if (DEAD_POW_URLS.includes(url.replace(/\/+$/, '').toLowerCase())) {
+        return normalizePowProviderUrl(DEFAULT_DEEPSEEK_POW_PROVIDERS[0].url);
+    }
+    return url;
 }
 
 function getDeepSeekConversationContext(contextStore, purpose, batchKey, scopeKey = 'default') {
@@ -1799,7 +1815,7 @@ module.exports = function(app, verifyToken, verifyAdmin) {
             normalized.powProviders = Array.isArray(p.powProviders) && p.powProviders.length
                 ? p.powProviders.filter(pw => pw && pw.url).map(pw => ({ id: String(pw.id || 'pow'), name: String(pw.name || 'POW'), url: String(pw.url) }))
                 : DEFAULT_DEEPSEEK_POW_PROVIDERS;
-            normalized.selectedPowProviderId = String(p.selectedPowProviderId || 'railway');
+            normalized.selectedPowProviderId = String(p.selectedPowProviderId || 'zeus');
         } else if (isQwen) {
             const tokens = Array.isArray(p.qwenTokens) ? p.qwenTokens.map(t => String(t || '').trim()).filter(Boolean) : [];
             normalized.qwenTokens = Array.from(new Set([...apiKeys, ...tokens]));
