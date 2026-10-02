@@ -73,6 +73,11 @@ RETURN ONLY JSON:` },
     // فارغ = السكرابر يستخدم الكوكيز الثابتة بداخله (remember_* طويل الأمد).
     tomatomtlCookies: { type: String, default: '' },
 
+    // 🍪 كوكيز WTR-LAB (حساب قارئ wtr-lab.com) — حقل واجهة السكرابر.
+    // البيانات والفهرس تعمل بلا جلسة؛ محتوى الفصول يحتاج جلسة (Turnstile) —
+    // فارغ = سحب مجهول (البيانات والفهرس فقط).
+    wtrlabCookies: { type: String, default: '' },
+
     // 🔥 Multi-provider translation support (DeepSeek / Qwen / Gemini / OpenRouter / Cloudflare / custom)
     translationProviders: [{
         providerId: { type: String, required: true }, // e.g., 'gemini', 'openrouter', 'deepseek_...', 'qwen_...', 'custom1'

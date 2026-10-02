@@ -17,15 +17,19 @@ import { useToast } from '../context/ToastContext';
 import api from '../services/api';
 import { useFocusEffect } from '@react-navigation/native';
 
-// 🔹 شاشة إدارة مفاتيح ScraperAPI + كوكيز TomatoMTL
+// 🔹 شاشة إدارة مفاتيح ScraperAPI + كوكيز TomatoMTL + كوكيز WTR-LAB
 // المفاتيح: كل مفتاح في سطر مستقل (أو مفصول بفواصل) — تُحفظ في الخادم وتُدفع
 // تلقائياً لخدمة السكرابر، مع عرض حالة الرصيد لكل مفتاح.
 // كوكيز TomatoMTL: جلسة حساب tomatomtl.com لسحب رواياته (الواجهة نفسها في الموقع والتطبيق)
 // — الحقل الفارغ يعني استخدام الكوكيز الثابتة داخل كود السكرابر.
+// كوكيز WTR-LAB: جلسة wtr-lab.com لقراءة الفصول (البيانات والفهرس مجانية بلا جلسة
+// ومحتوى الفصول يحتاج جلسة لتحدي Turnstile) — الحقل الفارغ = سحب مجهول.
 
 const EXAMPLE_KEYS = 'مثال:\n6ac34ae7f246b2588b5a5fbd45899a92\nd8f2a1c3e4b5a6978f0d2c3b4a5f6e7d\n1a2b3c4d5e6f70819a2b3c4d5e6f7081';
 
 const MT_EXAMPLE = 'مثال (ترويسة Cookie كاملة من المتصفح):\ncf_clearance=alvbHRPkSSaWrtoOVhRFGrz8P_tbInkp…; _ga=GA1.1.1632139315.1790935815; translator_button=en; remember_6TpGq1xR_F05q3tke-JkBw=wJwdY-taHOAxK15ymm9RarLW%7E5pnIX134L0vGDX5N3ROrYxcV_4xWJFLS; PHPSESSID=t349n0dhnsm74n6mqasln6rvne';
+
+const WTR_EXAMPLE = 'مثال (ترويسة Cookie كاملة من المتصفح):\nwtr_session=eyJhbGciOiJIUzI1NiJ9…; __cf_bm=abc123…; cf_clearance=xyz789…';
 
 const GlassCard = ({ children, style }) => (
   <View style={[styles.glassCard, style]}>{children}</View>
@@ -43,6 +47,11 @@ export default function ScraperKeysScreen({ navigation }) {
   const [mtSaving, setMtSaving] = useState(false);
   const [mtChecking, setMtChecking] = useState(false);
   const [mtResult, setMtResult] = useState(null);
+  // 🍪 كوكيز WTR-LAB
+  const [wtrText, setWtrText] = useState('');
+  const [wtrSaving, setWtrSaving] = useState(false);
+  const [wtrChecking, setWtrChecking] = useState(false);
+  const [wtrResult, setWtrResult] = useState(null);
 
   const loadKeys = async () => {
     setLoading(true);
@@ -51,7 +60,9 @@ export default function ScraperKeysScreen({ navigation }) {
       const keys = res.data?.keys || [];
       setText(keys.join('\n'));
       setMtText(res.data?.tomatomtlCookies || '');
+      setWtrText(res.data?.wtrlabCookies || '');
       setMtResult(null);
+      setWtrResult(null);
     } catch (e) {
       console.log('load keys failed:', e.message);
     } finally {
@@ -124,6 +135,34 @@ export default function ScraperKeysScreen({ navigation }) {
       setMtResult({ ok: false, message: e.response?.data?.message || 'فشل الفحص' });
     } finally {
       setMtChecking(false);
+    }
+  };
+
+  // 🍪 حفظ كوكيز WTR-LAB (فارغ = تصفير — سحب مجهول للبيانات والفهرس)
+  const handleSaveWtrCookies = async () => {
+    setWtrSaving(true);
+    try {
+      const res = await api.post('/api/admin/scraper-keys', { wtrlabCookies: wtrText.trim() });
+      const t = res.data?.wtrlab;
+      showToast(t?.cleared ? 'فُرِّغت الكوكيز — البيانات والفهرس تبقى مجانية والفصول مجهولة' : 'حُفظت الكوكيز وأُرسلت للسكرابر', 'success');
+    } catch (e) {
+      showToast(e.response?.data?.error || 'فشل حفظ الكوكيز', 'error');
+    } finally {
+      setWtrSaving(false);
+    }
+  };
+
+  // 🍪 فحص حي: هل قراءة WTR-LAB تعمل فعلاً من السكرابر؟
+  const handleCheckWtrSession = async () => {
+    setWtrChecking(true);
+    setWtrResult(null);
+    try {
+      const res = await api.post('/api/admin/scraper-keys/check-wtrlab', {});
+      setWtrResult(res.data || { ok: false, message: 'رد غير متوقع' });
+    } catch (e) {
+      setWtrResult({ ok: false, message: e.response?.data?.message || 'فشل الفحص' });
+    } finally {
+      setWtrChecking(false);
     }
   };
 
@@ -308,6 +347,81 @@ export default function ScraperKeysScreen({ navigation }) {
                   />
                   <Text style={[styles.mtResultText, { color: mtResult.ok ? '#4ade80' : '#f87171' }]}>
                     {mtResult.message}
+                  </Text>
+                </View>
+              )}
+            </GlassCard>
+
+            {/* 🍪 كوكيز WTR-LAB — نفس واجهة الموقع تماماً */}
+            <GlassCard style={styles.infoCard}>
+              <View style={styles.infoRow}>
+                <Ionicons name="globe-outline" size={18} color="#4ade80" />
+                <Text style={styles.infoTitle}>كوكيز WTR-LAB — جلسة القراءة</Text>
+              </View>
+              <Text style={styles.infoText}>
+                موقع WTR-LAB (wtr-lab.com): بيانات الروايات والفهارس تعمل بلا جلسة، لكن محتوى الفصول يحصّن نفسه بتحدي Turnstile — الجلسة المسجلة تتجاوزه.{'\n'}
+                أسهل طريقة: افتح wtr-lab.com مسجلاً الدخول ← F12 ← Network ← اضغط أي طلب ← انسخ قيمة ترويسة «cookie» كاملة والصقها هنا.{'\n'}
+                ترك الحقل فارغاً + حفظ = تصفير (سحب مجهول: البيانات والفهرس فقط).{'\n'}
+                إن توقفت القراءة بتحدي تحقق فجدد الكوكيز بنفس الطريقة.
+              </Text>
+              <View style={styles.envBox}>
+                <Text style={styles.envText}>{WTR_EXAMPLE}</Text>
+              </View>
+            </GlassCard>
+
+            <GlassCard style={styles.inputCard}>
+              <Text style={styles.inputLabel}>ترويسة كوكيز WTR-LAB (سطر واحد):</Text>
+              <TextInput
+                style={styles.input}
+                multiline
+                textAlignVertical="top"
+                placeholder={WTR_EXAMPLE}
+                placeholderTextColor="#555"
+                value={wtrText}
+                onChangeText={setWtrText}
+                autoCapitalize="none"
+                autoCorrect={false}
+                keyboardType="ascii-capable"
+              />
+              <View style={styles.mtBtnRow}>
+                <TouchableOpacity
+                  style={[styles.saveBtn, { flex: 1 }, wtrSaving && styles.disabledBtn]}
+                  onPress={handleSaveWtrCookies}
+                  disabled={wtrSaving}
+                >
+                  {wtrSaving ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <>
+                      <Ionicons name="cloud-upload" size={18} color="#fff" />
+                      <Text style={styles.saveBtnText}>حفظ وإرسال للسكرابر</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.checkBtn, wtrChecking && styles.disabledBtn]}
+                  onPress={handleCheckWtrSession}
+                  disabled={wtrChecking}
+                >
+                  {wtrChecking ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <>
+                      <Ionicons name="pulse" size={18} color="#fff" />
+                      <Text style={styles.saveBtnText}>فحص القراءة</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
+              {wtrResult && (
+                <View style={[styles.mtResultBox, { borderColor: wtrResult.ok ? 'rgba(74,222,128,0.5)' : 'rgba(248,113,113,0.5)' }]}>
+                  <Ionicons
+                    name={wtrResult.ok ? 'checkmark-circle' : 'alert-circle'}
+                    size={18}
+                    color={wtrResult.ok ? '#4ade80' : '#f87171'}
+                  />
+                  <Text style={[styles.mtResultText, { color: wtrResult.ok ? '#4ade80' : '#f87171' }]}>
+                    {wtrResult.message}
                   </Text>
                 </View>
               )}

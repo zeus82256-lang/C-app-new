@@ -1331,6 +1331,30 @@ app.put('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
         }
     };
 
+    // 🍪 تنقية كوكيز WTR-LAB: ترويسة Cookie واحدة — يُقبل الفراغ (سحب مجهول للبيانات والفهرس)
+    const _sanitizeWtrlabCookies = (raw) => {
+        let v = String(raw ?? '').replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+        if (!v) return { value: '' };
+        v = v.replace(/\s*;\s*/g, '; ').replace(/;\s*$/, '');
+        if (v.length > 8000) return { error: 'ترويسة الكوكيز أطول من اللازم — الصق قيمة ترويسة Cookie واحدة فقط من المتصفح.' };
+        if (/[\u0000-\u001f\u007f]/.test(v)) return { error: 'الكوكيز يجب أن تكون ترويسة واحدة بلا محارف تحكم.' };
+        if (!/^[A-Za-z0-9_\-]+=/i.test(v)) {
+            return { error: 'الصق ترويسة Cookie كاملة من wtr-lab.com بعد تسجيل الدخول (مثل: name=value; name2=value2).' };
+        }
+        return { value: v };
+    };
+
+    const _pushWtrlabCookiesToScraper = async (cookies) => {
+        try {
+            const r = await axios.post(`${SCRAPER_SERVICE_URL}/wtrlab/cookies`,
+                { cookies },
+                { headers: { 'Authorization': SCRAPER_API_SECRET, 'Content-Type': 'application/json' }, timeout: 20000 });
+            return { pushed: true, message: r.data && r.data.message };
+        } catch (e) {
+            return { pushed: false, message: e.message };
+        }
+    };
+
     // GET: قراءة المفاتيح (المشرف بالتوكن أو السكرابر بالسري)
     app.get('/api/admin/scraper-keys', async (req, res, next) => {
         const secret = req.headers['authorization'] || req.headers['x-api-secret'];
@@ -1340,17 +1364,17 @@ app.put('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
         try {
             let settings = await Settings.findOne();
             if (!settings) settings = await Settings.create({});
-            res.json({ keys: settings.scraperApiKeys || [], tomatomtlCookies: settings.tomatomtlCookies || '' });
+            res.json({ keys: settings.scraperApiKeys || [], tomatomtlCookies: settings.tomatomtlCookies || '', wtrlabCookies: settings.wtrlabCookies || '' });
         } catch (e) {
             res.status(500).json({ error: e.message });
         }
     });
 
-    // POST: حفظ المفاتيح و/أو كوكيز TomatoMTL + دفعهما للسكرابر + فحص أرصدة المفاتيح
-    // (المفتاحان قديمان: {keys} وحده يعمل كما كان — والجديد {tomatomtlCookies} أو معاً)
+    // POST: حفظ المفاتيح و/أو كوكيز TomatoMTL/WTR-LAB + دفعها للسكرابر + فحص أرصدة المفاتيح
+    // (المفاتيح القديمة تعمل كما كانت: {keys} وحدها أو {tomatomtlCookies} — والجديد {wtrlabCookies} أو معاً)
     app.post('/api/admin/scraper-keys', verifyAdmin, async (req, res) => {
         try {
-            const { keys, tomatomtlCookies } = req.body || {};
+            const { keys, tomatomtlCookies, wtrlabCookies } = req.body || {};
             let settings = await Settings.findOne();
             if (!settings) settings = await Settings.create({});
             const out = {};
@@ -1380,8 +1404,18 @@ app.put('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
                 out.tomatomtl = { saved: true, cleared: !c.value, push: pushC };
             }
 
-            if (out.saved === undefined && !out.tomatomtl) {
-                return res.status(400).json({ error: 'لا يوجد شيء للحفظ — أرسل keys أو tomatomtlCookies.' });
+            if (wtrlabCookies !== undefined && wtrlabCookies !== null) {
+                const w = _sanitizeWtrlabCookies(wtrlabCookies);
+                if (w.error) return res.status(400).json({ error: w.error });
+                settings.wtrlabCookies = w.value;
+                await settings.save();
+                const pushW = await _pushWtrlabCookiesToScraper(w.value);
+                await logScraper('🌐 تم تحديث كوكيز WTR-LAB' + (w.value ? ' وتم إرسالها للسكرابر.' : ' — تصفير (سحب مجهول للبيانات والفهرس).') + (pushW.pushed ? '' : ' (فشل الإرسال الفوري — السكرابر سيسحبها تلقائياً).'), 'success');
+                out.wtrlab = { saved: true, cleared: !w.value, push: pushW };
+            }
+
+            if (out.saved === undefined && !out.tomatomtl && !out.wtrlab) {
+                return res.status(400).json({ error: 'لا يوجد شيء للحفظ — أرسل keys أو tomatomtlCookies أو wtrlabCookies.' });
             }
             res.json(out);
         } catch (e) {
@@ -1405,6 +1439,18 @@ app.put('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
     app.post('/api/admin/scraper-keys/check-tomatomtl', verifyAdmin, async (req, res) => {
         try {
             const r = await axios.post(`${SCRAPER_SERVICE_URL}/tomatomtl/check`, {},
+                { headers: { 'Authorization': SCRAPER_API_SECRET, 'Content-Type': 'application/json' }, timeout: 120000 });
+            res.json(r.data || { ok: false, message: 'رد غير متوقع من السكرابر' });
+        } catch (e) {
+            const details = e.response && e.response.data && e.response.data.message ? e.response.data.message : e.message;
+            res.status(502).json({ ok: false, message: 'تعذر فحص الجلسة عبر السكرابر: ' + details });
+        }
+    });
+
+    // 🍪 فحص حي لقراءة WTR-LAB: يمر عبر السكرابر (هو من يمتلك الكوكيز الفعلية)
+    app.post('/api/admin/scraper-keys/check-wtrlab', verifyAdmin, async (req, res) => {
+        try {
+            const r = await axios.post(`${SCRAPER_SERVICE_URL}/wtrlab/check`, {},
                 { headers: { 'Authorization': SCRAPER_API_SECRET, 'Content-Type': 'application/json' }, timeout: 120000 });
             res.json(r.data || { ok: false, message: 'رد غير متوقع من السكرابر' });
         } catch (e) {
