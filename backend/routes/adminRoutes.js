@@ -1537,12 +1537,14 @@ app.put('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
                         const uploadRes = await cloudinary.uploader.upload(novelData.cover, {
                             folder: 'novels_covers',
                             resource_type: 'auto',
-                            timeout: 60000 
+                            timeout: 60000
                         });
                         novelData.cover = uploadRes.secure_url;
                         await logScraper(`✅ تم رفع الغلاف`, 'success');
                     } catch (imgErr) {
-                        await logScraper(`⚠️ فشل رفع الغلاف (سيستخدم الرابط الأصلي)`, 'warning');
+                        // 🔥 http:// يُحجب كمحتوى مختلط في صفحات https فيظهر الغلاف فارغاً — نرفعه https
+                        novelData.cover = String(novelData.cover).replace(/^http:\/\//i, 'https://');
+                        await logScraper(`⚠️ فشل رفع الغلاف (سيستخدم الرابط الأصلي عبر https)`, 'warning');
                     }
                 }
 
@@ -1609,14 +1611,27 @@ app.put('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
                             novel.cover = uploadRes.secure_url;
                             await logScraper(`✅ تم رفع الغلاف الناقص للرواية الموجودة`, 'success');
                         } catch (imgErr) {
-                            novel.cover = novelData.cover;
-                            await logScraper(`⚠️ فشل رفع الغلاف الناقص (سيُستخدم الرابط الأصلي)`, 'warning');
+                            // 🔥 http:// يُحجب كمحتوى مختلط في صفحات https فيظهر الغلاف فارغاً — نرفعه https
+                            novel.cover = String(novelData.cover).replace(/^http:\/\//i, 'https://');
+                            await logScraper(`⚠️ فشل رفع الغلاف الناقص (سيُستخدم الرابط الأصلي عبر https)`, 'warning');
                         }
                     } else {
-                        novel.cover = novelData.cover;
+                        novel.cover = String(novelData.cover).replace(/^http:\/\//i, 'https://');
                     }
                 }
-                
+
+                // 🔥 إصلاح ذاتي للوصف المبتور: إن كان الوصف المحفوظ مجرد «بادئة مبتورة»
+                // للوصف الطازج من السكرابر (نفس النص لكن مقطوعاً) نكمله — ولا نمسّ
+                // أبداً وصفاً حرّره إنسان (لن يطابق شرط البادئة).
+                if (novelData.description && novel.description) {
+                    const stored = String(novel.description).replace(/\r/g, '').trim();
+                    const fresh = String(novelData.description).replace(/\r/g, '').trim();
+                    if (fresh.length > stored.length + 10 && stored.length >= 20 && fresh.startsWith(stored)) {
+                        novel.description = fresh;
+                        await logScraper(`📝 تم استكمال الوصف المبتور تلقائياً (${stored.length} → ${fresh.length} محرفاً)`, 'success');
+                    }
+                }
+
                 // 🛑 DO NOT UPDATE DESCRIPTION, TITLE, OR AUTHOR (except the missing cover above)
                 // We deliberately skip any other metadata updates here.
                 

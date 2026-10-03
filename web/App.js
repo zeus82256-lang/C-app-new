@@ -60,6 +60,9 @@ import ReviewHubScreen from './src/screens/ReviewHubScreen';
 import ReviewNovelsSelectionScreen from './src/screens/ReviewNovelsSelectionScreen';
 import ReviewJobDetailScreen from './src/screens/ReviewJobDetailScreen';
 import ReviewFindingsScreen from './src/screens/ReviewFindingsScreen';
+import GlossaryExtractorHubScreen from './src/screens/GlossaryExtractorHubScreen';
+import GlossaryExtractorSelectionScreen from './src/screens/GlossaryExtractorSelectionScreen';
+import GlossaryExtractorJobDetailScreen from './src/screens/GlossaryExtractorJobDetailScreen';
 import GlossaryManagerScreen from './src/screens/GlossaryManagerScreen';
 import TranslatorSettingsScreen from './src/screens/TranslatorSettingsScreen';
 import MetadataTranslationHubScreen from './src/screens/MetadataTranslationHubScreen';
@@ -350,6 +353,11 @@ function NavigationRoot() {
                 <Stack.Screen name="ReviewNovelsSelection" component={ReviewNovelsSelectionScreen} options={{ animation: 'slide_from_bottom' }} />
                 <Stack.Screen name="ReviewJobDetail" component={ReviewJobDetailScreen} options={{ animation: 'fade_from_bottom' }} />
                 <Stack.Screen name="ReviewFindings" component={ReviewFindingsScreen} options={{ animation: 'slide_from_bottom' }} />
+
+                {/* 📚 Glossary Extractor Screens — المستخرج الذكي (استخراج المصطلحات قبل الترجمة) */}
+                <Stack.Screen name="GlossaryExtractorHub" component={GlossaryExtractorHubScreen} options={{ animation: 'slide_from_right' }} />
+                <Stack.Screen name="GlossaryExtractorSelection" component={GlossaryExtractorSelectionScreen} options={{ animation: 'slide_from_bottom' }} />
+                <Stack.Screen name="GlossaryExtractorJobDetail" component={GlossaryExtractorJobDetailScreen} options={{ animation: 'fade_from_bottom' }} />
                 <Stack.Screen name="GlossaryManager" component={GlossaryManagerScreen} options={{ animation: 'slide_from_right' }} />
                 <Stack.Screen name="TranslatorSettings" component={TranslatorSettingsScreen} options={{ animation: 'slide_from_right' }} />
                 

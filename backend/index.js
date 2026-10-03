@@ -141,6 +141,9 @@ require('./routes/translatorRoutes')(app, verifyToken, verifyAdmin);
 // 🔍 تحميل مسارات المراجع الذكي (مراجعة جودة الفصول بالذكاء الاصطناعي)
 require('./routes/reviewRoutes')(app, verifyToken, verifyAdmin);
 
+// 📚 تحميل مسارات المستخرج الذكي (استخراج مصطلحات الرواية كاملة قبل الترجمة)
+require('./routes/glossaryAiRoutes')(app, verifyToken, verifyAdmin);
+
 // 🔥 تحميل مسارات مولد العناوين
 require('./routes/titleGenRoutes')(app, verifyToken, verifyAdmin);
 

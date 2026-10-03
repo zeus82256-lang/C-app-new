@@ -338,6 +338,13 @@ export default function AdminMainScreen({ navigation }) {
                     onPress={() => navigation.navigate('ReviewHub')}
                 />
                 <DashboardButton
+                    title="المستخرج الذكي (AI)"
+                    subtitle="استخراج مصطلحات الرواية كاملة قبل الترجمة"
+                    icon="book"
+                    color="#10b981"
+                    onPress={() => navigation.navigate('GlossaryExtractorHub')}
+                />
+                <DashboardButton
                     title="مولد العناوين AI" 
                     subtitle="توليد عناوين للفصول تلقائياً"
                     icon="text" 
