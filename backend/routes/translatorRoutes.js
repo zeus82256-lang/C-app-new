@@ -1879,6 +1879,9 @@ module.exports = function(app, verifyToken, verifyAdmin) {
 
 // 🔥 تصدير داخلي: أدوات مزوّدات الذكاء الاصطناعي لإعادة استخدامها في نظام المراجعة
 // (reviewRoutes) — نفس المزوّدات ونفس المفاتيح المضبوطة في إعدادات المترجم.
+// 🔥 إضافة خالصة (لا تمس أي منطق قائم): أدوات الترجمة/التحقق/الإصلاح تُصدَّر أيضاً
+// ليستخدمها المترجم الخالص (pureTranslatorRoutes — ترجمة فقط بلا استخراج مصطلحات)
+// بنفس خط الترجمة المؤكد حرفياً (فحص البقايا + مراجع + إصلاح + حسابات Qwen تلقائية).
 module.exports._ai = {
     callTranslationProvider,
     getGlobalSettings,
@@ -1887,4 +1890,15 @@ module.exports._ai = {
     isQwenProvider,
     isGeminiWebProvider,
     GUEST_TOKEN_SENTINEL,
+    // أدوات إضافية للمترجم الخالص (إعادة كشف فقط — نفس الدوال المستخدمة هنا):
+    isStickyChatProvider,
+    validateTranslatedChapter,
+    translateResiduesOnly,
+    reviewQuestionableChapter,
+    buildRepairTranslationPrompt,
+    removeDeepSeekFinishedMarker,
+    resetConversationContextPurposeForScope,
+    getTokenConversationScope,
+    DEEPSEEK_CHAPTERS_PER_CONVERSATION,
+    DEEPSEEK_MAX_ATTEMPTS_PER_TOKEN,
 };

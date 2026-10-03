@@ -144,6 +144,9 @@ require('./routes/reviewRoutes')(app, verifyToken, verifyAdmin);
 // 📚 تحميل مسارات المستخرج الذكي (استخراج مصطلحات الرواية كاملة قبل الترجمة)
 require('./routes/glossaryAiRoutes')(app, verifyToken, verifyAdmin);
 
+// ⚡ تحميل مسارات المترجم الخالص (ترجمة فقط بالمسرد الجاهز — بلا استخراج مصطلحات — نظام مستقل)
+require('./routes/pureTranslatorRoutes')(app, verifyToken, verifyAdmin);
+
 // 🔥 تحميل مسارات مولد العناوين
 require('./routes/titleGenRoutes')(app, verifyToken, verifyAdmin);
 

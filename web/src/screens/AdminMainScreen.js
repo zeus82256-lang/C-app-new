@@ -345,6 +345,13 @@ export default function AdminMainScreen({ navigation }) {
                     onPress={() => navigation.navigate('GlossaryExtractorHub')}
                 />
                 <DashboardButton
+                    title="المترجم الخالص (AI)"
+                    subtitle="ترجمة فقط بالمسرد الجاهز — بلا استخراج مصطلحات"
+                    icon="flash"
+                    color="#f97316"
+                    onPress={() => navigation.navigate('PureTranslatorHub')}
+                />
+                <DashboardButton
                     title="مولد العناوين AI" 
                     subtitle="توليد عناوين للفصول تلقائياً"
                     icon="text" 
