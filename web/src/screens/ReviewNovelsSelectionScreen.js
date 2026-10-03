@@ -46,6 +46,8 @@ export default function ReviewNovelsSelectionScreen({ navigation }) {
   const [selectionMode, setSelectionMode] = useState('all');
   const [selectedChapters, setSelectedChapters] = useState([]);
   const [rangeInput, setRangeInput] = useState('');
+  // ⏱️ الفاصل بين كل فصل والذي يليه (بالثواني) — لتقليل الاستهلاك والسرعة
+  const [delayInput, setDelayInput] = useState('3');
 
   const [alertVisible, setAlertVisible] = useState(false);
   const [alertConfig, setAlertConfig] = useState({});
@@ -193,9 +195,13 @@ export default function ReviewNovelsSelectionScreen({ navigation }) {
   const startReview = async () => {
       setAlertVisible(false);
       try {
+          // ⏱️ الفاصل بالثواني (0 - 3600) — يُطبق بين كل فصل والذي يليه
+          const delaySec = parseFloat(String(delayInput).replace(',', '.'));
+          const safeDelay = Number.isFinite(delaySec) && delaySec >= 0 && delaySec <= 3600 ? delaySec : 3;
           await api.post('/api/review/start', {
               novelId: selectedNovel._id,
               chapters: selectionMode === 'manual' ? selectedChapters : 'all',
+              chapterDelay: safeDelay,
           });
           showToast("تم بدء المراجعة", "success");
           navigation.navigate('ReviewHub');
@@ -305,6 +311,19 @@ export default function ReviewNovelsSelectionScreen({ navigation }) {
                             </TouchableOpacity>
                         </View>
 
+                        {/* ⏱️ الفاصل بين الفصول — تحكم كامل من الواجهة لتقليل السرعة/الاستهلاك */}
+                        <View style={styles.delayRow}>
+                            <Text style={styles.delayLabel}>⏱️ الفاصل بين كل فصل (ثواني)</Text>
+                            <TextInput
+                                style={styles.delayInput}
+                                placeholder="3"
+                                placeholderTextColor="#666"
+                                keyboardType="decimal-pad"
+                                value={delayInput}
+                                onChangeText={setDelayInput}
+                            />
+                        </View>
+
                         {selectionMode === 'manual' && (
                             <View style={{flex: 1}}>
                                 <View style={styles.rangeInputRow}>
@@ -394,6 +413,16 @@ const styles = StyleSheet.create({
   modeBtn: { flex: 1, paddingVertical: 6, alignItems: 'center', borderRadius: 6 },
   modeBtnActive: { backgroundColor: 'rgba(255,255,255,0.1)' },
   modeText: { color: '#666', fontSize: 11, fontWeight: 'bold' },
+
+  delayRow: {
+      flexDirection: 'row-reverse', alignItems: 'center', justifyContent: 'space-between',
+      backgroundColor: '#111', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 8, marginBottom: 10,
+  },
+  delayLabel: { color: '#999', fontSize: 11, fontWeight: 'bold' },
+  delayInput: {
+      backgroundColor: '#222', color: '#fff', borderRadius: 6, paddingVertical: 5, paddingHorizontal: 10,
+      minWidth: 70, textAlign: 'center', fontSize: 12,
+  },
 
   rangeInputRow: { flexDirection: 'row-reverse', gap: 5 },
   rangeInput: { flex: 1, backgroundColor: '#222', color: '#fff', borderRadius: 6, padding: 8, textAlign: 'center', fontSize: 12 },

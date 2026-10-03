@@ -13,6 +13,8 @@ const reviewJobSchema = new mongoose.Schema({
     totalToReview: { type: Number, default: 0 },
     reviewedCount: { type: Number, default: 0 },  // فصول فُحصت وسليمة
     flaggedCount: { type: Number, default: 0 },   // فصول وُجد فيها خلل
+    // ⏱️ الفاصل بين كل فصل والذي يليه (بالملي ثانية) — يُضبط من الواجهة ويُقرأ حياً كل فصل
+    chapterDelayMs: { type: Number, default: 3000 },
     // الفصول المعلَّمة داخل هذه المهمة (نسخة عرض سريع — المصدر الدائم ReviewFinding)
     findings: [{
         chapter: Number,

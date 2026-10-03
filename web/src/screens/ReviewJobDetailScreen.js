@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -45,6 +45,10 @@ export default function ReviewJobDetailScreen({ navigation, route }) {
   const [job, setJob] = useState(initialJob);
   const [logs, setLogs] = useState([]);
   const [novelMaxChapter, setNovelMaxChapter] = useState(0);
+  // ⏱️ التحكم الحي في الفاصل بين الفصول (بالثواني)
+  const [delayInput, setDelayInput] = useState('3');
+  const [savingDelay, setSavingDelay] = useState(false);
+  const delayDirtyRef = useRef(false); // يمنع الاستقصاء من مسح ما يكتبه المستخدم
 
   const [alertVisible, setAlertVisible] = useState(false);
   const [alertConfig, setAlertConfig] = useState({});
@@ -56,6 +60,10 @@ export default function ReviewJobDetailScreen({ navigation, route }) {
               setJob(res.data);
               setLogs((res.data.logs || []).slice().reverse());
               if (res.data.novelMaxChapter) setNovelMaxChapter(res.data.novelMaxChapter);
+              // مزامنة حقل الفاصل مع الخادم فقط إن لم يعدّله المستخدم الآن
+              if (!savingDelay && !delayDirtyRef.current && res.data.chapterDelayMs !== undefined && res.data.chapterDelayMs !== null) {
+                  setDelayInput(String(res.data.chapterDelayMs / 1000));
+              }
           } catch(e) { console.log(e); }
       };
       fetchDetails();
@@ -121,6 +129,24 @@ export default function ReviewJobDetailScreen({ navigation, route }) {
           showToast("تم حذف المهمة", "success");
           navigation.goBack();
       } catch (e) { showToast("فشل الحذف", "error"); }
+  };
+
+  // ⏱️ حفظ الفاصل الجديد — يسري من الفصل التالي مباشرة دون إيقاف المهمة
+  const saveDelay = async () => {
+      const delaySec = parseFloat(String(delayInput).replace(',', '.'));
+      if (!Number.isFinite(delaySec) || delaySec < 0 || delaySec > 3600) {
+          showToast("أدخل عدد ثوانٍ بين 0 و 3600", "error");
+          return;
+      }
+      setSavingDelay(true);
+      try {
+          await api.post(`/api/review/jobs/${job._id || job.id}/delay`, { seconds: delaySec });
+          delayDirtyRef.current = false;
+          showToast(`تم تغيير الفاصل إلى ${delaySec} ثانية`, "success");
+      } catch (e) {
+          const msg = e?.response?.data?.message || "فشل تغيير الفاصل";
+          showToast(msg, "error");
+      } finally { setSavingDelay(false); }
   };
 
   const renderLog = ({ item }) => {
@@ -237,6 +263,29 @@ export default function ReviewJobDetailScreen({ navigation, route }) {
                 </TouchableOpacity>
             </View>
 
+            {/* ⏱️ الفاصل بين الفصول — تحكم حي بدون إيقاف المهمة */}
+            <GlassContainer style={styles.delayCard}>
+                <View style={{flexDirection:'row-reverse', alignItems:'center', justifyContent:'space-between', gap: 10}}>
+                    <View style={{flex: 1}}>
+                        <Text style={styles.delayCardTitle}>⏱️ الفاصل بين كل فصل (ثواني)</Text>
+                        <Text style={styles.delayCardHint}>يسري من الفصل التالي مباشرة — بدون إيقاف المهمة</Text>
+                    </View>
+                    <TextInput
+                        style={styles.delayCardInput}
+                        placeholder="3"
+                        placeholderTextColor="#666"
+                        keyboardType="decimal-pad"
+                        value={delayInput}
+                        onChangeText={(t) => { delayDirtyRef.current = true; setDelayInput(t); }}
+                    />
+                    <TouchableOpacity style={styles.delayCardBtn} onPress={saveDelay} disabled={savingDelay}>
+                        {savingDelay
+                            ? <ActivityIndicator size="small" color="#000" />
+                            : <Text style={styles.delayCardBtnText}>حفظ</Text>}
+                    </TouchableOpacity>
+                </View>
+            </GlassContainer>
+
             {findings.length > 0 && (
                 <>
                     <Text style={styles.sectionTitle}>🚩 الفصول التي بها خلل ({findings.length})</Text>
@@ -302,6 +351,17 @@ const styles = StyleSheet.create({
       backgroundColor: 'rgba(255,255,255,0.05)', borderWidth: 1
   },
   actionBtnText: { fontWeight: 'bold', fontSize: 14 },
+
+  // ⏱️ بطاقة الفاصل بين الفصول
+  delayCard: { marginBottom: 10, padding: 12 },
+  delayCardTitle: { color: '#fff', fontSize: 13, fontWeight: 'bold', textAlign: 'right' },
+  delayCardHint: { color: '#666', fontSize: 10, textAlign: 'right', marginTop: 3 },
+  delayCardInput: {
+      backgroundColor: '#222', color: '#fff', borderRadius: 8, paddingVertical: 8, paddingHorizontal: 10,
+      width: 72, textAlign: 'center', fontSize: 13,
+  },
+  delayCardBtn: { backgroundColor: '#fff', borderRadius: 8, paddingHorizontal: 16, paddingVertical: 9 },
+  delayCardBtnText: { color: '#000', fontWeight: 'bold', fontSize: 12 },
 
   // 🚩 الفصول المعلَّمة
   findingsHint: { color: '#666', fontSize: 11, textAlign: 'right', marginBottom: 12, marginTop: -8 },

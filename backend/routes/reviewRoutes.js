@@ -23,6 +23,7 @@ const Novel = require('../models/novel.model.js');
 const ReviewJob = require('../models/reviewJob.model.js');
 const ReviewFinding = require('../models/reviewFinding.model.js');
 const Settings = require('../models/settings.model.js');
+const qwenAutoAccount = require('../services/qwenAutoAccount.service.js');
 const {
     callTranslationProvider,
     getGlobalSettings,
@@ -185,7 +186,14 @@ async function processReviewJob(jobId) {
         providers.sort((a, b) => (a.priority || 0) - (b.priority || 0));
 
         const chaptersToProcess = (job.targetChapters || []).slice().sort((a, b) => a - b);
-        await pushLog(jobId, `🔍 بدء المراجعة: ${chaptersToProcess.length} فصلاً — المزوّد الأول ${providers[0].name || providers[0].providerId}`, 'info');
+
+        // ⏱️ الفاصل بين الفصول — مضبوط من الواجهة (ثواني) ويُقرأ حياً من المهمة كل فصل
+        const initialDelaySec = Math.max(0, Math.min(3600, Number(job.chapterDelayMs ?? 3000) / 1000));
+        await pushLog(jobId, `🔍 بدء المراجعة: ${chaptersToProcess.length} فصلاً — المزوّد الأول ${providers[0].name || providers[0].providerId} | ⏱️ الفاصل بين الفصول: ${initialDelaySec} ثانية`, 'info');
+
+        // 🔥 تفضيل المزوّد/التوكن الذي نجح في الفصل السابق (نفس سلوك المترجم:
+        // «سيُكمل النظام من هذا المزود/التوكن في الفصل التالي»)
+        let stickySuccessRoute = null;
 
         for (const chapterNum of chaptersToProcess) {
             const freshJob = await ReviewJob.findById(jobId);
@@ -219,43 +227,175 @@ async function processReviewJob(jobId) {
                     $pull: { targetChapters: chapterNum },
                     $set: { currentChapter: chapterNum, lastUpdate: new Date() }
                 });
+                await delay(Math.max(0, Math.min(3600000, freshJob.chapterDelayMs ?? 3000)));
                 continue;
             }
 
-            // 2) استدعاء المرجع (الذكاء الاصطناعي) عبر مزوّدات المترجم
+            // 2) استدعاء المرجع (الذكاء الاصطناعي) — نفس منطق المزوّدات في المترجم حرفياً:
+            //    Qwen = حسابات تلقائية + وسوم فشل + لا انتقال لمزوّد آخر أبداً.
             const heur = chapterHeuristics(content);
             const prompt = buildReviewPrompt(content, heur);
             let verdict = null;
             let lastErr = null;
 
+            /** محاولة فحص واحدة بتوكن محدد — تُعيد true عند النجاح */
+            const attemptReviewWithToken = async (prov, model, key, keyIdx, keysCount) => {
+                const provName = prov.name || prov.providerId;
+                let raw = null;
+                try {
+                    await pushLog(jobId, `🔎 فحص الفصل ${chapterNum} عبر ${provName} | نموذج: ${model} | مفتاح ${keyIdx + 1}/${keysCount}`, 'info');
+                    raw = await callTranslationProvider(prov, model, key, prompt, {
+                        timeout: 300000,
+                    });
+                } catch (err) {
+                    lastErr = err;
+                    // 🔥 قاتل حلقة «نفس الحساب» — نفس وسوم المترجم:
+                    // RateLimited → 24 ساعة، مصادقة → ميت، خطأ غير مصنّف → موسم 30 دقيقة
+                    if (isQwenProvider(prov)) {
+                        const v = qwenAutoAccount.markTokenFailure(key, err);
+                        if (v === 'rate-limited-24h') {
+                            await pushLog(jobId, `⏳ توكن Qwen مستهلك (RateLimited): وُسم 24 ساعة وسيُستبعد ويُستبدل بحساب جديد تلقائياً`, 'warning');
+                        } else if (v === 'dead') {
+                            await pushLog(jobId, `🔒 توكن Qwen غير صالح (فشل مصادقة): وُسم ميتاً وسيُستبعد`, 'warning');
+                        } else if (v === 'limited-30m') {
+                            await pushLog(jobId, `🧯 فشل غير مصنّف من حساب Qwen (${err.message}) — وُسم التوكن 30 دقيقة احتياطاً حتى لا يتكرر نفس الحساب في الحلقة`, 'warning');
+                        }
+                    }
+                    console.error(`❌ review provider fail (${provName}): ${err.message}`);
+                    await pushLog(jobId, `⚠️ فشل فحص عبر ${provName}: ${err.message}`, 'warning');
+                    return false;
+                }
+                // تحليل الحكم خارج فشل المزوّد — رد JSON تالف لا يوسم التوكن
+                try {
+                    verdictBox.value = parseReviewVerdict(raw);
+                    return true;
+                } catch (_) {
+                    lastErr = new Error('رد غير مفهوم من المرجع (فشل تحليل JSON)');
+                    await pushLog(jobId, `⚠️ رد غير مفهوم من ${provName} (فشل تحليل JSON) — إعادة المحاولة`, 'warning');
+                    return false;
+                }
+            };
+
+            const verdictBox = { value: null };
+
+            const orderedProviders = stickySuccessRoute
+                ? [...providers.slice(stickySuccessRoute.providerIndex), ...providers.slice(0, stickySuccessRoute.providerIndex)]
+                : providers;
+
             outer:
-            for (const provider of providers) {
-                if (verdict) break;
+            for (const provider of orderedProviders) {
+                if (verdictBox.value) break;
+                const providerIndex = providers.indexOf(provider);
                 const providerName = provider.name || provider.providerId;
                 const modelToUse = provider.selectedModel
                     || (provider.models && provider.models[0]?.modelId)
                     || 'gemini-2.5-flash';
                 let keys = getProviderAuthKeys(provider);
-                if (keys.length === 0) {
-                    if (isDeepSeekProvider(provider)) keys = ['dummy-key-for-deepseek'];
-                    else if (isQwenProvider(provider)) keys = ['dummy-key-for-qwen'];
-                    else if (isGeminiWebProvider(provider)) keys = [GUEST_TOKEN_SENTINEL];
+                const isDeepSeek = isDeepSeekProvider(provider);
+                const isQwen = isQwenProvider(provider);
+                const isGeminiWeb = isGeminiWebProvider(provider);
+
+                if (keys.length === 0 && !isDeepSeek && !isQwen && !isGeminiWeb) {
+                    await pushLog(jobId, `⚠️ المزوّد ${providerName} ليس لديه مفاتيح – تخطيه`, 'warning');
+                    continue;
                 }
-                for (const key of keys) {
-                    if (verdict) break outer;
-                    try {
-                        await pushLog(jobId, `🔎 فحص الفصل ${chapterNum} عبر ${providerName} | نموذج: ${modelToUse}`, 'info');
-                        const raw = await callTranslationProvider(provider, modelToUse, key, prompt, {
-                            timeout: 300000,
-                        });
-                        verdict = parseReviewVerdict(raw);
-                    } catch (err) {
-                        lastErr = err;
-                        console.error(`❌ review provider fail (${providerName}): ${err.message}`);
-                        await pushLog(jobId, `⚠️ فشل فحص عبر ${providerName}: ${err.message}`, 'warning');
+                if (isGeminiWeb && keys.length === 0) {
+                    keys = [GUEST_TOKEN_SENTINEL];
+                    await pushLog(jobId, `🟡 تنبيه — وضع الضيف: مزوّد Gemini Web "${providerName}" بلا كوكيز، سيعمل الفحص عبر الوصول المجهول`, 'warning');
+                }
+                if (isDeepSeek && keys.length === 0) {
+                    keys = ['dummy-key-for-deepseek'];
+                    await pushLog(jobId, `🔑 مزوّد DeepSeek: لا توجد توكنات محفوظة، سيتم استخدام الرمز الافتراضي من تطبيق DeepSeek`, 'info');
+                }
+
+                // 🔥🔥🔥 Qwen AUTO-ACCOUNT (Qwen فقط — نفس طريقة المترجم وقانص qwen.py) 🔥🔥🔥
+                // استبعاد التوكنات المستهلكة/الميتة/المملوكة لمزوّد Qwen آخر، وإن لم يبقَ أي توكن
+                // صالح يُنشأ حساب Qwen جديد تلقائياً (بريد مؤقت → تسجيل → تفعيل → توكن).
+                if (isQwen) {
+                    const usableTokens = qwenAutoAccount.filterUsableQwenTokens(keys, provider.providerId);
+                    if (usableTokens.length < keys.length) {
+                        await pushLog(jobId, `🧹 مزوّد Qwen: استبعاد ${keys.length - usableTokens.length} توكن (موسوم/ميت أو مملوك لمزوّد آخر)`, 'info');
+                        keys = usableTokens;
+                    }
+                    if (keys.length === 0) {
+                        await pushLog(jobId, `🤖 مزوّد Qwen: لا يوجد أي توكن صالح لهذا المزوّد — جاري تجهيز حساب Qwen خاص به (بريد مؤقت → تسجيل → تفعيل → توكن)...`, 'info');
+                        try {
+                            const { account, created } = await qwenAutoAccount.ensureQwenAccount(provider.providerId);
+                            provider.qwenTokens = Array.isArray(provider.qwenTokens) ? provider.qwenTokens : [];
+                            if (!provider.qwenTokens.includes(account.token)) provider.qwenTokens.push(account.token);
+                            try { await qwenAutoAccount.persistProviderToken(provider.providerId, account.token); } catch (_) {}
+                            keys = [account.token];
+                            if (created) {
+                                await pushLog(jobId, `✅ تم إنشاء حساب Qwen جديد خاص بهذا المزوّد (${account.email}) وسيبدأ الفحص عليه مباشرة`, 'success');
+                            } else {
+                                await pushLog(jobId, `♻️ إعادة استخدام الحساب التلقائي الصالح الخاص بهذا المزوّد (${account.email}) — لم يُنشأ حساب جديد`, 'info');
+                            }
+                        } catch (accErr) {
+                            await pushLog(jobId, `❌ تعذر إنشاء حساب Qwen تلقائياً الآن: ${accErr.message} — لن ننتقل لمزوّد آخر، سيُعاد الفحص على Qwen عند الاستئناف`, 'warning');
+                            break; // Qwen فقط: لا انتقال لمزوّد آخر أبداً
+                        }
+                    } else {
+                        await pushLog(jobId, `🔑 مزوّد Qwen: سيتم استخدام ${keys.length} توكن صالح`, 'info');
                     }
                 }
+
+                // تفضيل التوكن الذي نجح في الفصل السابق (نفس المترجم)
+                let preferredKeyIdx = 0;
+                if (stickySuccessRoute && stickySuccessRoute.providerIndex === providerIndex && stickySuccessRoute.key) {
+                    const ki = keys.indexOf(stickySuccessRoute.key);
+                    preferredKeyIdx = ki >= 0 ? ki : 0;
+                }
+                const orderedKeyIndexes = [...Array(keys.length).keys()].slice(preferredKeyIdx).concat([...Array(keys.length).keys()].slice(0, preferredKeyIdx));
+
+                for (const keyIdx of orderedKeyIndexes) {
+                    const ok = await attemptReviewWithToken(provider, modelToUse, keys[keyIdx], keyIdx, keys.length);
+                    if (ok) {
+                        stickySuccessRoute = { providerIndex, key: keys[keyIdx] };
+                        break outer;
+                    }
+                    if (verdictBox.value) break outer;
+                }
+
+                // 🔥🔥🔥 Qwen: فشلت كل التوكنات → إنشاء حساب جديد فوراً ومتابعة على Qwen فقط 🔥🔥🔥
+                // (جولتان لكل فصل كما في المترجم — لا توقف ولا انتقال لمزوّد آخر)
+                if (!verdictBox.value && isQwen) {
+                    const AUTO_ROUNDS = 2;
+                    for (let round = 1; round <= AUTO_ROUNDS && !verdictBox.value; round++) {
+                        await pushLog(jobId, `🤖 مزوّد Qwen: فشلت جميع التوكنات — إنشاء حساب Qwen جديد كلياً (جولة ${round}/${AUTO_ROUNDS}) ومتابعة المراجعة على Qwen فقط`, 'info');
+                        let account;
+                        try {
+                            // forceNew: بعد فشل فعلي يُنشأ حساب جديد كلياً دائماً (قاتل الحلقة المفرغة)
+                            const ensured = await qwenAutoAccount.ensureQwenAccount(provider.providerId, { forceNew: true });
+                            account = ensured.account;
+                        } catch (accErr) {
+                            await pushLog(jobId, `❌ تعذر إنشاء حساب Qwen تلقائياً الآن: ${accErr.message} — لن ننتقل لمزوّد آخر، سيُعاد الفحص على Qwen عند الاستئناف`, 'warning');
+                            break;
+                        }
+                        provider.qwenTokens = Array.isArray(provider.qwenTokens) ? provider.qwenTokens : [];
+                        if (!provider.qwenTokens.includes(account.token)) provider.qwenTokens.push(account.token);
+                        try { await qwenAutoAccount.persistProviderToken(provider.providerId, account.token); } catch (_) {}
+                        keys.push(account.token);
+                        await pushLog(jobId, `✅ حساب Qwen جديد كلياً جاهز (${account.email}) — إعادة فحص الفصل ${chapterNum} بالتوكن الجديد`, 'success');
+
+                        const autoKeyIdx = keys.length - 1;
+                        for (let tokenAttempt = 1; tokenAttempt <= 2 && !verdictBox.value; tokenAttempt++) {
+                            const ok = await attemptReviewWithToken(provider, modelToUse, account.token, autoKeyIdx, keys.length);
+                            if (ok) {
+                                stickySuccessRoute = { providerIndex, key: account.token };
+                                break outer;
+                            }
+                        }
+                    }
+                }
+
+                if (!verdictBox.value) {
+                    await pushLog(jobId, `🚫 جميع مفاتيح ${providerName} فشلت`, 'warning');
+                    // 🔥 Qwen فقط: لا انتقال إلى مزوّد آخر — الفصل يبقى معلقاً ويُعاد عند الاستئناف
+                    if (isQwen) break;
+                }
             }
+
+            verdict = verdictBox.value;
 
             if (!verdict) {
                 // لا نُفشل المهمة كلها — يبقى الفصل في قائمة الانتظار ويُعاد عند الاستئناف
@@ -287,7 +427,9 @@ async function processReviewJob(jobId) {
                 });
             }
 
-            await delay(1200);
+            // ⏱️ الفاصل بين الفصول — يُقرأ حياً من المهمة حتى يسري تغييره من الواجهة فوراً
+            const postJob = await ReviewJob.findById(jobId).select('chapterDelayMs');
+            await delay(Math.max(0, Math.min(3600000, postJob?.chapterDelayMs ?? 3000)));
         }
 
         // النهاية: إن لم تبق فصول مستهدفة والمهمة لا تزال نشطة → مكتملة
@@ -345,6 +487,14 @@ async function recordFinding(job, novel, chapterNum, storedTitle, types, details
     } catch (e) { console.log('ReviewFinding upsert error:', e.message); }
 }
 
+// ⏱️ تحويل قيمة الفاصل من الواجهة (ثواني) إلى ملي ثانية مع تحقق صارم — null إن كانت غير صالحة
+function parseChapterDelaySeconds(value) {
+    if (value === undefined || value === null || value === '') return null;
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 0 || n > 3600) return null;
+    return Math.round(n * 1000);
+}
+
 // =========================================================
 // 🔗 المسارات
 // =========================================================
@@ -380,10 +530,10 @@ module.exports = function (app, verifyToken, verifyAdmin) {
         }
     });
 
-    // 2) بدء مهمة مراجعة (أو استئناف ب jobId)
+    // 2) بدء مهمة مراجعة (أو استئناف ب jobId) — يقبل chapterDelay بالثواني (الفاصل بين الفصول)
     app.post('/api/review/start', verifyToken, verifyAdmin, async (req, res) => {
         try {
-            const { novelId, chapters, jobId } = req.body;
+            const { novelId, chapters, jobId, chapterDelay } = req.body;
 
             if (jobId) {
                 const existingJob = await ReviewJob.findById(jobId);
@@ -391,8 +541,10 @@ module.exports = function (app, verifyToken, verifyAdmin) {
                 if ((existingJob.targetChapters || []).length === 0) {
                     return res.status(400).json({ message: "لا توجد فصول متبقية في هذه المهمة" });
                 }
+                const delayMs = parseChapterDelaySeconds(chapterDelay);
+                if (delayMs !== null) existingJob.chapterDelayMs = delayMs;
                 existingJob.status = 'active';
-                existingJob.logs.push({ message: '▶️ تم استئناف مهمة المراجعة', type: 'info' });
+                existingJob.logs.push({ message: '▶️ تم استئناف مهمة المراجعة' + (delayMs !== null ? ` | ⏱️ الفاصل: ${delayMs / 1000} ثانية` : ''), type: 'info' });
                 await existingJob.save();
                 processReviewJob(existingJob._id);
                 return res.json({ message: "Job resumed", jobId: existingJob._id });
@@ -430,13 +582,17 @@ module.exports = function (app, verifyToken, verifyAdmin) {
                 return res.status(400).json({ message: "لا توجد فصول لمراجعتها" });
             }
 
+            const delayMs = parseChapterDelaySeconds(chapterDelay);
+            const effectiveDelayMs = delayMs === null ? 3000 : delayMs;
+
             const job = new ReviewJob({
                 novelId,
                 novelTitle: novel.title,
                 cover: novel.cover,
                 targetChapters,
                 totalToReview: targetChapters.length,
-                logs: [{ message: `تم بدء مراجعة «${novel.title}» (استهداف ${targetChapters.length} فصلاً)`, type: 'info' }]
+                chapterDelayMs: effectiveDelayMs,
+                logs: [{ message: `تم بدء مراجعة «${novel.title}» (استهداف ${targetChapters.length} فصلاً) | ⏱️ الفاصل بين الفصول: ${effectiveDelayMs / 1000} ثانية`, type: 'info' }]
             });
             await job.save();
             processReviewJob(job._id);
@@ -465,6 +621,28 @@ module.exports = function (app, verifyToken, verifyAdmin) {
         try {
             await ReviewJob.findByIdAndDelete(req.params.id);
             res.json({ message: "Job deleted" });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // 4.5) ⏱️ تغيير الفاصل بين الفصول لمهمة جارية (يتأثر من الفصل التالي فوراً)
+    app.post('/api/review/jobs/:id/delay', verifyToken, verifyAdmin, async (req, res) => {
+        try {
+            const delayMs = parseChapterDelaySeconds(req.body?.seconds);
+            if (delayMs === null) {
+                return res.status(400).json({ message: "قيمة فاصل غير صالحة — أدخل عدد ثوانٍ بين 0 و 3600" });
+            }
+            const job = await ReviewJob.findByIdAndUpdate(
+                req.params.id,
+                {
+                    $set: { chapterDelayMs: delayMs, lastUpdate: new Date() },
+                    $push: { logs: { message: `⏱️ تم تغيير الفاصل بين الفصول إلى ${delayMs / 1000} ثانية`, type: 'info' } }
+                },
+                { new: true }
+            );
+            if (!job) return res.status(404).json({ message: "Job not found" });
+            res.json({ message: "Delay updated", chapterDelayMs: job.chapterDelayMs });
         } catch (e) {
             res.status(500).json({ error: e.message });
         }
@@ -562,13 +740,15 @@ module.exports = function (app, verifyToken, verifyAdmin) {
             if (findings.length === 0) return res.status(400).json({ message: "لا توجد فصول معلَّمة لهذه الرواية" });
             const novel = await Novel.findById(novelId);
             if (!novel) return res.status(404).json({ message: "Novel not found" });
+            const reReviewDelayMs = parseChapterDelaySeconds(req.body?.chapterDelay) ?? 3000;
             const job = new ReviewJob({
                 novelId,
                 novelTitle: novel.title,
                 cover: novel.cover,
                 targetChapters: findings.map(f => f.chapter),
                 totalToReview: findings.length,
-                logs: [{ message: `🔁 إعادة مراجعة ${findings.length} فصلاً معلَّماً`, type: 'info' }]
+                chapterDelayMs: reReviewDelayMs,
+                logs: [{ message: `🔁 إعادة مراجعة ${findings.length} فصلاً معلَّماً | ⏱️ الفاصل: ${reReviewDelayMs / 1000} ثانية`, type: 'info' }]
             });
             await job.save();
             processReviewJob(job._id);
