@@ -1,12 +1,16 @@
 /**
  * 📚 المستخرج الذكي — استخراج مصطلحات الرواية كاملة قبل الترجمة (نظام جديد مستقل)
  *
- * نفس نمط المترجم الذكي/المراجع الذكي بالضبط (reviewRoutes):
- *  - مهمة (GlossaryExtractionJob) لها حالة/سجل حي/إيقاف مؤقت/استئناف/حذف
- *  - عامل خلفي يمر على الفصول واحداً تلو الآخر من نفس مخزن النصوص (Firestore)
- *  - يستدعي نفس مزوّدات الذكاء الاصطناعي المضبوطة في إعدادات المترجم (نفس المفاتيح)
- *  - Qwen = حسابات تلقائية + وسوم فشل + لا انتقال لمزوّد آخر أبداً (حرفياً كالمترجم)
- *  - ⏱️ فاصل بين الفصول يضبطه المستخدم من الواجهة ويُقرأ حياً كل فصل
+ * ⚡ حلقة المزوّدات هنا منقولة حرفياً من المترجم الأصلي (translatorRoutes →
+ *    processTranslationJob) — نفس البنية ونفس السجلات ونفس السلوك بلا أي ابتعاد:
+ *      • محادثات لاصقة لكل توكن (نفس أغراض/دفاتر المترجم — 100 فصل لكل دفعة)
+ *      • التوكن اللاصق لديه 5 محاولات (DEEPSEEK_MAX_ATTEMPTS_PER_TOKEN) ثم ينتقل
+ *        للتوكِن التالي («➡️ فشل التوكن ... الانتقال لتوكن آخر»)
+ *      • Qwen = استبعاد التوكنات الموسومة/الميتة/المملوكة لمزوّد آخر + حسابات
+ *        تلقائية عند نقص التوكنات + جولتا حساب جديد كلياً (forceNew) عند فشل الكل
+ *        + «لا انتقال لمزوّد آخر أبداً» + وسوم الفشل (24س/ميت/30د) كما هي
+ *      • فشل كامل → انتظار 30 دقيقة وإعادة المحاولة على نفس الفصل (كالمترجم)
+ *      • تفضيل المزوّد/التوكن الناجح في الفصل السابق (stickySuccessRoute)
  *
  * الفرق الوحيد عن المترجم: بدل ترجمة الفصل، يستخرج من نصه الأصلي (أي لغة)
  * المصطلحات (أسماء شخصيات/أماكن/عناصر/رتب/مفاهيم) مع اقتراح الترجمة العربية،
@@ -29,6 +33,14 @@ const {
     isQwenProvider,
     isGeminiWebProvider,
     GUEST_TOKEN_SENTINEL,
+    // 🔥 نفس أدوات حلقة المترجم الأصلي — إعادة استخدام بلا نسخ ولا انحراف:
+    isStickyChatProvider,
+    resetConversationContextPurposeForScope,
+    getTokenConversationScope,
+    isTranslationOnlyModel,
+    findLLMModel,
+    DEEPSEEK_CHAPTERS_PER_CONVERSATION,
+    DEEPSEEK_MAX_ATTEMPTS_PER_TOKEN,
 } = require('./translatorRoutes')._ai;
 
 // --- Firestore Setup (MANDATORY — نفس مخزن فصول المترجم) ---
@@ -172,7 +184,11 @@ async function pushLog(jobId, message, type) {
 }
 
 // =========================================================
-// 🔁 عامل الاستخراج — نفس دورة عامل المراجعة/الترجمة (مزوّدات/مفاتيح/استئناف)
+// 🔁 عامل الاستخراج — حلقة المزوّدات منقولة حرفياً من عامل المترجم الأصلي:
+//    مزوّدات مرتبة بالأولوية → 5 محاولات لكل توكن لاصق → انتقال للتوكِن التالي
+//    → حسابات Qwen تلقائية (جولتان forceNew) → بلا انتقال لمزوّد آخر أبداً
+//    → إعادة المحاولة على نفس الفصل بعد 30 دقيقة حتى ينجح.
+//    الفرق الوحيد: بعد نجاح النداء نستخرج المصطلحات بدل ترجمة الفصل.
 // =========================================================
 async function processGlossaryJob(jobId) {
     try {
@@ -217,7 +233,7 @@ async function processGlossaryJob(jobId) {
         }
         if (providers.length === 0) {
             job.status = 'failed';
-            job.logs.push({ message: 'لا توجد مزوّدات ذكاء اصطناعي مفعّلة — أضف المفاتيح من إعدادات المترجم أولاً (المستخرج يستخدم نفس المزوّدات)', type: 'error' });
+            job.logs.push({ message: 'لا توجد مزوّدات ذكاء اصطناعي مفعّلة مع مفاتيح API.', type: 'error' });
             await job.save();
             return;
         }
@@ -229,16 +245,25 @@ async function processGlossaryJob(jobId) {
         const initialDelaySec = Math.max(0, Math.min(3600, Number(job.chapterDelayMs ?? 3000) / 1000));
         await pushLog(jobId, `📚 بدء استخراج المصطلحات: ${chaptersToProcess.length} فصلاً — المزوّد الأول ${providers[0].name || providers[0].providerId} | ⏱️ الفاصل بين الفصول: ${initialDelaySec} ثانية`, 'info');
 
+        // 🔥 محادثات لاصقة لكل توكن (نفس نظام المترجم: أغراض المحادثة + دفعة 100 فصل)
+        const conversationContexts = { glossary: new Map() };
         // 🔥 تفضيل المزوّد/التوكن الذي نجح في الفصل السابق (نفس سلوك المترجم)
         let stickySuccessRoute = null;
 
-        for (const chapterNum of chaptersToProcess) {
+        for (const [chapterIndex, chapterNum] of chaptersToProcess.entries()) {
             const freshJob = await GlossaryExtractionJob.findById(jobId);
+            // 🔥 Check for pause or stop (كالمترجم حرفياً)
             if (!freshJob || freshJob.status !== 'active') {
                 if (freshJob && freshJob.status === 'paused') {
                     await pushLog(jobId, `⏸️ تم إيقاف الاستخراج مؤقتاً عند الفصل ${chapterNum}`, 'warning');
                 }
                 break;
+            }
+
+            const conversationBatchKey = Math.floor(chapterIndex / DEEPSEEK_CHAPTERS_PER_CONVERSATION);
+            const isFirstChapterInBatch = chapterIndex % DEEPSEEK_CHAPTERS_PER_CONVERSATION === 0;
+            if (isFirstChapterInBatch) {
+                await pushLog(jobId, `💬 بدء محادثات جديدة للفصول ${chapterIndex + 1}-${Math.min(chapterIndex + DEEPSEEK_CHAPTERS_PER_CONVERSATION, chaptersToProcess.length)} (استخراج المصطلحات)`, 'info');
             }
 
             // 1) جلب نص الفصل الأصلي من نفس مخزن المترجم
@@ -261,175 +286,258 @@ async function processGlossaryJob(jobId) {
                 continue;
             }
 
-            // 2) استدعاء المستخرج (الذكاء الاصطناعي) — نفس منطق المزوّدات في المترجم حرفياً:
-            //    Qwen = حسابات تلقائية + وسوم فشل + لا انتقال لمزوّد آخر أبداً.
+            // 2) 🔁 نفس حلقة المترجم حرفياً: while → مزوّدات → 5 محاولات لكل توكن →
+            //    حسابات Qwen تلقائية → انتظار 30 دقيقة → إعادة المحاولة على نفس الفصل
             const prompt = buildExtractionPrompt(content, chapterNum);
+            const RETRY_DELAY_MS = 30 * 60 * 1000;
+            let attempt = 0;
             let extractedTerms = null;
-            let lastErr = null;
+            let extractionSuccess = false;
+            // نفس مبدأ lastValidationReasons في المترجم: نوع فشل المحاولة السابقة
+            // ('review' = رد غير JSON → توجيه إصلاحي | 'error' = فشل مزوّد)
+            let chapterFailureKind = null;
 
-            /** محاولة استخراج واحدة بتوكن محدد — تُعيد true عند النجاح */
-            const attemptExtractWithToken = async (prov, model, key, keyIdx, keysCount) => {
-                const provName = prov.name || prov.providerId;
-                let raw = null;
-                try {
-                    await pushLog(jobId, `📚 استخراج مصطلحات الفصل ${chapterNum} عبر ${provName} | نموذج: ${model} | مفتاح ${keyIdx + 1}/${keysCount}`, 'info');
-                    raw = await callTranslationProvider(prov, model, key, prompt, {
-                        timeout: 300000,
-                    });
-                } catch (err) {
-                    lastErr = err;
-                    // 🔥 قاتل حلقة «نفس الحساب» — نفس وسوم المترجم:
-                    // RateLimited → 24 ساعة، مصادقة → ميت، خطأ غير مصنّف → موسم 30 دقيقة
-                    if (isQwenProvider(prov)) {
-                        const v = qwenAutoAccount.markTokenFailure(key, err);
-                        if (v === 'rate-limited-24h') {
-                            await pushLog(jobId, `⏳ توكن Qwen مستهلك (RateLimited): وُسم 24 ساعة وسيُستبعد ويُستبدل بحساب جديد تلقائياً`, 'warning');
-                        } else if (v === 'dead') {
-                            await pushLog(jobId, `🔒 توكن Qwen غير صالح (فشل مصادقة): وُسم ميتاً وسيُستبعد`, 'warning');
-                        } else if (v === 'limited-30m') {
-                            await pushLog(jobId, `🧯 فشل غير مصنّف من حساب Qwen (${err.message}) — وُسم التوكن 30 دقيقة احتياطاً حتى لا يتكرر نفس الحساب في الحلقة`, 'warning');
+            while (!extractionSuccess) {
+                attempt++;
+                const freshAttemptJob = await GlossaryExtractionJob.findById(jobId);
+                if (!freshAttemptJob || freshAttemptJob.status !== 'active') break;
+
+                if (attempt > 1) {
+                    await pushLog(jobId, `🔄 محاولة ${attempt}: إعادة استخراج مصطلحات الفصل ${chapterNum} حتى ينجح`, 'info');
+                }
+
+                // نفس مبدأ إعادة الترجمة الإصلاحية (buildRepairTranslationPrompt) في المترجم:
+                // فشل JSON في المحاولة السابقة → توجيه إصلاحي يصرّ بمخرجات JSON فقط
+                const promptForAttempt = chapterFailureKind === 'review'
+                    ? `${prompt}\n\n⚠️ ملاحظة إصلاحية: محاولتك السابقة لم تُرجع JSON صالحاً. أعد المحاولة وأخرج مصفوفة JSON فقط (تبدأ بـ [ وتنتهي بـ ]) دون أي شرح أو backticks أو أي نص إضافي.`
+                    : prompt;
+
+                // 🔥 محاولة استخراج كاملة بتوكن واحد — نفس بنية attemptChapterWithToken في المترجم
+                //    حرفياً: النتيجة { ok: true } أو { ok: false, kind: 'review' | 'error' }.
+                const attemptExtractWithToken = async (prov, model, key, keyIdx, keysCount, tokenAttempt, tokenAttempts, attemptNo) => {
+                    const provName = prov.name || prov.providerId;
+                    const provIsSticky = isStickyChatProvider(prov);
+                    const conversationScopeKey = provIsSticky ? getTokenConversationScope(prov, key, keyIdx) : undefined;
+                    try {
+                        const retryLabel = provIsSticky ? ` | محاولة التوكن ${tokenAttempt}/${tokenAttempts}` : '';
+                        await pushLog(jobId, `1️⃣ مزوّد: ${provName} | نموذج: ${model} | مفتاح ${keyIdx + 1}/${keysCount} | محاولة ${attemptNo}${retryLabel}`, 'info');
+                        let raw;
+                        try {
+                            raw = await callTranslationProvider(prov, model, key, promptForAttempt, {
+                                deepSeekJobId: jobId.toString(),
+                                conversationContexts,
+                                conversationPurpose: 'glossary',
+                                conversationBatchKey,
+                                conversationScopeKey,
+                                // 🔥 يسمح لخدمة Gemini Web بإظهار ملاحظات الإكمال التلقائي في سجل المهمة
+                                log: (msg, level) => pushLog(jobId, `[Gemini Web] ${msg}`, level || 'info')
+                            });
+                        } catch (genErr) {
+                            // 🔥 قاتل حلقة "نفس الحساب" — نفس وسوم المترجم حرفياً:
+                            // RateLimited → 24 ساعة، مصادقة → ميت، خطأ غير مصنّف → موسم 30 دقيقة
+                            if (isQwenProvider(prov)) {
+                                const verdict = qwenAutoAccount.markTokenFailure(key, genErr);
+                                if (verdict === 'rate-limited-24h') {
+                                    await pushLog(jobId, `⏳ توكن Qwen مستهلك (RateLimited): وُسم 24 ساعة وسيُستبعد ويُستبدل بحساب جديد تلقائياً`, 'warning');
+                                } else if (verdict === 'dead') {
+                                    await pushLog(jobId, `🔒 توكن Qwen غير صالح (فشل مصادقة): وُسم ميتاً وسيُستبعد`, 'warning');
+                                } else if (verdict === 'limited-30m') {
+                                    await pushLog(jobId, `🧯 فشل غير مصنّف من حساب Qwen (${genErr.message}) — وُسم التوكن 30 دقيقة احتياطاً حتى لا يتكرر نفس الحساب في الحلقة`, 'warning');
+                                }
+                            }
+                            throw genErr;
+                        }
+                        // تحليل الرد خارج فشل المزوّد — رد JSON تالف لا يوسم التوكن
+                        // (نفس مبدأ فشل المراجعة في المترجم: kind 'review' → إعادة محاولة بلا إنشاء حسابات)
+                        try {
+                            const terms = parseExtractedTerms(raw);
+                            extractedTerms = terms;
+                            chapterFailureKind = null;
+                            extractionSuccess = true;
+                            stickySuccessRoute = { providerIndex: providers.indexOf(prov), keyIdx, key };
+                            await pushLog(jobId, `✅ نجح استخراج المصطلحات باستخدام ${provName} (سيُكمل النظام من هذا المزود/التوكن في الفصل التالي)`, 'success');
+                            return { ok: true, kind: null };
+                        } catch (_) {
+                            chapterFailureKind = 'review';
+                            if (provIsSticky) resetConversationContextPurposeForScope(conversationContexts, 'glossary', conversationScopeKey, conversationBatchKey);
+                            await pushLog(jobId, `⚠️ رد غير مفهوم من ${provName} (فشل تحليل JSON) — إعادة المحاولة`, 'warning');
+                            return { ok: false, kind: 'review' };
+                        }
+                    } catch (err) {
+                        console.error(`❌ (glossary-extract) فشل ${provName} مفتاح ${keyIdx + 1}: ${err.message}`);
+                        chapterFailureKind = 'error';
+                        await pushLog(jobId, `❌ فشل: ${err.message}`, 'warning');
+
+                        // 🔥 Qwen: وسوم صامتة لأخطاء المصنّفة (كالمترجم حرفياً)
+                        if (isQwenProvider(prov)) {
+                            if (err && err.name === 'QwenRateLimitedError') qwenAutoAccount.markTokenRateLimited(key);
+                            else if (err && err.name === 'QwenAuthError') qwenAutoAccount.markTokenDead(key);
+                        }
+
+                        if (provIsSticky && tokenAttempt < tokenAttempts) {
+                            resetConversationContextPurposeForScope(conversationContexts, 'glossary', conversationScopeKey, conversationBatchKey);
+                            await pushLog(jobId, `🔁 مزوّد المحادثة: سيتم إنشاء محادثات جديدة لنفس التوكن قبل إعادة المحاولة ${tokenAttempt + 1}/${tokenAttempts}`, 'warning');
+                            await delay(3000);
+                        }
+                        return { ok: false, kind: 'error' };
+                    }
+                };
+
+                const orderedProviders = stickySuccessRoute
+                    ? [...providers.slice(stickySuccessRoute.providerIndex), ...providers.slice(0, stickySuccessRoute.providerIndex)]
+                    : providers;
+
+                for (const provider of orderedProviders) {
+                    if (extractionSuccess) break;
+                    const providerIndex = providers.indexOf(provider);
+                    const providerName = provider.name || provider.providerId;
+                    const modelToUse = provider.selectedModel || (provider.models && provider.models[0]?.modelId) || 'gemini-2.5-flash';
+                    // 🔥 نفس استبدال خطوة الاستخراج في المترجم: نموذج ترجمة فقط (مثل m2m100)
+                    // لا يصلح للاستخراج → يُستبدل بأول نموذج LLM لدى المزوّد
+                    const modelForExtraction = isTranslationOnlyModel(modelToUse)
+                        ? (findLLMModel(provider)?.modelId || modelToUse)
+                        : modelToUse;
+                    let keys = getProviderAuthKeys(provider);
+                    const isDeepSeek = isDeepSeekProvider(provider);
+                    const isQwen = isQwenProvider(provider);
+                    const isGeminiWeb = isGeminiWebProvider(provider);
+                    const isStickyChat = isStickyChatProvider(provider);
+
+                    if (keys.length === 0 && !isDeepSeek && !isQwen && !isGeminiWeb) {
+                        await pushLog(jobId, `⚠️ المزوّد ${providerName} ليس لديه مفاتيح – تخطيه`, 'warning');
+                        continue;
+                    }
+                    // 🔥 وضع الضيف (نفس المترجم): مزوّد Gemini Web يعمل حتى بدون أي كوكيز
+                    if (isGeminiWeb && keys.length === 0) {
+                        keys = [GUEST_TOKEN_SENTINEL];
+                        await pushLog(jobId, `🟡 تنبيه — وضع الضيف: مزوّد Gemini Web "${providerName}" بلا كوكيز، سيعمل الاستخراج عبر الوصول المجهول (بدون حساب). لتجربة أفضل وأسرع أضف كوكيز حساب Google في حقل المفاتيح`, 'warning');
+                    }
+                    if (isDeepSeek && keys.length === 0) {
+                        keys = ['dummy-key-for-deepseek'];
+                        await pushLog(jobId, `🔑 مزوّد DeepSeek: لا توجد توكنات محفوظة، سيتم استخدام الرمز الافتراضي من تطبيق DeepSeek`, 'info');
+                    } else if (isDeepSeek) {
+                        await pushLog(jobId, `🔑 مزوّد DeepSeek: سيتم استخدام ${keys.length} توكن محفوظ من حقل المفاتيح/التوكنات`, 'info');
+                    }
+
+                    // 🔥🔥🔥 Qwen AUTO-ACCOUNT (Qwen فقط — نفس طريقة المترجم حرفياً) 🔥🔥🔥
+                    // لا نعتمد فقط على المفاتيح المحفوظة: تُستبعد التوكنات المستهلكة/الميتة،
+                    // وإن لم يبقَ أي توكن صالح يُنشأ حساب Qwen جديد تلقائياً
+                    // (بريد مؤقت → تسجيل → تفعيل → توكن) ويُكمل الاستخراج عليه فوراً.
+                    if (isQwen) {
+                        // 🔥 وعي الملكية: يُستبعد أيضاً أي توكن حساب تلقائي مملوك لمزوّد Qwen آخر —
+                        // كل مزوّد يعمل على حساباته هو فقط فلا يتشارك مزوّدان حساباً واحداً.
+                        const usableTokens = qwenAutoAccount.filterUsableQwenTokens(keys, provider.providerId);
+                        if (usableTokens.length < keys.length) {
+                            await pushLog(jobId, `🧹 مزوّد Qwen: استبعاد ${keys.length - usableTokens.length} توكن (موسوم/ميت أو مملوك لمزوّد آخر)`, 'info');
+                            keys = usableTokens;
+                        }
+                        if (keys.length === 0) {
+                            await pushLog(jobId, `🤖 مزوّد Qwen: لا يوجد أي توكن صالح لهذا المزوّد — جاري تجهيز حساب Qwen خاص به (بريد مؤقت → تسجيل → تفعيل → توكن)...`, 'info');
+                            try {
+                                const { account, created } = await qwenAutoAccount.ensureQwenAccount(provider.providerId);
+                                provider.qwenTokens = Array.isArray(provider.qwenTokens) ? provider.qwenTokens : [];
+                                if (!provider.qwenTokens.includes(account.token)) provider.qwenTokens.push(account.token);
+                                try { await qwenAutoAccount.persistProviderToken(provider.providerId, account.token); } catch (_) {}
+                                keys = [account.token];
+                                if (created) {
+                                    await pushLog(jobId, `✅ تم إنشاء حساب Qwen جديد خاص بهذا المزوّد (${account.email}) وسيبدأ الاستخراج عليه مباشرة`, 'success');
+                                } else {
+                                    await pushLog(jobId, `♻️ إعادة استخدام الحساب التلقائي الصالح الخاص بهذا المزوّد (${account.email}) — لم يُنشأ حساب جديد`, 'info');
+                                }
+                            } catch (accErr) {
+                                await pushLog(jobId, `❌ تعذر إنشاء حساب Qwen تلقائياً الآن: ${accErr.message} — لن ننتقل لمزوّد آخر، ستُعاد المحاولة على Qwen`, 'warning');
+                                break; // Qwen فقط: لا انتقال لمزوّد آخر أبداً
+                            }
+                        } else {
+                            await pushLog(jobId, `🔑 مزوّد Qwen: سيتم استخدام ${keys.length} توكن صالح`, 'info');
                         }
                     }
-                    console.error(`❌ glossary-extract provider fail (${provName}): ${err.message}`);
-                    await pushLog(jobId, `⚠️ فشل الاستخراج عبر ${provName}: ${err.message}`, 'warning');
-                    return false;
-                }
-                // تحليل الرد خارج فشل المزوّد — رد JSON تالف لا يوسم التوكن
-                try {
-                    const terms = parseExtractedTerms(raw);
-                    extractedTerms = terms;
-                    return true;
-                } catch (_) {
-                    lastErr = new Error('رد غير مفهوم من المستخرج (فشل تحليل JSON)');
-                    await pushLog(jobId, `⚠️ رد غير مفهوم من ${provName} (فشل تحليل JSON) — إعادة المحاولة`, 'warning');
-                    return false;
-                }
-            };
 
-            const termsBox = { value: null };
-
-            const orderedProviders = stickySuccessRoute
-                ? [...providers.slice(stickySuccessRoute.providerIndex), ...providers.slice(0, stickySuccessRoute.providerIndex)]
-                : providers;
-
-            outer:
-            for (const provider of orderedProviders) {
-                if (termsBox.value) break;
-                const providerIndex = providers.indexOf(provider);
-                const providerName = provider.name || provider.providerId;
-                const modelToUse = provider.selectedModel
-                    || (provider.models && provider.models[0]?.modelId)
-                    || 'gemini-2.5-flash';
-                let keys = getProviderAuthKeys(provider);
-                const isDeepSeek = isDeepSeekProvider(provider);
-                const isQwen = isQwenProvider(provider);
-                const isGeminiWeb = isGeminiWebProvider(provider);
-
-                if (keys.length === 0 && !isDeepSeek && !isQwen && !isGeminiWeb) {
-                    await pushLog(jobId, `⚠️ المزوّد ${providerName} ليس لديه مفاتيح – تخطيه`, 'warning');
-                    continue;
-                }
-                if (isGeminiWeb && keys.length === 0) {
-                    keys = [GUEST_TOKEN_SENTINEL];
-                    await pushLog(jobId, `🟡 تنبيه — وضع الضيف: مزوّد Gemini Web "${providerName}" بلا كوكيز، سيعمل الاستخراج عبر الوصول المجهول`, 'warning');
-                }
-                if (isDeepSeek && keys.length === 0) {
-                    keys = ['dummy-key-for-deepseek'];
-                    await pushLog(jobId, `🔑 مزوّد DeepSeek: لا توجد توكنات محفوظة، سيتم استخدام الرمز الافتراضي من تطبيق DeepSeek`, 'info');
-                }
-
-                // 🔥🔥🔥 Qwen AUTO-ACCOUNT (Qwen فقط — نفس طريقة المترجم حرفياً) 🔥🔥🔥
-                // استبعاد التوكنات المستهلكة/الميتة/المملوكة لمزوّد Qwen آخر، وإن لم يبقَ أي توكن
-                // صالح يُنشأ حساب Qwen جديد تلقائياً (بريد مؤقت → تسجيل → تفعيل → توكن).
-                if (isQwen) {
-                    const usableTokens = qwenAutoAccount.filterUsableQwenTokens(keys, provider.providerId);
-                    if (usableTokens.length < keys.length) {
-                        await pushLog(jobId, `🧹 مزوّد Qwen: استبعاد ${keys.length - usableTokens.length} توكن (موسوم/ميت أو مملوك لمزوّد آخر)`, 'info');
-                        keys = usableTokens;
+                    // تفضيل التوكن الذي نجح في الفصل السابق (مطابقة بالنص لتحمّل تصفية التوكنات)
+                    let preferredKeyIdx = 0;
+                    if (stickySuccessRoute && stickySuccessRoute.providerIndex === providerIndex && stickySuccessRoute.key) {
+                        const ki = keys.indexOf(stickySuccessRoute.key);
+                        preferredKeyIdx = ki >= 0 ? ki : 0;
                     }
-                    if (keys.length === 0) {
-                        await pushLog(jobId, `🤖 مزوّد Qwen: لا يوجد أي توكن صالح لهذا المزوّد — جاري تجهيز حساب Qwen خاص به (بريد مؤقت → تسجيل → تفعيل → توكن)...`, 'info');
-                        try {
-                            const { account, created } = await qwenAutoAccount.ensureQwenAccount(provider.providerId);
+                    const orderedKeyIndexes = [...Array(keys.length).keys()].slice(preferredKeyIdx).concat([...Array(keys.length).keys()].slice(0, preferredKeyIdx));
+
+                    let lastFailureKind = null;
+                    for (const keyIdx of orderedKeyIndexes) {
+                        const key = keys[keyIdx];
+                        // 🔥 التوكن اللاصق لديه 5 محاولات (كالمترجم حرفياً) ثم ينتقل للتوكِن التالي
+                        const tokenAttempts = isStickyChat ? DEEPSEEK_MAX_ATTEMPTS_PER_TOKEN : 1;
+                        let tokenFailed = false;
+
+                        for (let tokenAttempt = 1; tokenAttempt <= tokenAttempts; tokenAttempt++) {
+                            const result = await attemptExtractWithToken(provider, modelForExtraction, key, keyIdx, keys.length, tokenAttempt, tokenAttempts, attempt);
+                            if (result.ok) { lastFailureKind = null; break; }
+                            tokenFailed = true;
+                            lastFailureKind = result.kind || 'error';
+                        }
+
+                        if (extractionSuccess) break;
+                        if (isStickyChat && tokenFailed && keyIdx < keys.length - 1) {
+                            await pushLog(jobId, `➡️ ${providerName}: فشل التوكن ${keyIdx + 1} بعد ${tokenAttempts} محاولات؛ الانتقال لتوكن آخر وسيستمر استخدامه إذا نجح`, 'warning');
+                            await delay(3000);
+                        } else if (!isStickyChat && keyIdx < keys.length - 1) {
+                            await delay(3000);
+                        }
+                    }
+
+                    // 🔥🔥🔥 Qwen AUTO-ACCOUNT: فشلت كل التوكنات → إنشاء حساب جديد فوراً ومتابعة على Qwen فقط 🔥🔥🔥
+                    // جولتان لكل محاولة (كالمترجم حرفياً). لا يتوقف ولا ينتقل لمزوّد آخر.
+                    if (!extractionSuccess && isQwen && lastFailureKind === 'error') {
+                        const AUTO_ROUNDS = 2;
+                        for (let round = 1; round <= AUTO_ROUNDS && !extractionSuccess; round++) {
+                            await pushLog(jobId, `🤖 مزوّد Qwen: فشلت جميع التوكنات (${keys.length}) — إنشاء حساب Qwen جديد كلياً (جولة ${round}/${AUTO_ROUNDS}) ومتابعة الاستخراج على Qwen فقط`, 'info');
+                            let account;
+                            let accountCreated = false;
+                            try {
+                                // 🔥 forceNew: بعد فشل فعلي يُنشأ حساب جديد كلياً دائماً —
+                                // لا إعادة استخدام للحساب الفاشل مهما كان (قاتل الحلقة المفرغة).
+                                const ensured = await qwenAutoAccount.ensureQwenAccount(provider.providerId, { forceNew: true });
+                                account = ensured.account;
+                                accountCreated = ensured.created;
+                            } catch (accErr) {
+                                await pushLog(jobId, `❌ تعذر إنشاء حساب Qwen تلقائياً الآن: ${accErr.message} — لن ننتقل لمزوّد آخر، ستُعاد المحاولة على Qwen`, 'warning');
+                                break;
+                            }
                             provider.qwenTokens = Array.isArray(provider.qwenTokens) ? provider.qwenTokens : [];
                             if (!provider.qwenTokens.includes(account.token)) provider.qwenTokens.push(account.token);
                             try { await qwenAutoAccount.persistProviderToken(provider.providerId, account.token); } catch (_) {}
-                            keys = [account.token];
-                            if (created) {
-                                await pushLog(jobId, `✅ تم إنشاء حساب Qwen جديد خاص بهذا المزوّد (${account.email}) وسيبدأ الاستخراج عليه مباشرة`, 'success');
+                            keys.push(account.token);
+                            if (accountCreated) {
+                                await pushLog(jobId, `✅ حساب Qwen جديد كلياً جاهز (${account.email}) — إعادة استخراج الفصل ${chapterNum} بالتوكن الجديد`, 'success');
                             } else {
-                                await pushLog(jobId, `♻️ إعادة استخدام الحساب التلقائي الصالح الخاص بهذا المزوّد (${account.email}) — لم يُنشأ حساب جديد`, 'info');
+                                await pushLog(jobId, `⚠️ تعذّر إنشاء حساب مختلف الآن — إعادة المحاولة على حساب موجود (${account.email})`, 'warning');
                             }
-                        } catch (accErr) {
-                            await pushLog(jobId, `❌ تعذر إنشاء حساب Qwen تلقائياً الآن: ${accErr.message} — لن ننتقل لمزوّد آخر، سيُعاد الاستخراج على Qwen عند الاستئناف`, 'warning');
-                            break; // Qwen فقط: لا انتقال لمزوّد آخر أبداً
-                        }
-                    } else {
-                        await pushLog(jobId, `🔑 مزوّد Qwen: سيتم استخدام ${keys.length} توكن صالح`, 'info');
-                    }
-                }
 
-                // تفضيل التوكن الذي نجح في الفصل السابق (نفس المترجم)
-                let preferredKeyIdx = 0;
-                if (stickySuccessRoute && stickySuccessRoute.providerIndex === providerIndex && stickySuccessRoute.key) {
-                    const ki = keys.indexOf(stickySuccessRoute.key);
-                    preferredKeyIdx = ki >= 0 ? ki : 0;
-                }
-                const orderedKeyIndexes = [...Array(keys.length).keys()].slice(preferredKeyIdx).concat([...Array(keys.length).keys()].slice(0, preferredKeyIdx));
-
-                for (const keyIdx of orderedKeyIndexes) {
-                    const ok = await attemptExtractWithToken(provider, modelToUse, keys[keyIdx], keyIdx, keys.length);
-                    if (ok) {
-                        stickySuccessRoute = { providerIndex, key: keys[keyIdx] };
-                        break outer;
-                    }
-                    if (termsBox.value) break outer;
-                }
-
-                // 🔥🔥🔥 Qwen: فشلت كل التوكنات → إنشاء حساب جديد فوراً ومتابعة على Qwen فقط 🔥🔥🔥
-                if (!termsBox.value && isQwen) {
-                    const AUTO_ROUNDS = 2;
-                    for (let round = 1; round <= AUTO_ROUNDS && !termsBox.value; round++) {
-                        await pushLog(jobId, `🤖 مزوّد Qwen: فشلت جميع التوكنات — إنشاء حساب Qwen جديد كلياً (جولة ${round}/${AUTO_ROUNDS}) ومتابعة الاستخراج على Qwen فقط`, 'info');
-                        let account;
-                        try {
-                            const ensured = await qwenAutoAccount.ensureQwenAccount(provider.providerId, { forceNew: true });
-                            account = ensured.account;
-                        } catch (accErr) {
-                            await pushLog(jobId, `❌ تعذر إنشاء حساب Qwen تلقائياً الآن: ${accErr.message} — لن ننتقل لمزوّد آخر، سيُعاد الاستخراج على Qwen عند الاستئناف`, 'warning');
-                            break;
-                        }
-                        provider.qwenTokens = Array.isArray(provider.qwenTokens) ? provider.qwenTokens : [];
-                        if (!provider.qwenTokens.includes(account.token)) provider.qwenTokens.push(account.token);
-                        try { await qwenAutoAccount.persistProviderToken(provider.providerId, account.token); } catch (_) {}
-                        keys.push(account.token);
-                        await pushLog(jobId, `✅ حساب Qwen جديد كلياً جاهز (${account.email}) — إعادة استخراج الفصل ${chapterNum} بالتوكن الجديد`, 'success');
-
-                        const autoKeyIdx = keys.length - 1;
-                        for (let tokenAttempt = 1; tokenAttempt <= 2 && !termsBox.value; tokenAttempt++) {
-                            const ok = await attemptExtractWithToken(provider, modelToUse, account.token, autoKeyIdx, keys.length);
-                            if (ok) {
-                                stickySuccessRoute = { providerIndex, key: account.token };
-                                break outer;
+                            const autoKeyIdx = keys.length - 1;
+                            const autoTokenAttempts = 2;
+                            for (let tokenAttempt = 1; tokenAttempt <= autoTokenAttempts && !extractionSuccess; tokenAttempt++) {
+                                await attemptExtractWithToken(provider, modelForExtraction, account.token, autoKeyIdx, keys.length, tokenAttempt, autoTokenAttempts, attempt);
                             }
+                            if (!extractionSuccess && round < AUTO_ROUNDS) await delay(3000);
                         }
+                    }
+
+                    if (!extractionSuccess) {
+                        await pushLog(jobId, `🚫 جميع مفاتيح ${providerName} فشلت أو لم تجتز التحقق`, 'warning');
+                        // 🔥 Qwen فقط: لا انتقال إلى مزوّد آخر — الدورة الخارجية ستعيد المحاولة
+                        // على نفس الفصل (مع إنشاء حسابات Qwen جديدة عند الحاجة) حتى ينجح الاستخراج.
+                        if (isQwen) break;
                     }
                 }
 
-                if (!termsBox.value) {
-                    await pushLog(jobId, `🚫 جميع مفاتيح ${providerName} فشلت`, 'warning');
-                    // 🔥 Qwen فقط: لا انتقال إلى مزوّد آخر — الفصل يبقى معلقاً ويُعاد عند الاستئناف
-                    if (isQwen) break;
+                if (!extractionSuccess) {
+                    stickySuccessRoute = null;
+                    await pushLog(jobId, `⏳ لم ينجح استخراج الفصل ${chapterNum} بعد تجربة كل المزودين/التوكنات. سيتم الانتظار 30 دقيقة وإعادة المحاولة على نفس الفصل.`, 'warning');
+                    await delay(RETRY_DELAY_MS);
                 }
             }
 
-            extractedTerms = termsBox.value;
-
-            if (extractedTerms === null) {
-                // لا نُفشل المهمة كلها — يبقى الفصل في قائمة الانتظار ويُعاد عند الاستئناف
-                await pushLog(jobId, `❌ تعذر استخراج مصطلحات الفصل ${chapterNum} عبر كل المزوّدات (${lastErr?.message || 'خطأ غير معروف'}) — سيُعاد عند الاستئناف`, 'error');
-                break;
-            }
+            if (!extractionSuccess) break;
+            // ========== End multi-provider extraction loop (مطابقة للمترجم) ==========
 
             // 3) حفظ المصطلحات في المسرد
             if (extractedTerms.length === 0) {

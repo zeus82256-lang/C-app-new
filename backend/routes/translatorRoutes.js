@@ -1899,6 +1899,8 @@ module.exports._ai = {
     removeDeepSeekFinishedMarker,
     resetConversationContextPurposeForScope,
     getTokenConversationScope,
+    isTranslationOnlyModel,
+    findLLMModel,
     DEEPSEEK_CHAPTERS_PER_CONVERSATION,
     DEEPSEEK_MAX_ATTEMPTS_PER_TOKEN,
 };
