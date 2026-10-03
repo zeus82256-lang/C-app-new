@@ -138,6 +138,9 @@ require('./routes/adminRoutes')(app, verifyToken, verifyAdmin, upload);
 // 🔥 تحميل مسارات المترجم الذكي
 require('./routes/translatorRoutes')(app, verifyToken, verifyAdmin);
 
+// 🔍 تحميل مسارات المراجع الذكي (مراجعة جودة الفصول بالذكاء الاصطناعي)
+require('./routes/reviewRoutes')(app, verifyToken, verifyAdmin);
+
 // 🔥 تحميل مسارات مولد العناوين
 require('./routes/titleGenRoutes')(app, verifyToken, verifyAdmin);
 

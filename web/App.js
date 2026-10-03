@@ -55,6 +55,11 @@ import ChapterTitleFixerSelectionScreen from './src/screens/ChapterTitleFixerSel
 import TranslatorHubScreen from './src/screens/TranslatorHubScreen';
 import EnglishNovelsSelectionScreen from './src/screens/EnglishNovelsSelectionScreen';
 import TranslationJobDetailScreen from './src/screens/TranslationJobDetailScreen';
+// 🔍 المراجع الذكي — مراجعة جودة الفصول بالذكاء الاصطناعي
+import ReviewHubScreen from './src/screens/ReviewHubScreen';
+import ReviewNovelsSelectionScreen from './src/screens/ReviewNovelsSelectionScreen';
+import ReviewJobDetailScreen from './src/screens/ReviewJobDetailScreen';
+import ReviewFindingsScreen from './src/screens/ReviewFindingsScreen';
 import GlossaryManagerScreen from './src/screens/GlossaryManagerScreen';
 import TranslatorSettingsScreen from './src/screens/TranslatorSettingsScreen';
 import MetadataTranslationHubScreen from './src/screens/MetadataTranslationHubScreen';
@@ -339,6 +344,12 @@ function NavigationRoot() {
                 <Stack.Screen name="NovelMetadataTranslation" component={NovelMetadataTranslationScreen} options={{ animation: 'slide_from_bottom' }} />
                 <Stack.Screen name="EnglishNovelsSelection" component={EnglishNovelsSelectionScreen} options={{ animation: 'slide_from_bottom' }} />
                 <Stack.Screen name="TranslationJobDetail" component={TranslationJobDetailScreen} options={{ animation: 'fade_from_bottom' }} />
+
+                {/* 🔍 Reviewer Screens — نفس واجهة الترجمة سوى أنه مراجع */}
+                <Stack.Screen name="ReviewHub" component={ReviewHubScreen} options={{ animation: 'slide_from_right' }} />
+                <Stack.Screen name="ReviewNovelsSelection" component={ReviewNovelsSelectionScreen} options={{ animation: 'slide_from_bottom' }} />
+                <Stack.Screen name="ReviewJobDetail" component={ReviewJobDetailScreen} options={{ animation: 'fade_from_bottom' }} />
+                <Stack.Screen name="ReviewFindings" component={ReviewFindingsScreen} options={{ animation: 'slide_from_bottom' }} />
                 <Stack.Screen name="GlossaryManager" component={GlossaryManagerScreen} options={{ animation: 'slide_from_right' }} />
                 <Stack.Screen name="TranslatorSettings" component={TranslatorSettingsScreen} options={{ animation: 'slide_from_right' }} />
                 

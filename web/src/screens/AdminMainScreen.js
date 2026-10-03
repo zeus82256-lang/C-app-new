@@ -330,7 +330,14 @@ export default function AdminMainScreen({ navigation }) {
                     color="#06b6d4" 
                     onPress={() => navigation.navigate('TranslatorHub')}
                 />
-                <DashboardButton 
+                <DashboardButton
+                    title="المراجع الذكي (AI)"
+                    subtitle="فحص جودة الفصول: إنجليزي/قصير/مكرر/مخربط"
+                    icon="shield-checkmark"
+                    color="#f59e0b"
+                    onPress={() => navigation.navigate('ReviewHub')}
+                />
+                <DashboardButton
                     title="مولد العناوين AI" 
                     subtitle="توليد عناوين للفصول تلقائياً"
                     icon="text" 

@@ -72,6 +72,7 @@ export default function AutoImportScreen({ navigation }) {
 
   // Add/Scrape State
   const [url, setUrl] = useState('');
+  const [chaptersInput, setChaptersInput] = useState(''); // 🎯 نطاق انتقائي اختياري: "10-20" / "12,50" / "10-!"
   const [isScraping, setIsScraping] = useState(false);
   const [showConsole, setShowConsole] = useState(false);
   const [updatingAll, setUpdatingAll] = useState(false);
@@ -267,7 +268,9 @@ export default function AutoImportScreen({ navigation }) {
           await api.post('/api/scraper/init', { url: urlToUse, userEmail: userInfo.email });
           const scraperResponse = await axios.post(SCRAPER_URL, {
               url: urlToUse,
-              adminEmail: userInfo.email
+              adminEmail: userInfo.email,
+              // 🎯 سحب انتقائي: فصول محددة بدل الرواية كاملة (توفير استهلاك المواقع المحدودة مثل TomatoMTL)
+              ...(chaptersInput.trim() ? { chapters: chaptersInput.trim() } : {}),
           }, {
               headers: { 'Authorization': API_SECRET, 'Content-Type': 'application/json' },
               timeout: 60000 
@@ -398,6 +401,22 @@ export default function AutoImportScreen({ navigation }) {
                   <TouchableOpacity style={[styles.goBtn, (isScraping || !url) && styles.disabledBtn]} onPress={() => handleImport(null)} disabled={isScraping || !url}>
                       {isScraping ? <ActivityIndicator color="#fff" size="small" /> : <Ionicons name="add" size={24} color="#fff" />}
                   </TouchableOpacity>
+              </View>
+              {/* 🎯 نطاق الفصول الاختياري — يُترك فارغاً لسحب الرواية كاملة */}
+              <View style={{ marginTop: 8 }}>
+                  <TextInput
+                      style={[styles.input, { textAlign: 'center', paddingVertical: 8, fontSize: 12 }]}
+                      placeholder="نطاق الفصول (اختياري): 10-20 أو 12,50 أو 10-!"
+                      placeholderTextColor="#555"
+                      value={chaptersInput}
+                      onChangeText={setChaptersInput}
+                      autoCapitalize="none"
+                  />
+                  {chaptersInput.trim() !== '' && (
+                      <Text style={{ color: '#f59e0b', fontSize: 10, textAlign: 'center', marginTop: 4 }}>
+                          🎯 سيُسحب فقط: {chaptersInput.trim()} — الفصل الموجود مسبقاً لن يُعاد سحبه
+                      </Text>
+                  )}
               </View>
           </GlassContainer>
 

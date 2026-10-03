@@ -1876,3 +1876,15 @@ module.exports = function(app, verifyToken, verifyAdmin) {
         }
     });
 };
+
+// 🔥 تصدير داخلي: أدوات مزوّدات الذكاء الاصطناعي لإعادة استخدامها في نظام المراجعة
+// (reviewRoutes) — نفس المزوّدات ونفس المفاتيح المضبوطة في إعدادات المترجم.
+module.exports._ai = {
+    callTranslationProvider,
+    getGlobalSettings,
+    getProviderAuthKeys,
+    isDeepSeekProvider,
+    isQwenProvider,
+    isGeminiWebProvider,
+    GUEST_TOKEN_SENTINEL,
+};
